@@ -52,7 +52,7 @@ impl Deposit {
                 amount.expect("should not happen"),
                 fee.expect("should not happen"),
             ) {
-                tracing::error!("{err}");
+                tracing::error!("Failed to create deposit transaction: {err:#}");
             } else {
                 *self = Self::default();
             }

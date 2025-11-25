@@ -204,12 +204,24 @@ fn disconnect_tip_(
                 Ok(Some(ancestor) != start_block_hash.as_ref())
             })
             .filter_map(|ancestor| {
-                let block_info =
-                    archive.get_main_block_info(rwtxn, &ancestor)?;
-                if block_info.events.is_empty() {
-                    Ok(None)
-                } else {
-                    Ok(Some((ancestor, block_info)))
+                match archive.try_get_main_block_info(rwtxn, &ancestor) {
+                    Ok(Some(block_info)) => {
+                        if block_info.events.is_empty() {
+                            Ok(None)
+                        } else {
+                            Ok(Some((ancestor, block_info)))
+                        }
+                    }
+                    Ok(None) => {
+                        // Mainchain block info is missing - this can happen on startup
+                        // if mainchain data hasn't been fetched yet. Skip this block.
+                        tracing::warn!(
+                            %ancestor,
+                            "Mainchain block info missing during disconnect, skipping"
+                        );
+                        Ok(None)
+                    }
+                    Err(e) => Err(e),
                 }
             })
             .collect()?;
@@ -359,10 +371,21 @@ fn reorg_to_tip(
             .take_while(|ancestor| {
                 Ok(Some(ancestor) != common_ancestor_prev_main_hash.as_ref())
             })
-            .map(|ancestor| {
-                let block_info =
-                    archive.get_main_block_info(&rwtxn, &ancestor)?;
-                Ok((ancestor, block_info))
+            .filter_map(|ancestor| {
+                match archive.try_get_main_block_info(&rwtxn, &ancestor) {
+                    Ok(Some(block_info)) => Ok(Some((ancestor, block_info))),
+                    Ok(None) => {
+                        // Mainchain block info is missing - this can happen on startup
+                        // if mainchain data hasn't been fetched yet. Skip this block
+                        // and let the caller handle fetching it.
+                        tracing::warn!(
+                            %ancestor,
+                            "Mainchain block info missing, skipping from two-way peg data batch"
+                        );
+                        Ok(None)
+                    }
+                    Err(e) => Err(e),
+                }
             })
             .collect()?
     };

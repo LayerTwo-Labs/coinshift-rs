@@ -216,8 +216,19 @@ impl App {
         .unwrap()
         .concurrency_limit(256)
         .connect_lazy();
+        // Add a timeout to the connection check so the GUI can start even if mainchain isn't synced
+        const CONNECTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
         let (cusf_mainchain, cusf_mainchain_wallet) = if runtime
-            .block_on(Self::check_proto_support(transport.clone()))
+            .block_on(tokio::time::timeout(
+                CONNECTION_TIMEOUT,
+                Self::check_proto_support(transport.clone()),
+            ))
+            .map_err(|_| Error::VerifyMainchainServices {
+                url: Box::new(config.mainchain_grpc_url.clone()),
+                source: Box::new(tonic::Status::deadline_exceeded(
+                    "Connection check timed out after 5 seconds",
+                )),
+            })?
             .map_err(|err| Error::VerifyMainchainServices {
                 url: Box::new(config.mainchain_grpc_url.clone()),
                 source: Box::new(err),

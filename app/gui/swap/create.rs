@@ -11,7 +11,6 @@ pub struct CreateSwap {
     l2_recipient: Option<String>,
     l2_amount: String,
     required_confirmations: String,
-    fee: String,
     is_open_swap: bool,
 }
 
@@ -24,7 +23,6 @@ impl Default for CreateSwap {
             l2_recipient: None,
             l2_amount: String::new(),
             required_confirmations: String::new(),
-            fee: String::new(),
             is_open_swap: false,
         }
     }
@@ -104,12 +102,6 @@ impl CreateSwap {
             ));
         });
 
-        // Fee
-        ui.horizontal(|ui| {
-            ui.label("Fee (BTC):");
-            ui.text_edit_singleline(&mut self.fee);
-        });
-
         ui.separator();
 
         // Parse inputs
@@ -119,10 +111,6 @@ impl CreateSwap {
         );
         let l2_amount = bitcoin::Amount::from_str_in(
             &self.l2_amount,
-            bitcoin::Denomination::Bitcoin,
-        );
-        let fee = bitcoin::Amount::from_str_in(
-            &self.fee,
             bitcoin::Denomination::Bitcoin,
         );
         let required_confirmations = self
@@ -143,7 +131,6 @@ impl CreateSwap {
             && !self.l1_recipient_address.is_empty()
             && l1_amount.is_ok()
             && l2_amount.is_ok()
-            && fee.is_ok()
             && (!self.is_open_swap && l2_recipient.is_some() || self.is_open_swap);
 
         if ui
@@ -167,7 +154,7 @@ impl CreateSwap {
                 l2_recipient,
                 l2_amount.expect("should not happen"),
                 required_confirmations,
-                fee.expect("should not happen"),
+                bitcoin::Amount::ZERO,
             ) {
                 Ok(result) => result,
                 Err(err) => {
