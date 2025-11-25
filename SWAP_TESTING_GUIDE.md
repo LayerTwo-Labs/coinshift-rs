@@ -40,19 +40,37 @@ cargo build
 
 This is the simplest way to test swap functionality manually.
 
-#### Step 1: Start a Mainchain Node (Bitcoin Core in Regtest)
+#### Step 1: Start Mainchain Node (Bitcoin Regtest for Sidechain)
 
 ```bash
-# Start Bitcoin Core in regtest mode
+# Start Bitcoin Core in regtest mode (for sidechain mainchain)
 bitcoind -regtest -daemon
 
 # Create a wallet and generate some blocks
 bitcoin-cli -regtest createwallet "testwallet"
 bitcoin-cli -regtest -generate 101
 
-# Get a test address
+# Get a test address for deposits
 bitcoin-cli -regtest getnewaddress
 ```
+
+#### Step 1b: Start Swap Target Chain Node (Bitcoin Signet)
+
+```bash
+# Start Bitcoin Core in signet mode (for swap target chain)
+bitcoind -signet -daemon
+
+# Create a wallet and generate some blocks
+bitcoin-cli -signet createwallet "signetwallet"
+bitcoin-cli -signet -generate 101
+
+# Get a test address for swaps
+bitcoin-cli -signet getnewaddress
+```
+
+**Important**: You need BOTH networks running:
+- **Regtest**: For sidechain mainchain (deposits/withdrawals)
+- **Signet**: For swap target chain (coinshift transactions)
 
 #### Step 2: Start the Sidechain Node
 
@@ -61,6 +79,7 @@ bitcoin-cli -regtest getnewaddress
 mkdir -p ~/thunder-test-data
 
 # Start the Thunder node (headless mode)
+# Note: mainchain-grpc-url points to Regtest (sidechain's mainchain)
 cargo run --bin thunder_app -- \
     --headless \
     --datadir ~/thunder-test-data \
@@ -74,6 +93,8 @@ cargo run --bin thunder_app -- \
     --mainchain-grpc-url http://127.0.0.1:50051 \
     --network regtest
 ```
+
+**Note**: The sidechain connects to Regtest as its mainchain, but swaps can target Signet (or other chains).
 
 #### Step 3: Initialize Wallet
 
@@ -212,23 +233,35 @@ curl -X POST http://127.0.0.1:8332 \
 # Should show state: "Pending"
 ```
 
-#### Step 6: Bob Sends L1 Transaction
+#### Step 6: Bob Sends Signet Transaction
+
+**Important**: Bob sends on Signet (swap target chain), NOT Regtest!
 
 ```bash
-# Bob sends Bitcoin to Alice's L1 address
-BITCOIN_TXID=$(bitcoin-cli -regtest sendtoaddress $ALICE_L1_ADDR 0.001)
+# Bob sends Signet Bitcoin to Alice's Signet address
+# This is on Signet network, not Regtest!
+SIGNET_TXID=$(bitcoin-cli -signet sendtoaddress $ALICE_SIGNET_ADDR 0.001)
 
-# Mine a block to confirm
-bitcoin-cli -regtest -generate 1
+# Mine a block on Signet to confirm
+bitcoin-cli -signet -generate 1
 
-# Get transaction details
-bitcoin-cli -regtest gettransaction $BITCOIN_TXID
+# Get transaction details from Signet
+bitcoin-cli -signet gettransaction $SIGNET_TXID
+
+# Verify the transaction
+bitcoin-cli -signet getrawtransaction $SIGNET_TXID true
 ```
 
-#### Step 7: Update Swap with L1 Transaction
+**Key Point**: The transaction is on Signet, but the sidechain monitors Signet for this transaction when processing 2WPD.
+
+#### Step 7: Update Swap with Signet Transaction
+
+**Important**: Update with Signet transaction ID, not Regtest!
 
 ```bash
-# Update swap with L1 transaction ID
+# Update swap with Signet transaction ID
+# The system should automatically detect this when processing 2WPD,
+# but you can also manually update it
 curl -X POST http://127.0.0.1:8332 \
   -H "Content-Type: application/json" \
   -d '{
@@ -237,13 +270,19 @@ curl -X POST http://127.0.0.1:8332 \
     "method": "update_swap_l1_txid",
     "params": {
       "swap_id": "'$SWAP_ID'",
-      "l1_txid_hex": "'$BITCOIN_TXID'",
+      "l1_txid_hex": "'$SIGNET_TXID'",
       "confirmations": 1
     }
   }'
 
 # Check status again - should show "ReadyToClaim" or "WaitingConfirmations"
+# Note: Confirmations are tracked on Signet, not Regtest!
 ```
+
+**Automatic Detection**: When the sidechain processes 2WPD (from Regtest tip changes), it should automatically:
+1. Query Signet for transactions matching the swap
+2. Update swap state based on Signet confirmations
+3. Transition swap to ReadyToClaim when Signet confirmations are sufficient
 
 #### Step 8: Bob Claims the Swap
 

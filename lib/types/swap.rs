@@ -78,7 +78,9 @@ pub enum SwapDirection {
     L2ToL1,
 }
 
-/// Parent chain type
+/// Parent chain type for swaps
+/// Note: This can be different from the sidechain's mainchain network.
+/// For example, sidechain may be on Regtest, but swaps can target Signet, Mainnet, etc.
 #[derive(
     BorshSerialize,
     BorshDeserialize,
@@ -92,9 +94,16 @@ pub enum SwapDirection {
     Serialize,
 )]
 pub enum ParentChainType {
+    /// Bitcoin Mainnet
     BTC,
+    /// Bitcoin Cash
     BCH,
+    /// Litecoin
     LTC,
+    /// Bitcoin Signet (for cross-chain swaps)
+    Signet,
+    /// Bitcoin Regtest (for testing)
+    Regtest,
 }
 
 impl ParentChainType {
@@ -102,7 +111,20 @@ impl ParentChainType {
     pub fn default_confirmations(&self) -> u32 {
         match self {
             Self::BTC => 6,
-            Self::BCH | Self::LTC => 3,
+            Self::BCH | Self::LTC | Self::Signet | Self::Regtest => 3,
+        }
+    }
+
+    /// Get the Bitcoin network enum for this chain type
+    pub fn to_bitcoin_network(&self) -> bitcoin::Network {
+        match self {
+            Self::BTC => bitcoin::Network::Bitcoin,
+            Self::Signet => bitcoin::Network::Signet,
+            Self::Regtest => bitcoin::Network::Regtest,
+            Self::BCH | Self::LTC => {
+                // BCH and LTC are separate networks, would need separate handling
+                bitcoin::Network::Bitcoin // Placeholder
+            }
         }
     }
 }

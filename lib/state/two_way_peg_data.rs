@@ -415,7 +415,16 @@ fn connect_event(
 
 /// Process coinshift transactions - update swap states based on L1 transactions
 /// This should be called when connecting 2WPD to check for L1 transactions
-/// that match pending swaps
+/// that match pending swaps.
+///
+/// IMPORTANT: This queries the SWAP TARGET CHAIN (e.g., Signet), NOT the sidechain's
+/// mainchain (e.g., Regtest). The swap target chain is specified in swap.parent_chain.
+///
+/// Flow:
+/// 1. Get all pending swaps
+/// 2. For each swap, query swap.parent_chain (e.g., Signet) for transactions
+/// 3. Match transactions by: l1_recipient_address and l1_amount
+/// 4. Update swap state based on found transactions and confirmations
 fn process_coinshift_transactions(
     state: &State,
     rwtxn: &mut RwTxn,
@@ -443,10 +452,23 @@ fn process_coinshift_transactions(
         }
 
         // For L2 → L1 swaps, we need to check if the L1 transaction exists
-        // This would typically involve querying the mainchain client
-        // For now, we'll skip actual L1 transaction checking and rely on
-        // external updates via update_swap_l1_txid
-        // TODO: Integrate with mainchain client to query L1 transactions
+        // on the SWAP TARGET CHAIN (swap.parent_chain), NOT the sidechain's mainchain.
+        //
+        // Example:
+        // - Sidechain mainchain: Regtest (for deposits/withdrawals)
+        // - Swap target: Signet (for coinshift transactions)
+        // - We query Signet for transactions, not Regtest!
+        //
+        // TODO: Integrate with swap target chain client to query transactions
+        // This requires:
+        // 1. A client for each swap target chain (Signet, BTC, BCH, LTC)
+        // 2. Query transactions to swap.l1_recipient_address
+        // 3. Match by address and amount (swap.l1_amount)
+        // 4. Get transaction confirmations
+        // 5. Update swap state accordingly
+        //
+        // For now, we rely on external updates via update_swap_l1_txid
+        // The actual implementation should query the appropriate chain's RPC
     }
 
     Ok(())
