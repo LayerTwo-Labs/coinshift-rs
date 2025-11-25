@@ -275,7 +275,7 @@ pub fn connect_prevalidated(
                     *parent_chain,
                     l1_txid,
                     Some(*required_confirmations),
-                    *l2_recipient,
+                    *l2_recipient,  // Now optional
                     bitcoin::Amount::from_sat(*l2_amount),
                     l1_recipient_address.clone(),
                     l1_amount.map(bitcoin::Amount::from_sat),
@@ -306,7 +306,7 @@ pub fn connect_prevalidated(
                 // Save swap
                 state.save_swap(rwtxn, &swap)?;
             }
-            TxData::SwapClaim { swap_id, .. } => {
+            TxData::SwapClaim { swap_id, l2_claimer_address, .. } => {
                 let swap_id = SwapId(*swap_id);
 
                 // Get swap
@@ -320,6 +320,13 @@ pub fn connect_prevalidated(
                         "Swap {} is not ready to claim",
                         swap_id
                     )));
+                }
+
+                // For open swaps, verify claimer address is provided
+                if swap.l2_recipient.is_none() && l2_claimer_address.is_none() {
+                    return Err(Error::InvalidTransaction(
+                        "Open swap claim requires l2_claimer_address".to_string(),
+                    ));
                 }
 
                 // Unlock outputs

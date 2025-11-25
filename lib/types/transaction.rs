@@ -522,7 +522,8 @@ pub enum TxData {
         parent_chain: ParentChainType,
         l1_txid_bytes: Vec<u8>,
         required_confirmations: u32,
-        l2_recipient: Address,
+        /// L2 recipient address. None means open swap (anyone can fill)
+        l2_recipient: Option<Address>,
         l2_amount: u64,
         l1_recipient_address: Option<String>,
         l1_amount: Option<u64>,
@@ -530,6 +531,8 @@ pub enum TxData {
     /// Swap claim transaction
     SwapClaim {
         swap_id: [u8; 32],
+        /// L2 address of the claimer (required for open swaps)
+        l2_claimer_address: Option<Address>,
         proof_data: Option<Vec<u8>>,
     },
 }

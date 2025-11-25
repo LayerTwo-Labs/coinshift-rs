@@ -27,17 +27,24 @@ pub struct SwapId(pub [u8; 32]);
 
 impl SwapId {
     /// Generate swap ID for L2 → L1 swaps
+    /// If l2_recipient_address is None, creates an open swap ID
     pub fn from_l2_to_l1(
         l1_recipient_address: &str,
         l1_amount: bitcoin::Amount,
         l2_sender_address: &Address,
-        l2_recipient_address: &Address,
+        l2_recipient_address: Option<&Address>,
     ) -> Self {
         let mut id_data = Vec::new();
         id_data.extend_from_slice(l1_recipient_address.as_bytes());
         id_data.extend_from_slice(&l1_amount.to_sat().to_le_bytes());
         id_data.extend_from_slice(&l2_sender_address.0);
-        id_data.extend_from_slice(&l2_recipient_address.0);
+        // Only include recipient if specified (for backward compatibility)
+        if let Some(recipient) = l2_recipient_address {
+            id_data.extend_from_slice(&recipient.0);
+        } else {
+            // For open swaps, use a fixed marker
+            id_data.extend_from_slice(b"OPEN_SWAP");
+        }
         let hash = blake3::hash(&id_data);
         Self(*hash.as_bytes())
     }
@@ -217,10 +224,14 @@ pub struct Swap {
     pub l1_txid: SwapTxId,
     pub required_confirmations: u32,
     pub state: SwapState,
-    pub l2_recipient: Address,
+    /// L2 recipient address. None means open swap (anyone can fill)
+    pub l2_recipient: Option<Address>,
     pub l2_amount: bitcoin::Amount,
     pub l1_recipient_address: Option<String>,
     pub l1_amount: Option<bitcoin::Amount>,
+    /// Address of the person who sent the L1 transaction (the claimer)
+    /// Set when L1 transaction is detected
+    pub l1_claimer_address: Option<String>,
     pub created_at_height: u32,
     pub expires_at_height: Option<u32>,
 }
@@ -232,7 +243,7 @@ impl Swap {
         parent_chain: ParentChainType,
         l1_txid: SwapTxId,
         required_confirmations: Option<u32>,
-        l2_recipient: Address,
+        l2_recipient: Option<Address>,
         l2_amount: bitcoin::Amount,
         l1_recipient_address: Option<String>,
         l1_amount: Option<bitcoin::Amount>,
@@ -252,6 +263,7 @@ impl Swap {
             l2_amount,
             l1_recipient_address,
             l1_amount,
+            l1_claimer_address: None,
             created_at_height,
             expires_at_height,
         }
@@ -263,6 +275,16 @@ impl Swap {
 
     pub fn update_l1_txid(&mut self, l1_txid: SwapTxId) {
         self.l1_txid = l1_txid;
+    }
+
+    /// Update swap with L1 transaction and claimer address
+    pub fn update_l1_transaction(
+        &mut self,
+        l1_txid: SwapTxId,
+        l1_claimer_address: String,
+    ) {
+        self.l1_txid = l1_txid;
+        self.l1_claimer_address = Some(l1_claimer_address);
     }
 }
 

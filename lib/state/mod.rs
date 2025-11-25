@@ -549,17 +549,19 @@ impl State {
             .put(rwtxn, &l1_txid_key, &swap.id)
             .map_err(DbError::from)?;
 
-        // Update swaps_by_recipient index
-        let mut recipient_swaps = self
-            .swaps_by_recipient
-            .try_get(rwtxn, &swap.l2_recipient)
-            .map_err(DbError::from)?
-            .unwrap_or_default();
-        if !recipient_swaps.contains(&swap.id) {
-            recipient_swaps.push(swap.id);
-            self.swaps_by_recipient
-                .put(rwtxn, &swap.l2_recipient, &recipient_swaps)
-                .map_err(DbError::from)?;
+        // Update swaps_by_recipient index (only for pre-specified swaps)
+        if let Some(recipient) = swap.l2_recipient {
+            let mut recipient_swaps = self
+                .swaps_by_recipient
+                .try_get(rwtxn, &recipient)
+                .map_err(DbError::from)?
+                .unwrap_or_default();
+            if !recipient_swaps.contains(&swap.id) {
+                recipient_swaps.push(swap.id);
+                self.swaps_by_recipient
+                    .put(rwtxn, &recipient, &recipient_swaps)
+                    .map_err(DbError::from)?;
+            }
         }
 
         Ok(())
@@ -585,21 +587,23 @@ impl State {
             .delete(rwtxn, &l1_txid_key)
             .map_err(DbError::from)?;
 
-        // Update swaps_by_recipient index
-        if let Some(mut recipient_swaps) = self
-            .swaps_by_recipient
-            .try_get(rwtxn, &swap.l2_recipient)
-            .map_err(DbError::from)?
-        {
-            recipient_swaps.retain(|id| *id != swap.id);
-            if recipient_swaps.is_empty() {
-                self.swaps_by_recipient
-                    .delete(rwtxn, &swap.l2_recipient)
-                    .map_err(DbError::from)?;
-            } else {
-                self.swaps_by_recipient
-                    .put(rwtxn, &swap.l2_recipient, &recipient_swaps)
-                    .map_err(DbError::from)?;
+        // Update swaps_by_recipient index (only for pre-specified swaps)
+        if let Some(recipient) = swap.l2_recipient {
+            if let Some(mut recipient_swaps) = self
+                .swaps_by_recipient
+                .try_get(rwtxn, &recipient)
+                .map_err(DbError::from)?
+            {
+                recipient_swaps.retain(|id| *id != swap.id);
+                if recipient_swaps.is_empty() {
+                    self.swaps_by_recipient
+                        .delete(rwtxn, &recipient)
+                        .map_err(DbError::from)?;
+                } else {
+                    self.swaps_by_recipient
+                        .put(rwtxn, &recipient, &recipient_swaps)
+                        .map_err(DbError::from)?;
+                }
             }
         }
 
@@ -701,19 +705,25 @@ impl State {
 
     /// Update swap L1 transaction ID and state
     /// Called when a coinshift transaction is detected on L1
+    /// For open swaps, l1_claimer_address should be the address of the person who sent the L1 transaction
     pub fn update_swap_l1_txid(
         &self,
         rwtxn: &mut RwTxn,
         swap_id: &SwapId,
         l1_txid: SwapTxId,
         confirmations: u32,
+        l1_claimer_address: Option<String>,  // For open swaps
     ) -> Result<(), Error> {
         let mut swap = self
             .get_swap(rwtxn, swap_id)?
             .ok_or_else(|| Error::SwapNotFound { swap_id: *swap_id })?;
 
-        // Update L1 txid
-        swap.update_l1_txid(l1_txid.clone());
+        // Update L1 txid and claimer address (for open swaps)
+        if let Some(claimer_addr) = l1_claimer_address {
+            swap.update_l1_transaction(l1_txid.clone(), claimer_addr);
+        } else {
+            swap.update_l1_txid(l1_txid.clone());
+        }
 
         // Update state based on confirmations
         if confirmations >= swap.required_confirmations {

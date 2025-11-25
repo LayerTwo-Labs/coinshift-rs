@@ -286,13 +286,14 @@ impl Wallet {
     }
 
     /// Create a SwapCreate transaction for L2 → L1 swaps
+    /// If l2_recipient is None, creates an open swap (anyone can fill it)
     pub fn create_swap_create_tx(
         &self,
         accumulator: &Accumulator,
         parent_chain: ParentChainType,
         l1_recipient_address: String,
         l1_amount: bitcoin::Amount,
-        l2_recipient: Address,
+        l2_recipient: Option<Address>,  // Optional - None = open swap
         l2_amount: bitcoin::Amount,
         required_confirmations: Option<u32>,
         fee: bitcoin::Amount,
@@ -313,7 +314,7 @@ impl Wallet {
             &l1_recipient_address,
             l1_amount,
             &l2_sender_address,
-            &l2_recipient,
+            l2_recipient.as_ref(),  // Optional
         );
 
         // 2. Select UTXOs to spend (must spend at least l2_amount + fee)
@@ -336,9 +337,16 @@ impl Wallet {
         let proof = accumulator.prove(&input_utxo_hashes)?;
 
         // 4. Create outputs with SwapPending content
+        // For open swaps, we still need an output address - use a placeholder or sender's address
+        let output_address = l2_recipient.unwrap_or_else(|| {
+            // For open swaps, use sender's address as placeholder
+            // The actual recipient will be determined when claiming
+            l2_sender_address
+        });
+        
         let outputs = vec![
             Output {
-                address: l2_recipient,
+                address: output_address,
                 content: OutputContent::SwapPending {
                     value: l2_amount,
                     swap_id: swap_id.0,
@@ -362,7 +370,7 @@ impl Wallet {
                 parent_chain,
                 l1_txid_bytes: vec![0u8; 32], // Placeholder for L2 → L1
                 required_confirmations,
-                l2_recipient,
+                l2_recipient,  // Optional
                 l2_amount: l2_amount.to_sat(),
                 l1_recipient_address: Some(l1_recipient_address),
                 l1_amount: Some(l1_amount.to_sat()),
@@ -373,13 +381,15 @@ impl Wallet {
     }
 
     /// Create a SwapClaim transaction
-    /// The recipient address should be swap.l2_recipient from the swap being claimed
+    /// For pre-specified swaps: recipient should be swap.l2_recipient
+    /// For open swaps: recipient should be the claimer's L2 address (l2_claimer_address)
     pub fn create_swap_claim_tx(
         &self,
         accumulator: &Accumulator,
         swap_id: SwapId,
         recipient: Address,
         locked_outputs: Vec<(OutPoint, Output)>,
+        l2_claimer_address: Option<Address>,  // Required for open swaps
     ) -> Result<Transaction, Error> {
         tracing::trace!(
             swap_id = %swap_id,
@@ -424,6 +434,7 @@ impl Wallet {
             outputs,
             data: TxData::SwapClaim {
                 swap_id: swap_id.0,
+                l2_claimer_address: l2_claimer_address,  // For open swaps
                 proof_data: None,
             },
         };

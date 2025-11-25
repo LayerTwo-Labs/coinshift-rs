@@ -296,7 +296,7 @@ impl RpcServer for RpcServerImpl {
         parent_chain: ParentChainType,
         l1_recipient_address: String,
         l1_amount_sats: u64,
-        l2_recipient: Address,
+        l2_recipient: Option<Address>,  // Optional - None = open swap
         l2_amount_sats: u64,
         required_confirmations: Option<u32>,
         fee_sats: u64,
@@ -311,7 +311,7 @@ impl RpcServer for RpcServerImpl {
                 parent_chain,
                 l1_recipient_address,
                 Amount::from_sat(l1_amount_sats),
-                l2_recipient,
+                l2_recipient,  // Optional
                 Amount::from_sat(l2_amount_sats),
                 required_confirmations,
                 Amount::from_sat(fee_sats),
@@ -338,10 +338,12 @@ impl RpcServer for RpcServerImpl {
             .env()
             .write_txn()
             .map_err(custom_err)?;
+        // TODO: Extract claimer address from L1 transaction
+        // For now, pass None (will be set when L1 transaction detection is implemented)
         self.app
             .node
             .state()
-            .update_swap_l1_txid(&mut rwtxn, &swap_id, l1_txid, confirmations)
+            .update_swap_l1_txid(&mut rwtxn, &swap_id, l1_txid, confirmations, None)
             .map_err(custom_err)?;
         rwtxn.commit().map_err(custom_err)?;
         Ok(())
@@ -421,12 +423,23 @@ impl RpcServer for RpcServerImpl {
             ));
         }
 
+        // Determine recipient: pre-specified swap uses swap.l2_recipient, open swap uses claimer address
+        let recipient = swap.l2_recipient
+            .or(l2_claimer_address)
+            .ok_or_else(|| custom_err_msg("Open swap requires l2_claimer_address"))?;
+
         let accumulator =
             self.app.node.get_tip_accumulator().map_err(custom_err)?;
         let tx = self
             .app
             .wallet
-            .create_swap_claim_tx(&accumulator, swap_id, swap.l2_recipient, locked_outputs)
+            .create_swap_claim_tx(
+                &accumulator,
+                swap_id,
+                recipient,
+                locked_outputs,
+                l2_claimer_address,  // Pass claimer address for open swaps
+            )
             .map_err(custom_err)?;
         let txid = tx.txid();
         self.app.sign_and_send(tx).map_err(custom_err)?;

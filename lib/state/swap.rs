@@ -50,7 +50,7 @@ pub fn validate_swap_create(
             l1_addr,
             bitcoin::Amount::from_sat(*l1_amt),
             &l2_sender_address,
-            l2_recipient,
+            l2_recipient.as_ref(),  // Now optional
         )
     } else {
         return Err(Error::InvalidTransaction(
@@ -174,16 +174,32 @@ pub fn validate_swap_claim(
         ));
     }
 
-    // 4. Verify at least one output goes to swap.l2_recipient
+    // 4. Verify output goes to correct recipient
+    let TxData::SwapClaim { l2_claimer_address, .. } = &transaction.data else {
+        unreachable!()
+    };
+
+    let expected_recipient = if let Some(recipient) = swap.l2_recipient {
+        // Pre-specified swap: must go to specified recipient
+        recipient
+    } else if let Some(claimer_addr) = l2_claimer_address {
+        // Open swap: must go to claimer's L2 address
+        *claimer_addr
+    } else {
+        return Err(Error::InvalidTransaction(
+            "Open swap claim requires l2_claimer_address".to_string(),
+        ));
+    };
+
     let recipient_receives = transaction
         .outputs
         .iter()
-        .any(|output| output.address == swap.l2_recipient);
+        .any(|output| output.address == expected_recipient);
 
     if !recipient_receives {
         return Err(Error::InvalidTransaction(format!(
             "SwapClaim must have at least one output to {}",
-            swap.l2_recipient
+            expected_recipient
         )));
     }
 
