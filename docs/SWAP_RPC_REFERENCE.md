@@ -195,7 +195,7 @@ If CLI commands are added:
 
 ```bash
 # Create swap
-thunder_app_cli create-swap \
+coinshift_app_cli create-swap \
   --parent-chain BTC \
   --l1-recipient bc1q... \
   --l1-amount 100000 \
@@ -204,12 +204,12 @@ thunder_app_cli create-swap \
   --fee 1000
 
 # Get swap status
-thunder_app_cli get-swap-status <swap_id>
+coinshift_app_cli get-swap-status <swap_id>
 
 # Claim swap
-thunder_app_cli claim-swap <swap_id>
+coinshift_app_cli claim-swap <swap_id>
 
 # List swaps
-thunder_app_cli list-swaps
+coinshift_app_cli list-swaps
 ```
 

@@ -4,7 +4,7 @@ use fallible_iterator::FallibleIterator as _;
 use futures::{StreamExt, TryFutureExt};
 use parking_lot::RwLock;
 use rustreexo::accumulator::proof::Proof;
-use thunder::{
+use coinshift::{
     miner::{self, Miner},
     node::{self, Node},
     types::{
@@ -28,13 +28,13 @@ use crate::cli::Config;
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("CUSF mainchain proto error")]
-    CusfMainchain(#[from] thunder::types::proto::Error),
+    CusfMainchain(#[from] coinshift::types::proto::Error),
     #[error("io error")]
     Io(#[from] std::io::Error),
     #[error("miner error")]
     Miner(#[from] miner::Error),
     #[error(transparent)]
-    ModifyMemForest(#[from] thunder::types::ModifyMemForestError),
+    ModifyMemForest(#[from] coinshift::types::ModifyMemForestError),
     #[error("node error")]
     Node(#[source] Box<node::Error>),
     #[error("No CUSF mainchain wallet client")]
@@ -269,7 +269,7 @@ impl App {
                 inputs: vec![],
                 proof: Proof::default(),
                 outputs: vec![],
-                data: thunder::types::TxData::Regular,
+                data: coinshift::types::TxData::Regular,
             })),
             runtime: Arc::new(runtime),
             local_pool,
@@ -417,7 +417,7 @@ impl App {
                 } else {
                     types::Accumulator::default()
                 };
-                let merkle_root = thunder::types::Body::modify_memforest(
+                let merkle_root = coinshift::types::Body::modify_memforest(
                     &coinbase,
                     &txs,
                     &mut accumulator.0,
@@ -464,7 +464,7 @@ impl App {
                 } else {
                     types::Accumulator::default()
                 };
-                let merkle_root = thunder::types::Body::modify_memforest::<
+                let merkle_root = coinshift::types::Body::modify_memforest::<
                     FilledTransaction,
                 >(
                     &coinbase, &[], &mut accumulator.0
@@ -495,7 +495,7 @@ impl App {
         tracing::debug!(%bmm_txid, "mine: confirming BMM...");
         if let Some((main_hash, header, body)) =
             miner_write.confirm_bmm().await.inspect_err(|err| {
-                tracing::error!("{:#}", thunder::util::ErrorChain::new(err))
+                tracing::error!("{:#}", coinshift::util::ErrorChain::new(err))
             })?
         {
             tracing::debug!(
@@ -506,7 +506,7 @@ impl App {
                 .submit_block(main_hash, &header, &body)
                 .await
                 .inspect_err(|err| {
-                    tracing::error!("{:#}", thunder::util::ErrorChain::new(err))
+                    tracing::error!("{:#}", coinshift::util::ErrorChain::new(err))
                 })? {
                 true => {
                     tracing::debug!(

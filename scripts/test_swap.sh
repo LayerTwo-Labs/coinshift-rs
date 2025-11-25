@@ -1,6 +1,6 @@
 #!/bin/bash
 # Simple swap testing script
-# Requires: jq, curl, bitcoin-cli (regtest), thunder_app running
+# Requires: jq, curl, bitcoin-cli (regtest), coinshift_app running
 
 set -e
 
@@ -46,8 +46,8 @@ check_services() {
     echo_info "Checking services..."
     
     if ! curl -s "$RPC_URL" > /dev/null 2>&1; then
-        echo_error "Thunder RPC server not accessible at $RPC_URL"
-        echo_info "Start with: cargo run --bin thunder_app -- --headless"
+        echo_error "Coinshift RPC server not accessible at $RPC_URL"
+        echo_info "Start with: cargo run --bin coinshift_app -- --headless"
         exit 1
     fi
     

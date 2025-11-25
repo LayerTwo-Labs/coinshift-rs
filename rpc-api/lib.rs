@@ -4,12 +4,12 @@ use std::net::SocketAddr;
 
 use jsonrpsee::{core::RpcResult, proc_macros::rpc};
 use l2l_openapi::open_api;
-use thunder::{
+use coinshift::{
     net::Peer,
     types::{
         Address, MerkleRoot, OutPoint, Output, OutputContent, ParentChainType,
         PointedOutput, Swap, SwapId, SwapState, Txid, WithdrawalBundle,
-        schema as thunder_schema,
+        schema as coinshift_schema,
     },
     wallet::Balance,
 };
@@ -19,7 +19,7 @@ mod schema;
 #[open_api(ref_schemas[
     Address, MerkleRoot, OutPoint, Output, OutputContent, ParentChainType,
     Swap, SwapId, SwapState, Txid, schema::BitcoinTxid,
-    thunder_schema::BitcoinAddr, thunder_schema::BitcoinOutPoint,
+    coinshift_schema::BitcoinAddr, coinshift_schema::BitcoinOutPoint,
 ])]
 #[rpc(client, server)]
 pub trait Rpc {
@@ -34,7 +34,7 @@ pub trait Rpc {
     async fn connect_peer(
         &self,
         #[open_api_method_arg(schema(
-            PartialSchema = "thunder_schema::SocketAddr"
+            PartialSchema = "coinshift_schema::SocketAddr"
         ))]
         addr: SocketAddr,
     ) -> RpcResult<()>;
@@ -62,7 +62,7 @@ pub trait Rpc {
     async fn forget_peer(
         &self,
         #[open_api_method_arg(schema(
-            PartialSchema = "thunder_schema::SocketAddr"
+            PartialSchema = "coinshift_schema::SocketAddr"
         ))]
         addr: SocketAddr,
     ) -> RpcResult<()>;
@@ -75,36 +75,36 @@ pub trait Rpc {
     #[method(name = "get_block")]
     async fn get_block(
         &self,
-        block_hash: thunder::types::BlockHash,
-    ) -> RpcResult<Option<thunder::types::Block>>;
+        block_hash: coinshift::types::BlockHash,
+    ) -> RpcResult<Option<coinshift::types::Block>>;
 
     /// Get mainchain blocks that commit to a specified block hash
     #[open_api_method(output_schema(
-        PartialSchema = "thunder_schema::BitcoinBlockHash"
+        PartialSchema = "coinshift_schema::BitcoinBlockHash"
     ))]
     #[method(name = "get_bmm_inclusions")]
     async fn get_bmm_inclusions(
         &self,
-        block_hash: thunder::types::BlockHash,
+        block_hash: coinshift::types::BlockHash,
     ) -> RpcResult<Vec<bitcoin::BlockHash>>;
 
-    /// Get the best mainchain block hash known by Thunder
+    /// Get the best mainchain block hash known by Coinshift
     #[open_api_method(output_schema(
-        PartialSchema = "schema::Optional<thunder_schema::BitcoinBlockHash>"
+        PartialSchema = "schema::Optional<coinshift_schema::BitcoinBlockHash>"
     ))]
     #[method(name = "get_best_mainchain_block_hash")]
     async fn get_best_mainchain_block_hash(
         &self,
     ) -> RpcResult<Option<bitcoin::BlockHash>>;
 
-    /// Get the best sidechain block hash known by Thunder
+    /// Get the best sidechain block hash known by Coinshift
     #[open_api_method(output_schema(
-        PartialSchema = "schema::Optional<thunder::types::BlockHash>"
+        PartialSchema = "schema::Optional<coinshift::types::BlockHash>"
     ))]
     #[method(name = "get_best_sidechain_block_hash")]
     async fn get_best_sidechain_block_hash(
         &self,
-    ) -> RpcResult<Option<thunder::types::BlockHash>>;
+    ) -> RpcResult<Option<coinshift::types::BlockHash>>;
 
     /// Get a new address
     #[method(name = "get_new_address")]
@@ -185,7 +185,7 @@ pub trait Rpc {
     async fn withdraw(
         &self,
         #[open_api_method_arg(schema(
-            PartialSchema = "thunder::types::schema::BitcoinAddr"
+            PartialSchema = "coinshift::types::schema::BitcoinAddr"
         ))]
         mainchain_address: bitcoin::Address<
             bitcoin::address::NetworkUnchecked,

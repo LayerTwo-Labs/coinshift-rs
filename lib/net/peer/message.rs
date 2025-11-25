@@ -17,12 +17,13 @@ pub const MAGIC_BYTES_LEN: usize = 4;
 pub type MagicBytes = [u8; MAGIC_BYTES_LEN];
 
 pub const fn magic_bytes(network: Network) -> MagicBytes {
-    // First 4 bytes are the US-TTY (LSB Right) Baudot–Murray code for "THNDR".
+    // First 4 bytes are the US-TTY (LSB Right) Baudot–Murray code for "SHIFT".
     // Rightmost bits of the 4th byte is the network identifier.
-    let b0 = 0b1000_0101;
-    let b1 = 0b0001_1000;
-    let b2 = 0b1001_0101;
-    let mut b3 = 0b0000_0000;
+    let b0 = 0b0010_0001; // S(10100) - lower 5 bits: 10100, upper 3 bits from H: 001
+    let b1 = 0b1000_1001; // H(00101) upper 2 bits + I(00110) full + F(01101) lower 1 bit
+    let b2 = 0b0000_1011; // F(01101) upper 4 bits + T(10000) lower 4 bits
+    let mut b3 = 0b0000_0001; // T(10000) upper 1 bit
+
     match network {
         Network::Regtest => (),
         Network::Signet => b3 |= 0b0000_0001,

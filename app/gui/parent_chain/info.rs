@@ -1,6 +1,6 @@
 use eframe::egui::{self, Button};
 use futures::FutureExt;
-use thunder::types::proto::mainchain;
+use coinshift::types::proto::mainchain;
 
 use crate::{app::App, gui::util::UiExt};
 

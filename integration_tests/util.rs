@@ -15,7 +15,7 @@ fn load_env_var_from_string(s: &str) -> Result<(), VarError> {
 
 #[derive(Clone, Debug)]
 pub struct BinPaths {
-    pub thunder: PathBuf,
+    pub coinshift: PathBuf,
     pub others: EnforcerBinPaths,
 }
 
@@ -25,14 +25,14 @@ impl BinPaths {
         let () = load_env_var_from_string("BITCOIN_UTIL=''")?;
         let () = load_env_var_from_string("SIGNET_MINER=''")?;
         Ok(Self {
-            thunder: get_env_var("THUNDER_APP")?.into(),
+            coinshift: get_env_var("COINSHIFT_APP")?.into(),
             others: EnforcerBinPaths::from_env()?,
         })
     }
 }
 
 #[derive(Clone, Debug)]
-pub struct ThunderApp {
+pub struct CoinshiftApp {
     pub path: PathBuf,
     pub data_dir: PathBuf,
     pub log_level: Option<tracing::Level>,
@@ -43,7 +43,7 @@ pub struct ThunderApp {
     pub rpc_port: u16,
 }
 
-impl ThunderApp {
+impl CoinshiftApp {
     pub fn spawn_command_with_args<Env, Arg, Envs, Args, F>(
         &self,
         envs: Envs,

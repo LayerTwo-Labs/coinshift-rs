@@ -1,5 +1,5 @@
 [package]
-name = "thunder"
+name = "coinshift"
 authors.workspace = true
 edition.workspace = true
 license-file.workspace = true
@@ -75,5 +75,5 @@ clap = ["dep:clap"]
 workspace = true
 
 [lib]
-name = "thunder"
+name = "coinshift"
 path = "lib.rs"

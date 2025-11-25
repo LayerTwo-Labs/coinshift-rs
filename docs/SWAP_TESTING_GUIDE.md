@@ -7,7 +7,7 @@ This guide walks you through setting up a proper environment and testing the swa
 For testing purposes, the setup uses two Bitcoin networks:
 
 - **Signet**: The sidechain's mainchain (for deposits/withdrawals)
-  - The Thunder sidechain connects to Signet as its mainchain
+  - The Coinshift sidechain connects to Signet as its mainchain
   - 2WPD (2-way peg deposits) are processed from Signet blocks
   
 - **Regtest**: The swap parent chain (for coinshift transactions)
@@ -91,20 +91,20 @@ bitcoin-cli -regtest getnewaddress
 
 ```bash
 # Create a data directory
-mkdir -p ~/thunder-test-data
+mkdir -p ~/coinshift-test-data
 
-# Start the Thunder node (headless mode)
+# Start the Coinshift node (headless mode)
 # Note: mainchain-grpc-url points to Signet (sidechain's mainchain)
-cargo run --bin thunder_app -- \
+cargo run --bin coinshift_app -- \
     --headless \
-    --datadir ~/thunder-test-data \
+    --datadir ~/coinshift-test-data \
     --mainchain-grpc-url http://127.0.0.1:50051 \
     --network signet \
     --rpc-addr 127.0.0.1:8332
 
 # Or with GUI
-cargo run --bin thunder_app -- \
-    --datadir ~/thunder-test-data \
+cargo run --bin coinshift_app -- \
+    --datadir ~/coinshift-test-data \
     --mainchain-grpc-url http://127.0.0.1:50051 \
     --network signet
 ```
@@ -117,13 +117,13 @@ In another terminal, use the CLI or RPC:
 
 ```bash
 # Generate a mnemonic
-cargo run --bin thunder_app_cli -- generate-mnemonic
+cargo run --bin coinshift_app_cli -- generate-mnemonic
 
 # Set the seed (replace with generated mnemonic)
-cargo run --bin thunder_app_cli -- set-seed-from-mnemonic "your mnemonic phrase here"
+cargo run --bin coinshift_app_cli -- set-seed-from-mnemonic "your mnemonic phrase here"
 
 # Get a new address
-cargo run --bin thunder_app_cli -- get-new-address
+cargo run --bin coinshift_app_cli -- get-new-address
 ```
 
 ### Option 2: Integration Tests (Automated)
@@ -133,8 +133,8 @@ For automated testing with the full BIP300 enforcer setup:
 #### Step 1: Build Integration Test Binaries
 
 ```bash
-# Build the thunder app binary
-cargo build --release --bin thunder_app
+# Build the coinshift app binary
+cargo build --release --bin coinshift_app
 
 # Build other required binaries (enforcer, etc.)
 # These are typically in submodules
@@ -146,7 +146,7 @@ Create or use `integration_tests/example.env`:
 
 ```bash
 # Path to built binaries
-THUNDER_BIN=target/release/thunder_app
+COINSHIFT_BIN=target/release/coinshift_app
 ENFORCER_BIN=path/to/enforcer/binary
 # ... other required paths
 ```
@@ -180,8 +180,8 @@ bitcoind -regtest -daemon
 bitcoin-cli -regtest createwallet "regtestwallet"
 bitcoin-cli -regtest -generate 101
 
-# Terminal 2: Start Thunder node (connects to Signet as mainchain)
-cargo run --bin thunder_app -- --headless --datadir ~/thunder-test --network signet
+# Terminal 2: Start Coinshift node (connects to Signet as mainchain)
+cargo run --bin coinshift_app -- --headless --datadir ~/coinshift-test --network signet
 
 # Terminal 3: Use for RPC calls
 ```
@@ -190,13 +190,13 @@ cargo run --bin thunder_app -- --headless --datadir ~/thunder-test --network sig
 
 ```bash
 # Generate mnemonic for Alice
-ALICE_MNEMONIC=$(cargo run --bin thunder_app_cli -- generate-mnemonic | tail -1)
+ALICE_MNEMONIC=$(cargo run --bin coinshift_app_cli -- generate-mnemonic | tail -1)
 
 # Set Alice's seed
-cargo run --bin thunder_app_cli -- set-seed-from-mnemonic "$ALICE_MNEMONIC"
+cargo run --bin coinshift_app_cli -- set-seed-from-mnemonic "$ALICE_MNEMONIC"
 
 # Get Alice's L2 address
-ALICE_L2_ADDR=$(cargo run --bin thunder_app_cli -- get-new-address | tail -1)
+ALICE_L2_ADDR=$(cargo run --bin coinshift_app_cli -- get-new-address | tail -1)
 
 # Get Alice's L1 (Bitcoin) address for receiving on Regtest (swap parent chain)
 ALICE_L1_ADDR=$(bitcoin-cli -regtest getnewaddress)
@@ -309,7 +309,7 @@ curl -X POST http://127.0.0.1:8332 \
 
 ```bash
 # Set up Bob's wallet (different mnemonic)
-BOB_MNEMONIC=$(cargo run --bin thunder_app_cli -- generate-mnemonic | tail -1)
+BOB_MNEMONIC=$(cargo run --bin coinshift_app_cli -- generate-mnemonic | tail -1)
 # ... set Bob's seed ...
 
 # Bob claims the swap
@@ -385,7 +385,7 @@ The GUI provides a visual interface for testing:
 
 ```bash
 # Start with GUI
-cargo run --bin thunder_app -- --datadir ~/thunder-test
+cargo run --bin coinshift_app -- --datadir ~/coinshift-test
 
 # Navigate to the swap interface (if implemented)
 # Or use the RPC endpoints via the console
@@ -397,17 +397,17 @@ cargo run --bin thunder_app -- --datadir ~/thunder-test
 
 ```bash
 # Enable trace logging
-RUST_LOG=trace cargo run --bin thunder_app -- --headless --datadir ~/thunder-test
+RUST_LOG=trace cargo run --bin coinshift_app -- --headless --datadir ~/coinshift-test
 ```
 
 ### Inspect State
 
 ```bash
 # List all swaps
-cargo run --bin thunder_app_cli -- list-swaps
+cargo run --bin coinshift_app_cli -- list-swaps
 
 # Get specific swap
-cargo run --bin thunder_app_cli -- get-swap-status <swap_id>
+cargo run --bin coinshift_app_cli -- get-swap-status <swap_id>
 
 # Check locked outputs
 # (This might require adding a CLI command or using RPC directly)
@@ -427,7 +427,7 @@ Create a new integration test file `integration_tests/swap_test.rs`:
 
 ```rust
 use crate::setup::PostSetup;
-use thunder_app_rpc_api::RpcClient as _;
+use coinshift_app_rpc_api::RpcClient as _;
 
 pub async fn swap_test(
     mut post_setup: PostSetup,
@@ -497,7 +497,7 @@ If you encounter database errors, you may need to reset:
 
 ```bash
 # Remove data directory (WARNING: This deletes all data)
-rm -rf ~/thunder-test-data
+rm -rf ~/coinshift-test-data
 ```
 
 ### Port Conflicts

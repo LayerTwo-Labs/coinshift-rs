@@ -2,7 +2,7 @@ use std::task::Poll;
 
 use eframe::egui::{self, RichText};
 use strum::{EnumIter, IntoEnumIterator};
-use thunder::{util::Watchable, wallet::Wallet};
+use coinshift::{util::Watchable, wallet::Wallet};
 use util::{BITCOIN_LOGO_FA, BITCOIN_ORANGE, show_btc_amount};
 
 use crate::{app::App, line_buffer::LineBuffer, util::PromiseStream};
@@ -11,10 +11,12 @@ mod block_explorer;
 mod coins;
 mod console_logs;
 mod fonts;
+mod l1_config;
 mod mempool_explorer;
 mod miner;
 mod parent_chain;
 mod seed;
+mod swap;
 mod util;
 mod withdrawals;
 
@@ -22,10 +24,12 @@ use block_explorer::BlockExplorer;
 use coins::Coins;
 use console_logs::ConsoleLogs;
 use fonts::FONT_DEFINITIONS;
+use l1_config::L1Config;
 use mempool_explorer::MemPoolExplorer;
 use miner::Miner;
 use parent_chain::ParentChain;
 use seed::SetSeed;
+use swap::Swap;
 use withdrawals::Withdrawals;
 
 use self::util::UiExt;
@@ -36,10 +40,12 @@ pub struct EguiApp {
     bottom_panel: BottomPanel,
     coins: Coins,
     console_logs: ConsoleLogs,
+    l1_config: L1Config,
     mempool_explorer: MemPoolExplorer,
     miner: Miner,
     parent_chain: ParentChain,
     set_seed: SetSeed,
+    swap: Swap,
     tab: Tab,
     withdrawals: Withdrawals,
 }
@@ -51,12 +57,16 @@ enum Tab {
     ParentChain,
     #[strum(to_string = "Coins")]
     Coins,
+    #[strum(to_string = "Swaps")]
+    Swaps,
     #[strum(to_string = "Mempool Explorer")]
     MemPoolExplorer,
     #[strum(to_string = "Block Explorer")]
     BlockExplorer,
     #[strum(to_string = "Withdrawals")]
     Withdrawals,
+    #[strum(to_string = "L1 Config")]
+    L1Config,
     #[strum(to_string = "Console / Logs")]
     ConsoleLogs,
 }
@@ -199,21 +209,25 @@ impl EguiApp {
         let bottom_panel = BottomPanel::new(app.clone());
         let coins = Coins::new(app.as_ref());
         let console_logs = ConsoleLogs::new(logs_capture, rpc_addr);
+        let l1_config = L1Config::new(&cc.egui_ctx);
         let height = app
             .as_ref()
             .and_then(|app| app.node.try_get_height().ok().flatten())
             .unwrap_or(0);
         let parent_chain = ParentChain::new(app.as_ref());
+        let swap = Swap::new(app.as_ref());
         Self {
             app,
             block_explorer: BlockExplorer::new(height),
             bottom_panel,
             coins,
             console_logs,
+            l1_config,
             mempool_explorer: MemPoolExplorer::default(),
             miner: Miner::default(),
             parent_chain,
             set_seed: SetSeed::default(),
+            swap,
             tab: Tab::default(),
             withdrawals: Withdrawals::default(),
         }
@@ -253,6 +267,9 @@ impl eframe::App for EguiApp {
                 Tab::Coins => {
                     self.coins.show(self.app.as_ref(), ui);
                 }
+                Tab::Swaps => {
+                    self.swap.show(self.app.as_ref(), ui);
+                }
                 Tab::MemPoolExplorer => {
                     self.mempool_explorer.show(self.app.as_ref(), ui);
                 }
@@ -261,6 +278,9 @@ impl eframe::App for EguiApp {
                 }
                 Tab::Withdrawals => {
                     self.withdrawals.show(self.app.as_ref(), ui);
+                }
+                Tab::L1Config => {
+                    self.l1_config.show(ctx, ui);
                 }
                 Tab::ConsoleLogs => {
                     self.console_logs.show(self.app.as_ref(), ui);

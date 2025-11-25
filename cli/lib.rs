@@ -4,8 +4,8 @@ use clap::{Parser, Subcommand};
 use http::HeaderMap;
 use jsonrpsee::{core::client::ClientT, http_client::HttpClientBuilder};
 
-use thunder::types::{Address, Txid};
-use thunder_app_rpc_api::RpcClient;
+use coinshift::types::{Address, Txid};
+use coinshift_app_rpc_api::RpcClient;
 use tracing_subscriber::layer::SubscriberExt as _;
 
 #[derive(Clone, Debug, Subcommand)]
@@ -36,11 +36,11 @@ pub enum Command {
     GetBestSidechainBlockHash,
     /// Get the block with specified block hash, if it exists
     GetBlock {
-        block_hash: thunder::types::BlockHash,
+        block_hash: coinshift::types::BlockHash,
     },
     /// Get mainchain blocks that commit to a specified block hash
     GetBmmInclusions {
-        block_hash: thunder::types::BlockHash,
+        block_hash: coinshift::types::BlockHash,
     },
     /// Get a new address
     GetNewAddress,
@@ -202,7 +202,7 @@ where
         }
         Command::OpenApiSchema => {
             let openapi =
-                <thunder_app_rpc_api::RpcDoc as utoipa::OpenApi>::openapi();
+                <coinshift_app_rpc_api::RpcDoc as utoipa::OpenApi>::openapi();
             openapi.to_pretty_json()?
         }
         Command::RemoveFromMempool { txid } => {

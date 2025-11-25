@@ -1,6 +1,6 @@
 use eframe::egui::{self, Button};
 
-use thunder::types::{Transaction, Txid};
+use coinshift::types::{Transaction, Txid};
 
 use crate::app::App;
 
