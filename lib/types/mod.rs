@@ -40,7 +40,7 @@ pub use transaction::{
     TxData,
 };
 
-pub const THIS_SIDECHAIN: u8 = 9;
+pub const THIS_SIDECHAIN: u8 = 255; // coinshift
 
 #[derive(Debug, Error)]
 #[error("Bitcoin amount overflow")]

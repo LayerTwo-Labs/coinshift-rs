@@ -15,6 +15,7 @@ dirs = "5.0.1"
 eframe = "0.30.0"
 fallible-iterator = { workspace = true }
 futures = { workspace = true }
+hex = "0.4"
 http = { workspace = true }
 human-size = "0.4.3"
 include_path = "0.1.1"

@@ -2,6 +2,21 @@
 
 This guide walks you through setting up a proper environment and testing the swap functionality.
 
+## Network Architecture
+
+For testing purposes, the setup uses two Bitcoin networks:
+
+- **Signet**: The sidechain's mainchain (for deposits/withdrawals)
+  - The Thunder sidechain connects to Signet as its mainchain
+  - 2WPD (2-way peg deposits) are processed from Signet blocks
+  
+- **Regtest**: The swap parent chain (for coinshift transactions)
+  - Swaps target Regtest as the parent chain
+  - Bob sends Regtest transactions to fulfill swaps
+  - Swap confirmations are tracked on Regtest
+
+**Key Point**: The sidechain monitors Signet for mainchain activity (2WPD), but monitors Regtest for swap-related transactions.
+
 ## Prerequisites
 
 1. **Rust toolchain**: Ensure you have Rust installed (1.70+ recommended)
@@ -36,41 +51,41 @@ cargo build
 
 ## Environment Setup Options
 
-### Option 1: Manual Testing with Regtest (Recommended for Development)
+### Option 1: Manual Testing with Signet Mainchain + Regtest Swaps (Recommended for Development)
 
 This is the simplest way to test swap functionality manually.
 
-#### Step 1: Start Mainchain Node (Bitcoin Regtest for Sidechain)
+#### Step 1: Start Mainchain Node (Bitcoin Signet for Sidechain)
 
 ```bash
-# Start Bitcoin Core in regtest mode (for sidechain mainchain)
-bitcoind -regtest -daemon
-
-# Create a wallet and generate some blocks
-bitcoin-cli -regtest createwallet "testwallet"
-bitcoin-cli -regtest -generate 101
-
-# Get a test address for deposits
-bitcoin-cli -regtest getnewaddress
-```
-
-#### Step 1b: Start Swap Target Chain Node (Bitcoin Signet)
-
-```bash
-# Start Bitcoin Core in signet mode (for swap target chain)
+# Start Bitcoin Core in signet mode (for sidechain mainchain)
 bitcoind -signet -daemon
 
 # Create a wallet and generate some blocks
 bitcoin-cli -signet createwallet "signetwallet"
 bitcoin-cli -signet -generate 101
 
-# Get a test address for swaps
+# Get a test address for deposits
 bitcoin-cli -signet getnewaddress
 ```
 
+#### Step 1b: Start Swap Parent Chain Node (Bitcoin Regtest)
+
+```bash
+# Start Bitcoin Core in regtest mode (for swap parent chain)
+bitcoind -regtest -daemon
+
+# Create a wallet and generate some blocks
+bitcoin-cli -regtest createwallet "regtestwallet"
+bitcoin-cli -regtest -generate 101
+
+# Get a test address for swaps
+bitcoin-cli -regtest getnewaddress
+```
+
 **Important**: You need BOTH networks running:
-- **Regtest**: For sidechain mainchain (deposits/withdrawals)
-- **Signet**: For swap target chain (coinshift transactions)
+- **Signet**: For sidechain mainchain (deposits/withdrawals)
+- **Regtest**: For swap parent chain (coinshift transactions)
 
 #### Step 2: Start the Sidechain Node
 
@@ -79,22 +94,22 @@ bitcoin-cli -signet getnewaddress
 mkdir -p ~/thunder-test-data
 
 # Start the Thunder node (headless mode)
-# Note: mainchain-grpc-url points to Regtest (sidechain's mainchain)
+# Note: mainchain-grpc-url points to Signet (sidechain's mainchain)
 cargo run --bin thunder_app -- \
     --headless \
     --datadir ~/thunder-test-data \
     --mainchain-grpc-url http://127.0.0.1:50051 \
-    --network regtest \
+    --network signet \
     --rpc-addr 127.0.0.1:8332
 
 # Or with GUI
 cargo run --bin thunder_app -- \
     --datadir ~/thunder-test-data \
     --mainchain-grpc-url http://127.0.0.1:50051 \
-    --network regtest
+    --network signet
 ```
 
-**Note**: The sidechain connects to Regtest as its mainchain, but swaps can target Signet (or other chains).
+**Note**: The sidechain connects to Signet as its mainchain, and swaps target Regtest as the parent chain.
 
 #### Step 3: Initialize Wallet
 
@@ -155,12 +170,18 @@ This tests the full swap lifecycle: Alice creates a swap, Bob sends L1 coins, Bo
 #### Step 1: Prepare Test Environment
 
 ```bash
-# Terminal 1: Start Bitcoin regtest node
+# Terminal 1: Start Bitcoin Signet node (sidechain mainchain)
+bitcoind -signet -daemon
+bitcoin-cli -signet createwallet "signetwallet"
+bitcoin-cli -signet -generate 101
+
+# Terminal 1b: Start Bitcoin Regtest node (swap parent chain)
 bitcoind -regtest -daemon
+bitcoin-cli -regtest createwallet "regtestwallet"
 bitcoin-cli -regtest -generate 101
 
-# Terminal 2: Start Thunder node
-cargo run --bin thunder_app -- --headless --datadir ~/thunder-test
+# Terminal 2: Start Thunder node (connects to Signet as mainchain)
+cargo run --bin thunder_app -- --headless --datadir ~/thunder-test --network signet
 
 # Terminal 3: Use for RPC calls
 ```
@@ -177,7 +198,7 @@ cargo run --bin thunder_app_cli -- set-seed-from-mnemonic "$ALICE_MNEMONIC"
 # Get Alice's L2 address
 ALICE_L2_ADDR=$(cargo run --bin thunder_app_cli -- get-new-address | tail -1)
 
-# Get Alice's L1 (Bitcoin) address for receiving
+# Get Alice's L1 (Bitcoin) address for receiving on Regtest (swap parent chain)
 ALICE_L1_ADDR=$(bitcoin-cli -regtest getnewaddress)
 ```
 
@@ -233,33 +254,33 @@ curl -X POST http://127.0.0.1:8332 \
 # Should show state: "Pending"
 ```
 
-#### Step 6: Bob Sends Signet Transaction
+#### Step 6: Bob Sends Regtest Transaction
 
-**Important**: Bob sends on Signet (swap target chain), NOT Regtest!
+**Important**: Bob sends on Regtest (swap parent chain), NOT Signet!
 
 ```bash
-# Bob sends Signet Bitcoin to Alice's Signet address
-# This is on Signet network, not Regtest!
-SIGNET_TXID=$(bitcoin-cli -signet sendtoaddress $ALICE_SIGNET_ADDR 0.001)
+# Bob sends Regtest Bitcoin to Alice's Regtest address
+# This is on Regtest network (swap parent chain), not Signet!
+REGTEST_TXID=$(bitcoin-cli -regtest sendtoaddress $ALICE_L1_ADDR 0.001)
 
-# Mine a block on Signet to confirm
-bitcoin-cli -signet -generate 1
+# Mine a block on Regtest to confirm
+bitcoin-cli -regtest -generate 1
 
-# Get transaction details from Signet
-bitcoin-cli -signet gettransaction $SIGNET_TXID
+# Get transaction details from Regtest
+bitcoin-cli -regtest gettransaction $REGTEST_TXID
 
 # Verify the transaction
-bitcoin-cli -signet getrawtransaction $SIGNET_TXID true
+bitcoin-cli -regtest getrawtransaction $REGTEST_TXID true
 ```
 
-**Key Point**: The transaction is on Signet, but the sidechain monitors Signet for this transaction when processing 2WPD.
+**Key Point**: The transaction is on Regtest (swap parent chain), and the sidechain monitors Regtest for this transaction when processing 2WPD.
 
-#### Step 7: Update Swap with Signet Transaction
+#### Step 7: Update Swap with Regtest Transaction
 
-**Important**: Update with Signet transaction ID, not Regtest!
+**Important**: Update with Regtest transaction ID (swap parent chain), not Signet!
 
 ```bash
-# Update swap with Signet transaction ID
+# Update swap with Regtest transaction ID
 # The system should automatically detect this when processing 2WPD,
 # but you can also manually update it
 curl -X POST http://127.0.0.1:8332 \
@@ -270,19 +291,19 @@ curl -X POST http://127.0.0.1:8332 \
     "method": "update_swap_l1_txid",
     "params": {
       "swap_id": "'$SWAP_ID'",
-      "l1_txid_hex": "'$SIGNET_TXID'",
+      "l1_txid_hex": "'$REGTEST_TXID'",
       "confirmations": 1
     }
   }'
 
 # Check status again - should show "ReadyToClaim" or "WaitingConfirmations"
-# Note: Confirmations are tracked on Signet, not Regtest!
+# Note: Confirmations are tracked on Regtest (swap parent chain), not Signet!
 ```
 
-**Automatic Detection**: When the sidechain processes 2WPD (from Regtest tip changes), it should automatically:
-1. Query Signet for transactions matching the swap
-2. Update swap state based on Signet confirmations
-3. Transition swap to ReadyToClaim when Signet confirmations are sufficient
+**Automatic Detection**: When the sidechain processes 2WPD (from Signet tip changes), it should automatically:
+1. Query Regtest for transactions matching the swap
+2. Update swap state based on Regtest confirmations
+3. Transition swap to ReadyToClaim when Regtest confirmations are sufficient
 
 #### Step 8: Bob Claims the Swap
 
@@ -397,7 +418,8 @@ cargo run --bin thunder_app_cli -- get-swap-status <swap_id>
 1. **Swap not found**: Ensure the swap was created and the swap_id is correct
 2. **Cannot claim**: Verify swap is in "ReadyToClaim" state and has required confirmations
 3. **Locked output error**: Check that outputs are properly locked and not being spent elsewhere
-4. **State not updating**: Ensure 2WPD is being processed and coinshift transactions are detected
+4. **State not updating**: Ensure 2WPD is being processed (from Signet mainchain) and coinshift transactions are detected on Regtest (swap parent chain)
+5. **Wrong network**: Remember that the sidechain mainchain is Signet, but swap transactions happen on Regtest
 
 ## Integration Test Example
 

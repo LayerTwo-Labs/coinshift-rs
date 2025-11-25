@@ -269,6 +269,7 @@ impl App {
                 inputs: vec![],
                 proof: Proof::default(),
                 outputs: vec![],
+                data: thunder::types::TxData::Regular,
             })),
             runtime: Arc::new(runtime),
             local_pool,

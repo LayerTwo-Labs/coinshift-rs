@@ -368,7 +368,11 @@ impl RpcServer for RpcServerImpl {
         Ok(swap)
     }
 
-    async fn claim_swap(&self, swap_id: SwapId) -> RpcResult<Txid> {
+    async fn claim_swap(
+        &self,
+        swap_id: SwapId,
+        l2_claimer_address: Option<Address>,
+    ) -> RpcResult<Txid> {
         // Get swap to verify it's ready and get recipient
         let rotxn = self
             .app
