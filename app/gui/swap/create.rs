@@ -1,4 +1,4 @@
-use eframe::egui::{self, Button, ComboBox};
+use eframe::egui::{self, Button, Color32, ComboBox, RichText};
 use coinshift::types::{Address, ParentChainType};
 
 use crate::app::App;
@@ -12,6 +12,7 @@ pub struct CreateSwap {
     l2_amount: String,
     required_confirmations: String,
     is_open_swap: bool,
+    error_message: Option<String>,
 }
 
 impl Default for CreateSwap {
@@ -24,6 +25,7 @@ impl Default for CreateSwap {
             l2_amount: String::new(),
             required_confirmations: String::new(),
             is_open_swap: false,
+            error_message: None,
         }
     }
 }
@@ -104,6 +106,13 @@ impl CreateSwap {
 
         ui.separator();
 
+        // Display error message if any
+        if let Some(error_msg) = &self.error_message {
+            ui.add_space(5.0);
+            ui.label(RichText::new(format!("Error: {}", error_msg)).small().color(Color32::RED));
+            ui.separator();
+        }
+
         // Parse inputs
         let l1_amount = bitcoin::Amount::from_str_in(
             &self.l1_amount,
@@ -137,35 +146,85 @@ impl CreateSwap {
             .add_enabled(is_valid, Button::new("Create Swap"))
             .clicked()
         {
+            // Clear any previous error
+            self.error_message = None;
+            
             let app = app.unwrap();
             let accumulator = match app.node.get_tip_accumulator() {
                 Ok(acc) => acc,
                 Err(err) => {
-                    tracing::error!("Failed to get accumulator: {err:#}");
+                    let error_msg = format!("Failed to get accumulator: {err:#}");
+                    tracing::error!("{}", error_msg);
+                    self.error_message = Some(error_msg);
                     return;
                 }
             };
+
+            // Extract amounts for logging (before they're moved)
+            let l1_amount_val = l1_amount.expect("should not happen");
+            let l2_amount_val = l2_amount.expect("should not happen");
 
             let (tx, swap_id) = match app.wallet.create_swap_create_tx(
                 &accumulator,
                 self.parent_chain,
                 self.l1_recipient_address.clone(),
-                l1_amount.expect("should not happen"),
+                l1_amount_val,
                 l2_recipient,
-                l2_amount.expect("should not happen"),
+                l2_amount_val,
                 required_confirmations,
                 bitcoin::Amount::ZERO,
             ) {
-                Ok(result) => result,
+                Ok(result) => {
+                    let txid = result.0.txid();
+                    tracing::info!(
+                        swap_id = %result.1,
+                        txid = %txid,
+                        parent_chain = ?self.parent_chain,
+                        l1_recipient = %self.l1_recipient_address,
+                        l1_amount = %l1_amount_val,
+                        l2_recipient = ?l2_recipient,
+                        l2_amount = %l2_amount_val,
+                        required_confirmations = ?required_confirmations,
+                        is_open_swap = %self.is_open_swap,
+                        "Successfully created swap transaction"
+                    );
+                    result
+                }
                 Err(err) => {
-                    tracing::error!("Failed to create swap: {err:#}");
+                    let error_msg = format!("Failed to create swap transaction: {err:#}");
+                    tracing::error!(
+                        parent_chain = ?self.parent_chain,
+                        l1_recipient = %self.l1_recipient_address,
+                        l1_amount = %l1_amount_val,
+                        l2_recipient = ?l2_recipient,
+                        l2_amount = %l2_amount_val,
+                        required_confirmations = ?required_confirmations,
+                        is_open_swap = %self.is_open_swap,
+                        error = %err,
+                        error_debug = ?err,
+                        "Failed to create swap transaction"
+                    );
+                    self.error_message = Some(error_msg);
                     return;
                 }
             };
 
             let txid = tx.txid();
+            tracing::info!(
+                swap_id = %swap_id,
+                txid = %txid,
+                "Attempting to sign and send swap transaction"
+            );
             if let Err(err) = app.sign_and_send(tx) {
-                tracing::error!("Failed to send transaction: {err:#}");
+                let error_msg = format!("Failed to send transaction: {err:#}");
+                tracing::error!(
+                    swap_id = %swap_id,
+                    txid = %txid,
+                    error = %err,
+                    error_debug = ?err,
+                    "Failed to send transaction: node error"
+                );
+                self.error_message = Some(error_msg);
                 return;
             }
 

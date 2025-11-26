@@ -567,6 +567,62 @@ impl State {
         Ok(())
     }
 
+    /// Cancel a swap (unlock outputs and mark as cancelled)
+    /// Only allowed for Pending swaps (before L1 transaction is detected)
+    pub fn cancel_swap(
+        &self,
+        rwtxn: &mut RwTxn,
+        swap_id: &SwapId,
+    ) -> Result<(), Error> {
+        // Get swap
+        let mut swap = self
+            .swaps
+            .try_get(rwtxn, swap_id)
+            .map_err(DbError::from)?
+            .ok_or(Error::SwapNotFound {
+                swap_id: *swap_id,
+            })?;
+
+        // Only allow cancellation for Pending swaps
+        if !matches!(swap.state, SwapState::Pending) {
+            return Err(Error::InvalidTransaction(format!(
+                "Swap {} cannot be cancelled (state: {:?}). Only Pending swaps can be cancelled.",
+                swap_id, swap.state
+            )));
+        }
+
+        // Find and unlock all outputs locked to this swap
+        let mut unlocked_count = 0;
+        let locked_outputs: Vec<(OutPointKey, SwapId)> = self
+            .locked_swap_outputs
+            .iter(rwtxn)
+            .map_err(DbError::from)?
+            .map(|(key, swap_id)| Ok((key, swap_id)))
+            .collect()?;
+        
+        for (outpoint_key, locked_swap_id) in locked_outputs {
+            if locked_swap_id == *swap_id {
+                let outpoint: OutPoint = outpoint_key.into();
+                self.unlock_output_from_swap(rwtxn, &outpoint)?;
+                unlocked_count += 1;
+            }
+        }
+
+        tracing::info!(
+            swap_id = %swap_id,
+            unlocked_outputs = %unlocked_count,
+            "Cancelling swap and unlocking outputs"
+        );
+
+        // Mark swap as cancelled
+        swap.state = SwapState::Cancelled;
+
+        // Save updated swap
+        self.save_swap(rwtxn, &swap)?;
+
+        Ok(())
+    }
+
     pub fn delete_swap(
         &self,
         rwtxn: &mut RwTxn,
@@ -817,8 +873,9 @@ impl State {
         &self,
         rwtxn: &mut RwTxn,
         two_way_peg_data: &TwoWayPegData,
+        rpc_config_getter: Option<&dyn Fn(ParentChainType) -> Option<crate::bitcoin_rpc::RpcConfig>>,
     ) -> Result<(), Error> {
-        two_way_peg_data::connect(self, rwtxn, two_way_peg_data)
+        two_way_peg_data::connect(self, rwtxn, two_way_peg_data, rpc_config_getter)
     }
 
     pub fn disconnect_two_way_peg_data(

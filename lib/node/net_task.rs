@@ -111,7 +111,7 @@ fn connect_tip_(
             prevalidated,
         )?;
     }
-    let () = state.connect_two_way_peg_data(rwtxn, two_way_peg_data)?;
+    let () = state.connect_two_way_peg_data(rwtxn, two_way_peg_data, None)?;
     let accumulator = state.get_accumulator(rwtxn)?;
     let () = archive.put_header(rwtxn, header)?;
     let () = archive.put_body(rwtxn, block_hash, body)?;

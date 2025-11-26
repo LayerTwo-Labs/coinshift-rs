@@ -308,21 +308,38 @@ impl Wallet {
             "Creating swap create transaction"
         );
 
-        // 1. Compute swap ID
-        let l2_sender_address = self.get_new_address()?;
+        // 1. Select UTXOs first (we need the sender address from the UTXOs)
+        // IMPORTANT: We must use the address from the first UTXO being spent, not a new address.
+        // The validation logic in lib/state/swap.rs uses the address from the first input's UTXO
+        // to compute the swap ID, so we must match that here.
+        let required_total = l2_amount
+            .checked_add(fee)
+            .ok_or(AmountOverflowError)?;
+        let (total, coins) = self.select_coins(required_total)?;
+        let change = total - l2_amount - fee;
+
+        // Get the sender address from the first UTXO (this is what validation will use)
+        // This should never be None since select_coins would have failed if there were no coins
+        let l2_sender_address = coins
+            .values()
+            .next()
+            .expect("select_coins returned empty HashMap - this should never happen")
+            .address;
+
+        // Compute swap ID using the address from the first UTXO
+        // This must match what validation computes in lib/state/swap.rs
         let swap_id = SwapId::from_l2_to_l1(
             &l1_recipient_address,
             l1_amount,
             &l2_sender_address,
             l2_recipient.as_ref(),  // Optional
         );
-
-        // 2. Select UTXOs to spend (must spend at least l2_amount + fee)
-        let required_total = l2_amount
-            .checked_add(fee)
-            .ok_or(AmountOverflowError)?;
-        let (total, coins) = self.select_coins(required_total)?;
-        let change = total - l2_amount - fee;
+        
+        tracing::debug!(
+            swap_id = %swap_id,
+            l2_sender_address = %l2_sender_address,
+            "Computed swap ID using sender address from first UTXO"
+        );
 
         // 3. Create inputs
         let inputs: Vec<_> = coins

@@ -5,7 +5,7 @@ use sneed::RoTxn;
 use crate::{
     state::{Error, State},
     types::{
-        Address, FilledTransaction, OutPoint, OutPointKey, Swap, SwapId,
+        FilledTransaction, SwapId,
         SwapState, SwapTxId, Transaction, TxData,
     },
 };
@@ -154,6 +154,20 @@ pub fn validate_swap_claim(
             "Swap {} is not ready to claim (state: {:?})",
             swap_id, swap.state
         )));
+    }
+
+    // 2.5. For open swaps, verify L1 transaction exists (someone filled it)
+    if swap.l2_recipient.is_none() {
+        // Open swap - verify L1 transaction was detected
+        let zero_hash32 = [0u8; 32];
+        let has_l1_tx = !matches!(swap.l1_txid, SwapTxId::Hash32(h) if h == zero_hash32)
+            && !matches!(swap.l1_txid, SwapTxId::Hash(ref v) if v.is_empty() || v.iter().all(|&b| b == 0));
+        
+        if !has_l1_tx {
+            return Err(Error::InvalidTransaction(
+                "Open swap cannot be claimed until L1 transaction is detected".to_string(),
+            ));
+        }
     }
 
     // 3. Verify at least one input is locked to this swap

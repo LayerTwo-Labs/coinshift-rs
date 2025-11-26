@@ -98,7 +98,7 @@ pub enum Command {
 #[command(author, version, about, long_about = None)]
 pub struct Cli {
     /// Base URL used for requests to the RPC server.
-    #[arg(default_value = "http://localhost:6009", long)]
+    #[arg(default_value = "http://localhost:6255", long)]
     pub rpc_url: url::Url,
 
     #[arg(long, help = "Timeout for RPC requests in seconds (default: 60)")]

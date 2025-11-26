@@ -293,9 +293,53 @@ impl App {
     }
 
     pub fn sign_and_send(&self, tx: Transaction) -> Result<(), Error> {
-        let authorized_transaction = self.wallet.authorize(tx)?;
-        self.node.submit_transaction(authorized_transaction)?;
-        let () = self.update()?;
+        let txid = tx.txid();
+        tracing::debug!(%txid, "sign_and_send: Starting transaction signing and sending");
+        
+        let authorized_transaction = match self.wallet.authorize(tx) {
+            Ok(auth_tx) => {
+                tracing::debug!(%txid, "sign_and_send: Transaction authorized successfully");
+                auth_tx
+            }
+            Err(err) => {
+                tracing::error!(%txid, error = %err, "sign_and_send: Failed to authorize transaction");
+                return Err(err.into());
+            }
+        };
+        
+        tracing::debug!(%txid, "sign_and_send: Submitting transaction to node");
+        match self.node.submit_transaction(authorized_transaction) {
+            Ok(()) => {
+                tracing::debug!(%txid, "sign_and_send: Transaction submitted to node successfully");
+            }
+            Err(err) => {
+                tracing::error!(
+                    %txid,
+                    error = %err,
+                    error_debug = ?err,
+                    "sign_and_send: Failed to submit transaction to node"
+                );
+                return Err(err.into());
+            }
+        }
+        
+        tracing::debug!(%txid, "sign_and_send: Updating wallet state");
+        match self.update() {
+            Ok(()) => {
+                tracing::debug!(%txid, "sign_and_send: Wallet updated successfully");
+            }
+            Err(err) => {
+                tracing::error!(
+                    %txid,
+                    error = %err,
+                    error_debug = ?err,
+                    "sign_and_send: Failed to update wallet"
+                );
+                return Err(err);
+            }
+        }
+        
+        tracing::info!(%txid, "sign_and_send: Transaction signed and sent successfully");
         Ok(())
     }
 
