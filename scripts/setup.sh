@@ -971,6 +971,150 @@ load_signet_wallet() {
     fi
 }
 
+# Try to extract WIF private key from existing descriptor (if base58 is available)
+extract_privkey_from_descriptor() {
+    if [ ! -f "${SIGNET_DATADIR}/.signet_descriptor" ]; then
+        return 1
+    fi
+    
+    if [ -f "${SIGNET_PRIVKEY_FILE}" ]; then
+        # Already have private key
+        return 0
+    fi
+    
+    # Check if base58 is available
+    if ! python3 -c "import base58" 2>/dev/null; then
+        return 1
+    fi
+    
+    print_info "Attempting to extract WIF private key from existing descriptor..."
+    
+    DESCRIPTOR=$(cat "${SIGNET_DATADIR}/.signet_descriptor")
+    
+    # Extract tprv from descriptor
+    XPRV=$(echo "$DESCRIPTOR" | grep -oE '(tprv|xprv)[a-zA-Z0-9]{100,}' | head -1 || echo "")
+    
+    if [ -z "$XPRV" ]; then
+        print_error "Could not extract tprv from descriptor"
+        return 1
+    fi
+    
+    # Extract keypath from descriptor (e.g., /44h/1h/0h/0/* or /84h/1h/0h/0/*)
+    KEYPATH_STR=$(echo "$DESCRIPTOR" | grep -oE '/[0-9]+h?/[0-9]+h?/[0-9]+h?/[0-9]+h?/[0-9*]+' | head -1 || echo "")
+    
+    if [ -z "$KEYPATH_STR" ]; then
+        print_error "Could not extract keypath from descriptor"
+        return 1
+    fi
+    
+    # Convert to BIP32 path format (m/44h/1h/0h/0/0)
+    KEYPATH="m${KEYPATH_STR}"
+    # Replace wildcard with 0 for first address
+    KEYPATH=$(echo "$KEYPATH" | sed 's/\*$/0/')
+    
+    print_info "Extracted tprv: ${XPRV:0:20}..."
+    print_info "Extracted keypath: ${KEYPATH}"
+    
+    # Use derive_privkey.py to get WIF key
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    DERIVE_SCRIPT="${SCRIPT_DIR}/derive_privkey.py"
+    
+    if [ ! -f "${DERIVE_SCRIPT}" ]; then
+        print_error "derive_privkey.py not found"
+        return 1
+    fi
+    
+    # Try the extracted keypath first
+    PRIVKEY=$(python3 "${DERIVE_SCRIPT}" "${XPRV}" "${KEYPATH}" 2>&1)
+    
+    # If that fails, try common paths (the original might have been at m/84h/1h/0h/0/0)
+    if [ -z "$PRIVKEY" ] || [ ${#PRIVKEY} -le 20 ] || echo "$PRIVKEY" | grep -qi "error"; then
+        print_info "First keypath failed, trying common alternative paths..."
+        for ALT_PATH in "m/84h/1h/0h/0/0" "m/44h/1h/0h/0/0" "m/49h/1h/0h/0/0"; do
+            print_info "Trying path: ${ALT_PATH}"
+            PRIVKEY=$(python3 "${DERIVE_SCRIPT}" "${XPRV}" "${ALT_PATH}" 2>&1)
+            if [ -n "$PRIVKEY" ] && [ ${#PRIVKEY} -gt 20 ] && ! echo "$PRIVKEY" | grep -qi "error"; then
+                print_success "Found matching key at path: ${ALT_PATH}"
+                break
+            fi
+        done
+    fi
+    
+    if [ -n "$PRIVKEY" ] && [ ${#PRIVKEY} -gt 20 ] && ! echo "$PRIVKEY" | grep -qi "error"; then
+        # Verify the private key matches the challenge public key
+        print_info "Verifying extracted private key matches challenge..."
+        
+        # Import into a temporary regtest wallet to get the public key
+        TEMP_WALLET="temp_verify_$(date +%s)"
+        ${BITCOIN_CLI} -regtest \
+            -rpcuser=${RPC_USER} \
+            -rpcpassword=${RPC_PASSWORD} \
+            -rpcport=${REGTEST_RPC_PORT} \
+            -datadir=${REGTEST_DATADIR} \
+            createwallet ${TEMP_WALLET} > /dev/null 2>&1
+        
+        IMPORT_RESULT=$(${BITCOIN_CLI} -regtest \
+            -rpcuser=${RPC_USER} \
+            -rpcpassword=${RPC_PASSWORD} \
+            -rpcport=${REGTEST_RPC_PORT} \
+            -datadir=${REGTEST_DATADIR} \
+            -rpcwallet=${TEMP_WALLET} \
+            importprivkey "${PRIVKEY}" "" false 2>&1)
+        
+        if [ $? -eq 0 ] || echo "$IMPORT_RESULT" | grep -qi "already exists"; then
+            # Get address and public key
+            ADDR=$(${BITCOIN_CLI} -regtest \
+                -rpcuser=${RPC_USER} \
+                -rpcpassword=${RPC_PASSWORD} \
+                -rpcport=${REGTEST_RPC_PORT} \
+                -datadir=${REGTEST_DATADIR} \
+                -rpcwallet=${TEMP_WALLET} \
+                getnewaddress 2>&1)
+            
+            ADDR_INFO=$(${BITCOIN_CLI} -regtest \
+                -rpcuser=${RPC_USER} \
+                -rpcpassword=${RPC_PASSWORD} \
+                -rpcport=${REGTEST_RPC_PORT} \
+                -datadir=${REGTEST_DATADIR} \
+                -rpcwallet=${TEMP_WALLET} \
+                getaddressinfo ${ADDR} 2>&1)
+            
+            PUBKEY_FROM_KEY=$(echo "$ADDR_INFO" | grep -o '"pubkey": "[^"]*"' | cut -d'"' -f4)
+            
+            # Extract public key from challenge (after 5121 and before 51ae)
+            CHALLENGE_PUBKEY=$(echo "${SIGNET_CHALLENGE}" | sed 's/^5121//' | sed 's/51ae$//')
+            
+            # Clean up temp wallet
+            ${BITCOIN_CLI} -regtest \
+                -rpcuser=${RPC_USER} \
+                -rpcpassword=${RPC_PASSWORD} \
+                -rpcport=${REGTEST_RPC_PORT} \
+                -datadir=${REGTEST_DATADIR} \
+                unloadwallet ${TEMP_WALLET} > /dev/null 2>&1
+            
+            if [ "${PUBKEY_FROM_KEY}" = "${CHALLENGE_PUBKEY}" ]; then
+                print_success "Private key matches challenge public key!"
+                echo "${PRIVKEY}" > "${SIGNET_PRIVKEY_FILE}"
+                chmod 600 "${SIGNET_PRIVKEY_FILE}"
+                print_success "Saved private key to ${SIGNET_PRIVKEY_FILE}"
+                return 0
+            else
+                print_warning "Extracted private key does not match challenge public key"
+                print_info "Challenge pubkey: ${CHALLENGE_PUBKEY:0:20}..."
+                print_info "Key pubkey: ${PUBKEY_FROM_KEY:0:20}..."
+                print_info "Will need to regenerate signet challenge"
+                return 1
+            fi
+        else
+            print_error "Failed to import key for verification: ${IMPORT_RESULT}"
+            return 1
+        fi
+    else
+        print_error "Failed to derive private key: ${PRIVKEY}"
+        return 1
+    fi
+}
+
 # Verify signet setup (challenge and private key/descriptor)
 verify_signet_setup() {
     load_signet_challenge
@@ -979,21 +1123,35 @@ verify_signet_setup() {
         return 1
     fi
     
-    # Check for either private key file OR descriptor file
+    # Check for private key file first
     if [ -f "${SIGNET_PRIVKEY_FILE}" ]; then
         print_info "Signet challenge: ${SIGNET_CHALLENGE:0:40}..."
         print_info "Private key file exists"
         return 0
-    elif [ -f "${SIGNET_DATADIR}/.signet_descriptor" ]; then
+    fi
+    
+    # Try to extract private key from descriptor if base58 is available
+    if [ -f "${SIGNET_DATADIR}/.signet_descriptor" ]; then
         print_info "Signet challenge: ${SIGNET_CHALLENGE:0:40}..."
-        print_info "Descriptor file exists (will be used for block signing)"
-        return 0
+        print_info "Descriptor file exists, attempting to extract WIF private key..."
+        extract_privkey_from_descriptor
+        if [ $? -eq 0 ]; then
+            print_success "Successfully extracted WIF private key from descriptor!"
+            return 0
+        else
+            print_error "Could not extract WIF private key from descriptor"
+            print_error "The descriptor may not match the challenge public key"
+            print_error "Signet block signing requires the WIF private key imported via importprivkey"
+            print_info "Solution: Regenerate signet challenge (option 1) now that base58 is installed"
+            print_info "This will create the WIF private key file needed for block signing"
+            return 1
+        fi
     else
         print_error "Neither private key file nor descriptor file found!"
         print_error "Private key file: ${SIGNET_PRIVKEY_FILE}"
         print_error "Descriptor file: ${SIGNET_DATADIR}/.signet_descriptor"
         print_error "Signet blocks cannot be signed without the private key or descriptor!"
-        print_info "You may need to regenerate the signet challenge"
+        print_info "You may need to regenerate the signet challenge (option 1)"
         return 1
     fi
 }
