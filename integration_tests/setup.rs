@@ -212,6 +212,7 @@ impl Sidechain for PostSetup {
                 && match utxo.output.content {
                     OutputContent::Value(utxo_value) => utxo_value == value,
                     OutputContent::Withdrawal { .. } => false,
+                    OutputContent::SwapPending { .. } => false,
                 }
                 && match utxo.outpoint {
                     coinshift::types::OutPoint::Deposit(outpoint) => {
