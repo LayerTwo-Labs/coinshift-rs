@@ -17,11 +17,11 @@ SIGNET_WALLET="signetwallet"
 REGTEST_WALLET="regtestwallet"
 
 # ZMQ ports
-ZMQ_SEQUENCE="tcp://0.0.0.0:29000"
-ZMQ_HASHBLOCK="tcp://0.0.0.0:29001"
-ZMQ_HASHTX="tcp://0.0.0.0:29002"
-ZMQ_RAWBLOCK="tcp://0.0.0.0:29003"
-ZMQ_RAWTX="tcp://0.0.0.0:29004"
+ZMQ_SEQUENCE="tcp://127.0.0.1:29000"
+ZMQ_HASHBLOCK="tcp://127.0.0.1:29001"
+ZMQ_HASHTX="tcp://127.0.0.1:29002"
+ZMQ_RAWBLOCK="tcp://127.0.0.1:29003"
+ZMQ_RAWTX="tcp://127.0.0.1:29004"
 
 # Signet challenge (will be generated if not set)
 SIGNET_CHALLENGE_FILE="${SIGNET_DATADIR}/.signet_challenge"

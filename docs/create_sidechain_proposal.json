@@ -1,0 +1,15 @@
+{
+  "sidechain_id": 255,
+  "declaration": {
+    "v0": {
+      "title": "coinshift",
+      "description": "A sidechain implementing the coinshift protocol",
+      "hash_id_1": {
+        "hex": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "hash_id_2": {
+        "hex": "0000000000000000000000000000000000000000"
+      }
+    }
+  }
+}
