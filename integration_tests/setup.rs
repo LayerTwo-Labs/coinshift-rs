@@ -5,10 +5,14 @@ use std::{
 };
 
 use bip300301_enforcer_integration_tests::{
-    setup::{PostSetup as EnforcerPostSetup, Sidechain},
+    integration_test::{activate_sidechain, fund_enforcer, propose_sidechain},
+    setup::{Mode, Network, PostSetup as EnforcerPostSetup, Sidechain, setup as setup_enforcer},
     util::AbortOnDrop,
 };
-use bip300301_enforcer_lib::types::SidechainNumber;
+use bip300301_enforcer_lib::{
+    bins::CommandExt,
+    types::SidechainNumber,
+};
 use futures::{TryFutureExt as _, channel::mpsc, future};
 use reserve_port::ReservedPort;
 use thiserror::Error;
@@ -16,7 +20,71 @@ use coinshift::types::{OutputContent, PointedOutput};
 use coinshift_app_rpc_api::RpcClient as _;
 use tokio::time::sleep;
 
-use crate::util::CoinshiftApp;
+use crate::util::{BinPaths, CoinshiftApp};
+
+/// Verify that all required binary paths exist
+fn verify_bin_paths(bin_paths: &BinPaths) -> anyhow::Result<()> {
+    let current_dir = std::env::current_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
+    tracing::info!("Verifying all binary paths exist (current dir: {})", current_dir);
+    
+    // Check coinshift
+    let coinshift_path = if bin_paths.coinshift.is_relative() {
+        std::env::current_dir()
+            .ok()
+            .and_then(|cwd| cwd.join(&bin_paths.coinshift).canonicalize().ok())
+            .unwrap_or_else(|| bin_paths.coinshift.clone())
+    } else {
+        bin_paths.coinshift.clone()
+    };
+    tracing::info!("  Checking coinshift: {:?} (resolved: {:?})", bin_paths.coinshift, coinshift_path);
+    let coinshift_exists = coinshift_path.exists();
+    if !coinshift_exists {
+        anyhow::bail!("Coinshift binary does not exist at: {:?} (resolved from: {:?}, current dir: {})", 
+            coinshift_path, bin_paths.coinshift, current_dir);
+    }
+    
+    // Check enforcer binaries
+    tracing::info!("  Checking bitcoind: {:?}", bin_paths.others.bitcoind);
+    if !bin_paths.others.bitcoind.exists() {
+        anyhow::bail!("Bitcoind binary does not exist at: {:?} (current dir: {})", 
+            bin_paths.others.bitcoind, current_dir);
+    }
+    
+    tracing::info!("  Checking bitcoin_cli: {:?}", bin_paths.others.bitcoin_cli);
+    if !bin_paths.others.bitcoin_cli.exists() {
+        anyhow::bail!("Bitcoin-cli binary does not exist at: {:?} (current dir: {})", 
+            bin_paths.others.bitcoin_cli, current_dir);
+    }
+    
+    tracing::info!("  Checking bitcoin_util: {:?}", bin_paths.others.bitcoin_util);
+    if !bin_paths.others.bitcoin_util.exists() {
+        anyhow::bail!("Bitcoin-util binary does not exist at: {:?} (current dir: {})", 
+            bin_paths.others.bitcoin_util, current_dir);
+    }
+    
+    tracing::info!("  Checking bip300301_enforcer: {:?}", bin_paths.others.bip300301_enforcer);
+    if !bin_paths.others.bip300301_enforcer.exists() {
+        anyhow::bail!("Bip300301_enforcer binary does not exist at: {:?} (current dir: {})", 
+            bin_paths.others.bip300301_enforcer, current_dir);
+    }
+    
+    tracing::info!("  Checking electrs: {:?}", bin_paths.others.electrs);
+    if !bin_paths.others.electrs.exists() {
+        anyhow::bail!("Electrs binary does not exist at: {:?} (current dir: {})", 
+            bin_paths.others.electrs, current_dir);
+    }
+    
+    tracing::info!("  Checking signet_miner: {:?}", bin_paths.others.signet_miner);
+    if !bin_paths.others.signet_miner.exists() {
+        anyhow::bail!("Signet miner script does not exist at: {:?} (current dir: {})", 
+            bin_paths.others.signet_miner, current_dir);
+    }
+    
+    tracing::info!("✓ All binary paths verified");
+    Ok(())
+}
 
 #[derive(Debug)]
 pub struct ReservedPorts {
@@ -283,4 +351,152 @@ impl Sidechain for PostSetup {
         let m6id = pending_withdrawal_bundle.compute_m6id();
         Ok(bip300301_enforcer_lib::types::M6id(m6id.0))
     }
+}
+
+/// Complete setup result containing both enforcer and coinshift post-setup
+// #[derive(Debug)]
+pub struct CompleteSetup {
+    pub enforcer: EnforcerPostSetup,
+    pub coinshift: PostSetup,
+}
+
+/// Mine a single signet block
+async fn mine_single_signet(
+    signet_miner: &bip300301_enforcer_lib::bins::SignetMiner,
+    mining_address: &bitcoin::Address,
+) -> anyhow::Result<()> {
+    let _mine_output = signet_miner
+        .command(
+            "generate",
+            vec![
+                "--address",
+                &mining_address.to_string(),
+                "--block-interval",
+                "1",
+            ],
+        )
+        .run_utf8()
+        .await?;
+    Ok(())
+}
+
+/// Setup signet network with 2 blocks mined
+pub async fn setup_signet(
+    bin_paths: &BinPaths,
+    coinshift_init: Init,
+    res_tx: mpsc::UnboundedSender<anyhow::Result<()>>,
+) -> anyhow::Result<CompleteSetup> {
+    tracing::info!("Setting up signet network");
+    
+    // Verify all binary paths exist
+    verify_bin_paths(bin_paths)?;
+    
+    // Setup enforcer with signet
+    // Note: Signet requires Mode::GetBlockTemplate because GenerateBlocks is not supported on Signet
+    tracing::info!("Calling setup_enforcer for signet network with GetBlockTemplate mode");
+    let mut enforcer_post_setup = setup_enforcer(
+        &bin_paths.others,
+        Network::Signet,
+        Mode::GetBlockTemplate,
+        res_tx.clone(),
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!("setup_enforcer failed: {:#}", e);
+        anyhow::anyhow!("setup_enforcer failed: {:#}", e)
+    })?;
+    tracing::info!("setup_enforcer completed successfully");
+    
+    tracing::info!("Enforcer setup complete, mining additional signet block to reach 2 blocks total");
+    
+    // First block is already mined during setup, so we need 1 more to reach 2 blocks
+    let () = mine_single_signet(
+        &enforcer_post_setup.signet_miner,
+        &enforcer_post_setup.mining_address,
+    )
+    .await?;
+    
+    // Verify we have at least 2 blocks
+    let block_count: u32 = enforcer_post_setup
+        .bitcoin_cli
+        .command::<String, _, String, _, _>([], "getblockcount", [])
+        .run_utf8()
+        .await?
+        .parse()?;
+    anyhow::ensure!(block_count >= 2, "Expected at least 2 blocks, got {block_count}");
+    tracing::info!("Successfully mined 2 signet blocks (block count: {block_count})");
+    
+    // Setup coinshift sidechain
+    tracing::info!("Setting up coinshift sidechain");
+    let () = propose_sidechain::<PostSetup>(&mut enforcer_post_setup).await?;
+    tracing::info!("Proposed sidechain successfully");
+    let () = activate_sidechain::<PostSetup>(&mut enforcer_post_setup).await?;
+    tracing::info!("Activated sidechain successfully");
+    let () = fund_enforcer::<PostSetup>(&mut enforcer_post_setup).await?;
+    tracing::info!("Funded enforcer successfully");
+    
+    let coinshift_post_setup = PostSetup::setup(
+        coinshift_init,
+        &enforcer_post_setup,
+        res_tx,
+    )
+    .await?;
+    tracing::info!("Coinshift setup complete");
+    
+    Ok(CompleteSetup {
+        enforcer: enforcer_post_setup,
+        coinshift: coinshift_post_setup,
+    })
+}
+
+/// Setup regtest network
+pub async fn setup_regtest(
+    bin_paths: &BinPaths,
+    coinshift_init: Init,
+    mode: Mode,
+    res_tx: mpsc::UnboundedSender<anyhow::Result<()>>,
+) -> anyhow::Result<CompleteSetup> {
+    tracing::info!("Setting up regtest network");
+    
+    // Verify all binary paths exist
+    verify_bin_paths(bin_paths)?;
+    
+    // Setup enforcer with regtest
+    tracing::info!("Calling setup_enforcer for regtest network");
+    let mut enforcer_post_setup = setup_enforcer(
+        &bin_paths.others,
+        Network::Regtest,
+        mode,
+        res_tx.clone(),
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!("setup_enforcer failed: {:#}", e);
+        anyhow::anyhow!("setup_enforcer failed: {:#}", e)
+    })?;
+    tracing::info!("setup_enforcer completed successfully");
+    
+    tracing::info!("Enforcer setup complete");
+    
+    // Setup coinshift sidechain
+    tracing::info!("Setting up coinshift sidechain");
+    let () = propose_sidechain::<PostSetup>(&mut enforcer_post_setup).await?;
+    tracing::info!("Proposed sidechain successfully");
+    let () = activate_sidechain::<PostSetup>(&mut enforcer_post_setup).await?;
+    tracing::info!("Activated sidechain successfully");
+    let () = fund_enforcer::<PostSetup>(&mut enforcer_post_setup).await?;
+    tracing::info!("Funded enforcer successfully");
+    
+    let coinshift_post_setup = PostSetup::setup(
+        coinshift_init,
+        &enforcer_post_setup,
+        res_tx,
+    )
+    .await?;
+    tracing::info!("Coinshift setup complete");
+    
+    Ok(CompleteSetup {
+        enforcer: enforcer_post_setup,
+        coinshift: coinshift_post_setup,
+    })
 }

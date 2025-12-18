@@ -4,6 +4,7 @@ use tracing_subscriber::{filter as tracing_filter, layer::SubscriberExt};
 mod ibd;
 mod integration_test;
 mod setup;
+mod setup_test;
 mod unknown_withdrawal;
 mod util;
 
