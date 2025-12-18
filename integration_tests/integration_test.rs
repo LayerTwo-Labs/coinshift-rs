@@ -1,3 +1,4 @@
+use std::error::Error;
 use bip300301_enforcer_integration_tests::{
     integration_test::deposit,
     setup::{Mode, Network, Sidechain},
@@ -12,7 +13,7 @@ use tracing::Instrument as _;
 
 use crate::{
     ibd::ibd_trial,
-    setup::{Init, PostSetup, setup_signet},
+    setup::{Init, PostSetup, get_or_init_shared_signet_setup},
     setup_test::{regtest_setup_trial, signet_setup_trial},
     unknown_withdrawal::unknown_withdrawal_trial,
     util::BinPaths,
@@ -39,20 +40,16 @@ async fn swap_test_task(
 ) -> anyhow::Result<()> {
     tracing::info!("Testing swap creation with signet funding");
     
-    // Setup signet network
-    let mut complete_setup = setup_signet(
-        &bin_paths,
-        Init {
-            coinshift_app: bin_paths.coinshift.clone(),
-            data_dir_suffix: Some("swap-test".to_owned()),
-        },
-        res_tx.clone(),
-    )
-    .await?;
-    tracing::info!("✓ Signet setup complete");
+    // Get or initialize shared signet setup (enforcer + sidechain, set up once for all tests)
+    let shared_setup = get_or_init_shared_signet_setup(&bin_paths, res_tx.clone()).await?;
+    tracing::info!("✓ Got shared signet setup");
+    
+    // Create isolated coinshift instance for this test
+    let mut coinshift = shared_setup.create_coinshift_instance(Some("swap-test".to_owned())).await?;
+    tracing::info!("✓ Created isolated coinshift instance");
     
     // Get deposit address
-    let deposit_address = complete_setup.coinshift.get_deposit_address().await?;
+    let deposit_address = coinshift.get_deposit_address().await?;
     tracing::info!("✓ Got deposit address: {}", deposit_address);
     
     // Fund BTC from signet into the sidechain
@@ -60,23 +57,30 @@ async fn swap_test_task(
     const DEPOSIT_FEE: bitcoin::Amount = bitcoin::Amount::from_sat(1_000); // 0.00001 BTC fee
     
     tracing::info!("Depositing {} sats to sidechain", DEPOSIT_AMOUNT.to_sat());
-    let () = deposit(
-        &mut complete_setup.enforcer,
-        &mut complete_setup.coinshift,
-        &deposit_address,
-        DEPOSIT_AMOUNT,
-        DEPOSIT_FEE,
-    )
-    .await?;
+    // Lock the shared enforcer for the deposit operation
+    {
+        let mut enforcer_guard = shared_setup.enforcer.lock().await;
+        let () = deposit(
+            &mut *enforcer_guard,
+            &mut coinshift,
+            &deposit_address,
+            DEPOSIT_AMOUNT,
+            DEPOSIT_FEE,
+        )
+        .await?;
+    }
     tracing::info!("✓ Deposited to sidechain successfully");
     
     // Confirm the deposit by BMMing a block
     tracing::info!("BMMing block to confirm deposit");
-    let () = complete_setup.coinshift.bmm_single(&mut complete_setup.enforcer).await?;
+    {
+        let mut enforcer_guard = shared_setup.enforcer.lock().await;
+        let () = coinshift.bmm_single(&mut *enforcer_guard).await?;
+    }
     tracing::info!("✓ BMM complete");
     
     // Verify we have the deposit in UTXOs
-    let utxos = complete_setup.coinshift.rpc_client.list_utxos().await?;
+    let utxos = coinshift.rpc_client.list_utxos().await?;
     let deposit_utxos: Vec<_> = utxos
         .iter()
         .filter(|utxo| {
@@ -88,7 +92,7 @@ async fn swap_test_task(
     tracing::info!("✓ Found {} deposit UTXO(s)", deposit_utxos.len());
     
     // Get a new address for the swap recipient
-    let l2_recipient_address = complete_setup.coinshift.rpc_client.get_new_address().await?;
+    let l2_recipient_address = coinshift.rpc_client.get_new_address().await?;
     tracing::info!("✓ Got L2 recipient address: {}", l2_recipient_address);
     
     // Create a swap (L2 → L1)
@@ -99,12 +103,14 @@ async fn swap_test_task(
     
     // Get a signet address for L1 recipient
     use bip300301_enforcer_lib::bins::CommandExt;
-    let l1_recipient_address = complete_setup
-        .enforcer
-        .bitcoin_cli
-        .command::<String, _, String, _, _>([], "getnewaddress", [])
-        .run_utf8()
-        .await?;
+    let l1_recipient_address = {
+        let enforcer_guard = shared_setup.enforcer.lock().await;
+        enforcer_guard
+            .bitcoin_cli
+            .command::<String, _, String, _, _>([], "getnewaddress", [])
+            .run_utf8()
+            .await?
+    };
     tracing::info!("✓ Got L1 recipient address: {}", l1_recipient_address);
     
     tracing::info!(
@@ -112,8 +118,7 @@ async fn swap_test_task(
         L2_AMOUNT_SATS,
         L1_AMOUNT_SATS
     );
-    let (swap_id, swap_txid) = complete_setup
-        .coinshift
+    let (swap_id, swap_txid) = coinshift
         .rpc_client
         .create_swap(
             ParentChainType::Signet,
@@ -134,27 +139,36 @@ async fn swap_test_task(
     sleep(std::time::Duration::from_secs(2)).await;
     
     // Get current block count before BMM
-    let block_count_before = complete_setup.coinshift.rpc_client.getblockcount().await?;
+    let block_count_before = coinshift.rpc_client.getblockcount().await?;
     tracing::debug!("Block count before BMM: {}", block_count_before);
     
     // Mine a block to confirm the swap transaction
     // Retry BMM in case of network task cancellation errors
     tracing::info!("BMMing block to confirm swap transaction");
-    let mut bmm_result = complete_setup.coinshift.bmm_single(&mut complete_setup.enforcer).await;
+    let mut bmm_result = {
+        let mut enforcer_guard = shared_setup.enforcer.lock().await;
+        coinshift.bmm_single(&mut *enforcer_guard).await
+    };
     if bmm_result.is_err() {
         tracing::warn!("First BMM attempt failed, waiting longer and retrying...");
         sleep(std::time::Duration::from_secs(3)).await;
-        bmm_result = complete_setup.coinshift.bmm_single(&mut complete_setup.enforcer).await;
+        bmm_result = {
+            let mut enforcer_guard = shared_setup.enforcer.lock().await;
+            coinshift.bmm_single(&mut *enforcer_guard).await
+        };
         if bmm_result.is_err() {
             tracing::warn!("Second BMM attempt also failed, waiting even longer and retrying once more...");
             sleep(std::time::Duration::from_secs(3)).await;
-            bmm_result = complete_setup.coinshift.bmm_single(&mut complete_setup.enforcer).await;
+            bmm_result = {
+                let mut enforcer_guard = shared_setup.enforcer.lock().await;
+                coinshift.bmm_single(&mut *enforcer_guard).await
+            };
         }
     }
     let () = bmm_result?;
     
     // Verify block count increased
-    let block_count_after = complete_setup.coinshift.rpc_client.getblockcount().await?;
+    let block_count_after = coinshift.rpc_client.getblockcount().await?;
     tracing::debug!("Block count after BMM: {}", block_count_after);
     anyhow::ensure!(
         block_count_after > block_count_before,
@@ -169,8 +183,7 @@ async fn swap_test_task(
     // Retry a few times in case block processing is still in progress
     let mut swap_status: Option<coinshift::types::Swap> = None;
     for attempt in 1..=5 {
-        swap_status = complete_setup
-            .coinshift
+        swap_status = coinshift
             .rpc_client
             .get_swap_status(swap_id)
             .await?;
@@ -194,7 +207,7 @@ async fn swap_test_task(
     tracing::info!("  L2 amount: {} sats", swap.l2_amount.to_sat());
     
     // Verify swap appears in list
-    let all_swaps = complete_setup.coinshift.rpc_client.list_swaps().await?;
+    let all_swaps = coinshift.rpc_client.list_swaps().await?;
     anyhow::ensure!(
         all_swaps.iter().any(|s| s.id == swap_id),
         "Swap should appear in list_swaps"
@@ -202,13 +215,10 @@ async fn swap_test_task(
     tracing::info!("✓ Swap appears in swap list");
     
     // Cleanup - stop node gracefully first
-    let _unused = complete_setup.coinshift.rpc_client.stop().await;
+    // Note: We don't cleanup the shared enforcer here as it's shared across tests
+    let _unused = coinshift.rpc_client.stop().await;
     sleep(std::time::Duration::from_secs(2)).await;
-    drop(complete_setup.coinshift);
-    sleep(std::time::Duration::from_secs(1)).await;
-    drop(complete_setup.enforcer.tasks);
-    sleep(std::time::Duration::from_secs(1)).await;
-    complete_setup.enforcer.out_dir.cleanup()?;
+    drop(coinshift);
     
     tracing::info!("✓ Swap test completed successfully");
     Ok(())
@@ -243,20 +253,16 @@ async fn read_swap_test_task(
 ) -> anyhow::Result<()> {
     tracing::info!("Testing swap read and decode");
     
-    // Setup signet network
-    let mut complete_setup = setup_signet(
-        &bin_paths,
-        Init {
-            coinshift_app: bin_paths.coinshift.clone(),
-            data_dir_suffix: Some("read-swap-test".to_owned()),
-        },
-        res_tx.clone(),
-    )
-    .await?;
-    tracing::info!("✓ Signet setup complete");
+    // Get or initialize shared signet setup (enforcer + sidechain, set up once for all tests)
+    let shared_setup = get_or_init_shared_signet_setup(&bin_paths, res_tx.clone()).await?;
+    tracing::info!("✓ Got shared signet setup");
+    
+    // Create isolated coinshift instance for this test
+    let mut coinshift = shared_setup.create_coinshift_instance(Some("read-swap-test".to_owned())).await?;
+    tracing::info!("✓ Created isolated coinshift instance");
     
     // Get deposit address
-    let deposit_address = complete_setup.coinshift.get_deposit_address().await?;
+    let deposit_address = coinshift.get_deposit_address().await?;
     tracing::info!("✓ Got deposit address: {}", deposit_address);
     
     // Fund BTC from signet into the sidechain
@@ -264,23 +270,30 @@ async fn read_swap_test_task(
     const DEPOSIT_FEE: bitcoin::Amount = bitcoin::Amount::from_sat(1_000); // 0.00001 BTC fee
     
     tracing::info!("Depositing {} sats to sidechain", DEPOSIT_AMOUNT.to_sat());
-    let () = deposit(
-        &mut complete_setup.enforcer,
-        &mut complete_setup.coinshift,
-        &deposit_address,
-        DEPOSIT_AMOUNT,
-        DEPOSIT_FEE,
-    )
-    .await?;
+    // Lock the shared enforcer for the deposit operation
+    {
+        let mut enforcer_guard = shared_setup.enforcer.lock().await;
+        let () = deposit(
+            &mut *enforcer_guard,
+            &mut coinshift,
+            &deposit_address,
+            DEPOSIT_AMOUNT,
+            DEPOSIT_FEE,
+        )
+        .await?;
+    }
     tracing::info!("✓ Deposited to sidechain successfully");
     
     // Confirm the deposit by BMMing a block
     tracing::info!("BMMing block to confirm deposit");
-    let () = complete_setup.coinshift.bmm_single(&mut complete_setup.enforcer).await?;
+    {
+        let mut enforcer_guard = shared_setup.enforcer.lock().await;
+        let () = coinshift.bmm_single(&mut *enforcer_guard).await?;
+    }
     tracing::info!("✓ BMM complete");
     
     // Get a new address for the swap recipient
-    let l2_recipient_address = complete_setup.coinshift.rpc_client.get_new_address().await?;
+    let l2_recipient_address = coinshift.rpc_client.get_new_address().await?;
     tracing::info!("✓ Got L2 recipient address: {}", l2_recipient_address);
     
     // Create a swap (L2 → L1)
@@ -290,12 +303,14 @@ async fn read_swap_test_task(
     
     // Get a signet address for L1 recipient
     use bip300301_enforcer_lib::bins::CommandExt;
-    let l1_recipient_address = complete_setup
-        .enforcer
-        .bitcoin_cli
-        .command::<String, _, String, _, _>([], "getnewaddress", [])
-        .run_utf8()
-        .await?;
+    let l1_recipient_address = {
+        let enforcer_guard = shared_setup.enforcer.lock().await;
+        enforcer_guard
+            .bitcoin_cli
+            .command::<String, _, String, _, _>([], "getnewaddress", [])
+            .run_utf8()
+            .await?
+    };
     tracing::info!("✓ Got L1 recipient address: {}", l1_recipient_address);
     
     tracing::info!(
@@ -303,8 +318,7 @@ async fn read_swap_test_task(
         L2_AMOUNT_SATS,
         L1_AMOUNT_SATS
     );
-    let (swap_id, swap_txid) = complete_setup
-        .coinshift
+    let (swap_id, swap_txid) = coinshift
         .rpc_client
         .create_swap(
             ParentChainType::Signet,
@@ -325,15 +339,24 @@ async fn read_swap_test_task(
     
     // Mine a block to confirm the swap transaction
     tracing::info!("BMMing block to confirm swap transaction");
-    let mut bmm_result = complete_setup.coinshift.bmm_single(&mut complete_setup.enforcer).await;
+    let mut bmm_result = {
+        let mut enforcer_guard = shared_setup.enforcer.lock().await;
+        coinshift.bmm_single(&mut *enforcer_guard).await
+    };
     if bmm_result.is_err() {
         tracing::warn!("First BMM attempt failed, waiting longer and retrying...");
         sleep(std::time::Duration::from_secs(3)).await;
-        bmm_result = complete_setup.coinshift.bmm_single(&mut complete_setup.enforcer).await;
+        bmm_result = {
+            let mut enforcer_guard = shared_setup.enforcer.lock().await;
+            coinshift.bmm_single(&mut *enforcer_guard).await
+        };
         if bmm_result.is_err() {
             tracing::warn!("Second BMM attempt also failed, waiting even longer and retrying once more...");
             sleep(std::time::Duration::from_secs(3)).await;
-            bmm_result = complete_setup.coinshift.bmm_single(&mut complete_setup.enforcer).await;
+            bmm_result = {
+                let mut enforcer_guard = shared_setup.enforcer.lock().await;
+                coinshift.bmm_single(&mut *enforcer_guard).await
+            };
         }
     }
     let () = bmm_result?;
@@ -346,8 +369,7 @@ async fn read_swap_test_task(
     tracing::info!("Reading swap by ID: {}", swap_id);
     let mut swap_status: Option<coinshift::types::Swap> = None;
     for attempt in 1..=5 {
-        swap_status = complete_setup
-            .coinshift
+        swap_status = coinshift
             .rpc_client
             .get_swap_status(swap_id)
             .await?;
@@ -425,13 +447,10 @@ async fn read_swap_test_task(
     tracing::info!("=== END SWAP DETAILS ===");
     
     // Cleanup - stop node gracefully first
-    let _unused = complete_setup.coinshift.rpc_client.stop().await;
+    // Note: We don't cleanup the shared enforcer here as it's shared across tests
+    let _unused = coinshift.rpc_client.stop().await;
     sleep(std::time::Duration::from_secs(2)).await;
-    drop(complete_setup.coinshift);
-    sleep(std::time::Duration::from_secs(1)).await;
-    drop(complete_setup.enforcer.tasks);
-    sleep(std::time::Duration::from_secs(1)).await;
-    complete_setup.enforcer.out_dir.cleanup()?;
+    drop(coinshift);
     
     tracing::info!("✓ Read swap test completed successfully");
     Ok(())
@@ -466,20 +485,16 @@ async fn fill_swap_test_task(
 ) -> anyhow::Result<()> {
     tracing::info!("Testing swap fill and balance checking");
     
-    // Setup signet network
-    let mut complete_setup = setup_signet(
-        &bin_paths,
-        Init {
-            coinshift_app: bin_paths.coinshift.clone(),
-            data_dir_suffix: Some("fill-swap-test".to_owned()),
-        },
-        res_tx.clone(),
-    )
-    .await?;
-    tracing::info!("✓ Signet setup complete");
+    // Get or initialize shared signet setup (enforcer + sidechain, set up once for all tests)
+    let shared_setup = get_or_init_shared_signet_setup(&bin_paths, res_tx.clone()).await?;
+    tracing::info!("✓ Got shared signet setup");
+    
+    // Create isolated coinshift instance for this test
+    let mut coinshift = shared_setup.create_coinshift_instance(Some("fill-swap-test".to_owned())).await?;
+    tracing::info!("✓ Created isolated coinshift instance");
     
     // Get deposit address
-    let deposit_address = complete_setup.coinshift.get_deposit_address().await?;
+    let deposit_address = coinshift.get_deposit_address().await?;
     tracing::info!("✓ Got deposit address: {}", deposit_address);
     
     // Fund BTC from signet into the sidechain
@@ -487,29 +502,36 @@ async fn fill_swap_test_task(
     const DEPOSIT_FEE: bitcoin::Amount = bitcoin::Amount::from_sat(1_000); // 0.00001 BTC fee
     
     tracing::info!("Depositing {} sats to sidechain", DEPOSIT_AMOUNT.to_sat());
-    let () = deposit(
-        &mut complete_setup.enforcer,
-        &mut complete_setup.coinshift,
-        &deposit_address,
-        DEPOSIT_AMOUNT,
-        DEPOSIT_FEE,
-    )
-    .await?;
+    // Lock the shared enforcer for the deposit operation
+    {
+        let mut enforcer_guard = shared_setup.enforcer.lock().await;
+        let () = deposit(
+            &mut *enforcer_guard,
+            &mut coinshift,
+            &deposit_address,
+            DEPOSIT_AMOUNT,
+            DEPOSIT_FEE,
+        )
+        .await?;
+    }
     tracing::info!("✓ Deposited to sidechain successfully");
     
     // Confirm the deposit by BMMing a block
     tracing::info!("BMMing block to confirm deposit");
-    let () = complete_setup.coinshift.bmm_single(&mut complete_setup.enforcer).await?;
+    {
+        let mut enforcer_guard = shared_setup.enforcer.lock().await;
+        let () = coinshift.bmm_single(&mut *enforcer_guard).await?;
+    }
     tracing::info!("✓ BMM complete");
     
     // Get initial balance
-    let initial_balance = complete_setup.coinshift.rpc_client.balance().await?;
+    let initial_balance = coinshift.rpc_client.balance().await?;
     tracing::info!("=== INITIAL BALANCES ===");
     tracing::info!("L2 Balance (Coinshift): {} sats", initial_balance.total.to_sat());
     tracing::info!("  Available: {} sats", initial_balance.available.to_sat());
     
     // Get a new address for the swap recipient
-    let l2_recipient_address = complete_setup.coinshift.rpc_client.get_new_address().await?;
+    let l2_recipient_address = coinshift.rpc_client.get_new_address().await?;
     tracing::info!("✓ Got L2 recipient address: {}", l2_recipient_address);
     
     // Create a swap (L2 → L1)
@@ -519,12 +541,14 @@ async fn fill_swap_test_task(
     
     // Get a signet address for L1 recipient
     use bip300301_enforcer_lib::bins::CommandExt;
-    let l1_recipient_address = complete_setup
-        .enforcer
-        .bitcoin_cli
-        .command::<String, _, String, _, _>([], "getnewaddress", [])
-        .run_utf8()
-        .await?;
+    let l1_recipient_address = {
+        let enforcer_guard = shared_setup.enforcer.lock().await;
+        enforcer_guard
+            .bitcoin_cli
+            .command::<String, _, String, _, _>([], "getnewaddress", [])
+            .run_utf8()
+            .await?
+    };
     tracing::info!("✓ Got L1 recipient address: {}", l1_recipient_address);
     
     tracing::info!(
@@ -532,8 +556,7 @@ async fn fill_swap_test_task(
         L2_AMOUNT_SATS,
         L1_AMOUNT_SATS
     );
-    let (swap_id, swap_txid) = complete_setup
-        .coinshift
+    let (swap_id, swap_txid) = coinshift
         .rpc_client
         .create_swap(
             ParentChainType::Signet,
@@ -552,27 +575,98 @@ async fn fill_swap_test_task(
     // Wait for the transaction to be fully processed
     sleep(std::time::Duration::from_secs(2)).await;
     
+    // Debug: Check state before BMM
+    let block_count_before = coinshift.rpc_client.getblockcount().await?;
+    tracing::debug!("Block count before BMM: {}", block_count_before);
+    
+    // Check swap status before BMM
+    let swap_status_before = coinshift.rpc_client.get_swap_status(swap_id).await?;
+    tracing::debug!("Swap status before BMM: {:?}", swap_status_before.as_ref().map(|s| &s.state));
+    
+    // Check UTXOs to see if swap transaction created any outputs
+    let utxos_before = coinshift.rpc_client.list_utxos().await?;
+    let swap_utxos: Vec<_> = utxos_before
+        .iter()
+        .filter(|utxo| {
+            matches!(utxo.output.content, coinshift::types::OutputContent::SwapPending { .. })
+        })
+        .collect();
+    tracing::debug!("Found {} swap pending UTXOs before BMM", swap_utxos.len());
+    
+    // Check balance before BMM
+    let balance_before = coinshift.rpc_client.balance().await?;
+    tracing::debug!("Balance before BMM: total={} sats, available={} sats", 
+        balance_before.total.to_sat(), balance_before.available.to_sat());
+    
+    // Try calling mine() directly first to see if it works
+    tracing::debug!("Testing direct mine() call before BMM");
+    match coinshift.rpc_client.mine(None).await {
+        Ok(_) => tracing::debug!("Direct mine() call succeeded"),
+        Err(e) => tracing::warn!("Direct mine() call failed: {:#}", e),
+    }
+    
     // Mine a block to confirm the swap transaction
     tracing::info!("BMMing block to confirm swap transaction");
-    let mut bmm_result = complete_setup.coinshift.bmm_single(&mut complete_setup.enforcer).await;
-    if bmm_result.is_err() {
+    let mut bmm_result = {
+        let mut enforcer_guard = shared_setup.enforcer.lock().await;
+        coinshift.bmm_single(&mut *enforcer_guard).await
+    };
+    if let Err(ref err) = bmm_result {
+        tracing::error!("First BMM attempt failed with error: {:#}", err);
+        tracing::error!("Error source chain: {:?}", err.source());
         tracing::warn!("First BMM attempt failed, waiting longer and retrying...");
         sleep(std::time::Duration::from_secs(3)).await;
-        bmm_result = complete_setup.coinshift.bmm_single(&mut complete_setup.enforcer).await;
-        if bmm_result.is_err() {
+        
+        // Debug: Check state again before retry
+        let block_count_retry = coinshift.rpc_client.getblockcount().await?;
+        tracing::debug!("Block count before retry: {} (was {})", block_count_retry, block_count_before);
+        
+        bmm_result = {
+            let mut enforcer_guard = shared_setup.enforcer.lock().await;
+            coinshift.bmm_single(&mut *enforcer_guard).await
+        };
+        if let Err(ref err) = bmm_result {
+            tracing::error!("Second BMM attempt failed with error: {:#}", err);
+            tracing::error!("Error source chain: {:?}", err.source());
             tracing::warn!("Second BMM attempt also failed, waiting even longer and retrying once more...");
             sleep(std::time::Duration::from_secs(3)).await;
-            bmm_result = complete_setup.coinshift.bmm_single(&mut complete_setup.enforcer).await;
+            
+            // Debug: Check state again before final retry
+            let block_count_final = coinshift.rpc_client.getblockcount().await?;
+            tracing::debug!("Block count before final retry: {} (was {})", block_count_final, block_count_before);
+            
+            bmm_result = {
+                let mut enforcer_guard = shared_setup.enforcer.lock().await;
+                coinshift.bmm_single(&mut *enforcer_guard).await
+            };
+            if let Err(ref err) = bmm_result {
+                tracing::error!("Third BMM attempt failed with error: {:#}", err);
+                tracing::error!("Error source chain: {:?}", err.source());
+                // Final debug: Check state after all failures
+                let block_count_after = coinshift.rpc_client.getblockcount().await?;
+                tracing::error!("Block count after all BMM failures: {} (was {})", block_count_after, block_count_before);
+                let swap_status_after = coinshift.rpc_client.get_swap_status(swap_id).await?;
+                tracing::error!("Swap status after all BMM failures: {:?}", swap_status_after.as_ref().map(|s| &s.state));
+            }
         }
     }
     let () = bmm_result?;
-    tracing::info!("✓ BMM complete");
+    
+    // Verify block count increased
+    let block_count_after = coinshift.rpc_client.getblockcount().await?;
+    tracing::info!("✓ BMM complete (block {} -> {})", block_count_before, block_count_after);
+    anyhow::ensure!(
+        block_count_after > block_count_before,
+        "Block count should increase after BMM (was {}, now {})",
+        block_count_before,
+        block_count_after
+    );
     
     // Wait a bit for the block to be fully processed
     sleep(std::time::Duration::from_millis(500)).await;
     
     // Check balance after swap creation
-    let balance_after_swap = complete_setup.coinshift.rpc_client.balance().await?;
+    let balance_after_swap = coinshift.rpc_client.balance().await?;
     tracing::info!("=== BALANCE AFTER SWAP CREATION ===");
     tracing::info!("L2 Balance (Coinshift): {} sats", balance_after_swap.total.to_sat());
     tracing::info!("  Available: {} sats", balance_after_swap.available.to_sat());
@@ -580,8 +674,7 @@ async fn fill_swap_test_task(
     // Read swap to get details
     let mut swap_status: Option<coinshift::types::Swap> = None;
     for attempt in 1..=5 {
-        swap_status = complete_setup
-            .coinshift
+        swap_status = coinshift
             .rpc_client
             .get_swap_status(swap_id)
             .await?;
@@ -606,16 +699,18 @@ async fn fill_swap_test_task(
     tracing::info!("Sending {} sats to {} on Signet", L1_AMOUNT_SATS, l1_recipient_address);
     
     // Send L1 transaction to fill the swap
-    let l1_txid_str = complete_setup
-        .enforcer
-        .bitcoin_cli
-        .command::<String, _, String, _, _>(
-            [],
-            "sendtoaddress",
-            [l1_recipient_address.clone(), L1_AMOUNT_SATS.to_string()],
-        )
-        .run_utf8()
-        .await?;
+    let l1_txid_str = {
+        let enforcer_guard = shared_setup.enforcer.lock().await;
+        enforcer_guard
+            .bitcoin_cli
+            .command::<String, _, String, _, _>(
+                [],
+                "sendtoaddress",
+                [l1_recipient_address.clone(), L1_AMOUNT_SATS.to_string()],
+            )
+            .run_utf8()
+            .await?
+    };
     let l1_txid: bitcoin::Txid = l1_txid_str.trim().parse()?;
     tracing::info!("✓ L1 transaction sent (Signet TXID): {}", l1_txid);
     
@@ -623,15 +718,15 @@ async fn fill_swap_test_task(
     tracing::info!("Mining signet blocks to confirm L1 transaction...");
     for i in 0..3 {
         use bip300301_enforcer_integration_tests::mine::mine;
-        mine::<PostSetup>(&mut complete_setup.enforcer, 1, Some(true)).await?;
+        let mut enforcer_guard = shared_setup.enforcer.lock().await;
+        mine::<PostSetup>(&mut *enforcer_guard, 1, Some(true)).await?;
         tracing::info!("  Mined signet block {}", i + 1);
     }
     
     // Update swap with L1 transaction ID
     tracing::info!("Updating swap with L1 transaction ID...");
     let l1_txid_bytes: &[u8] = l1_txid.as_ref();
-    complete_setup
-        .coinshift
+    coinshift
         .rpc_client
         .update_swap_l1_txid(swap_id, hex::encode(l1_txid_bytes), 3)
         .await?;
@@ -641,8 +736,7 @@ async fn fill_swap_test_task(
     sleep(std::time::Duration::from_secs(1)).await;
     
     // Read swap again to check state
-    let swap_after_fill = complete_setup
-        .coinshift
+    let swap_after_fill = coinshift
         .rpc_client
         .get_swap_status(swap_id)
         .await?
@@ -650,7 +744,7 @@ async fn fill_swap_test_task(
     tracing::info!("✓ Swap state after fill: {:?}", swap_after_fill.state);
     
     // Check final balances
-    let final_balance = complete_setup.coinshift.rpc_client.balance().await?;
+    let final_balance = coinshift.rpc_client.balance().await?;
     tracing::info!("=== FINAL BALANCES ===");
     tracing::info!("L2 Balance (Coinshift): {} sats", final_balance.total.to_sat());
     tracing::info!("  Available: {} sats", final_balance.available.to_sat());
@@ -661,27 +755,26 @@ async fn fill_swap_test_task(
     tracing::info!("Signet TXID (L1 deposit/fill): {}", l1_txid);
     
     // Get signet block info to show it's on signet
-    let signet_block_count: u32 = complete_setup
-        .enforcer
-        .bitcoin_cli
-        .command::<String, _, String, _, _>([], "getblockcount", [])
-        .run_utf8()
-        .await?
-        .parse()?;
+    let signet_block_count: u32 = {
+        let enforcer_guard = shared_setup.enforcer.lock().await;
+        enforcer_guard
+            .bitcoin_cli
+            .command::<String, _, String, _, _>([], "getblockcount", [])
+            .run_utf8()
+            .await?
+            .parse()?
+    };
     tracing::info!("Signet block count: {}", signet_block_count);
     
     // Get L2 block count
-    let l2_block_count = complete_setup.coinshift.rpc_client.getblockcount().await?;
+    let l2_block_count = coinshift.rpc_client.getblockcount().await?;
     tracing::info!("L2 (Coinshift) block count: {}", l2_block_count);
     
     // Cleanup - stop node gracefully first
-    let _unused = complete_setup.coinshift.rpc_client.stop().await;
+    // Note: We don't cleanup the shared enforcer here as it's shared across tests
+    let _unused = coinshift.rpc_client.stop().await;
     sleep(std::time::Duration::from_secs(2)).await;
-    drop(complete_setup.coinshift);
-    sleep(std::time::Duration::from_secs(1)).await;
-    drop(complete_setup.enforcer.tasks);
-    sleep(std::time::Duration::from_secs(1)).await;
-    complete_setup.enforcer.out_dir.cleanup()?;
+    drop(coinshift);
     
     tracing::info!("✓ Fill swap test completed successfully");
     Ok(())

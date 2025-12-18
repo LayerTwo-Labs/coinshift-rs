@@ -172,3 +172,5 @@ pub struct EnforcerPostSetup {
 - We still depend on `bip300301_enforcer_lib` - this is the actual library, not the integration tests
 - The `Sidechain` trait might need to be replicated or we can create our own version
 - Some functions might need to be adapted to work with coinshift's specific needs
+
+

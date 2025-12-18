@@ -110,6 +110,7 @@ pub struct Node<MainchainTransport = Channel> {
     net: Net,
     net_task: NetTaskHandle,
     state: State,
+    #[allow(dead_code)]
     wallet: Option<Arc<crate::wallet::Wallet>>,
 }
 
