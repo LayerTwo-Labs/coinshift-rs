@@ -752,19 +752,55 @@ async fn fill_swap_test_task(
                     
                     // Mine blocks to fund the wallet
                     // On signet, each block gives ~0.00003125 BTC, so we need several blocks
-                    use bip300301_enforcer_integration_tests::mine::mine;
-                    let mut enforcer_guard_mut = shared_setup.enforcer.lock().await;
+                    // IMPORTANT: We need to mine to an address from the enforcer's wallet
+                    let enforcer_guard_mut = shared_setup.enforcer.lock().await;
+                    
+                    // Get an address from the enforcer's wallet
+                    use bip300301_enforcer_lib::bins::CommandExt;
+                    let mining_address_str = enforcer_guard_mut
+                        .bitcoin_cli
+                        .command::<String, _, String, _, _>([], "getnewaddress", [])
+                        .run_utf8()
+                        .await?;
+                    let mining_address = mining_address_str.trim();
+                    tracing::info!("Mining to enforcer wallet address: {}", mining_address);
+                    
                     let required_btc = (L1_AMOUNT_SATS as f64 / 100_000_000.0) + 0.0001;
                     let blocks_to_mine = ((required_btc / 0.00003125).ceil() as u32).max(5); // At least 5 blocks
                     tracing::info!("Mining {} signet blocks to fund enforcer wallet...", blocks_to_mine);
+                    
+                    // Mine blocks to the enforcer's wallet address using the signet miner
                     for i in 0..blocks_to_mine {
-                        mine::<PostSetup>(&mut *enforcer_guard_mut, 1, Some(true)).await?;
-                        tracing::debug!("Mined funding block {}", i + 1);
+                        let _mine_output = enforcer_guard_mut
+                            .signet_miner
+                            .command(
+                                "generate",
+                                vec![
+                                    "--address",
+                                    mining_address,
+                                    "--block-interval",
+                                    "1",
+                                ],
+                            )
+                            .run_utf8()
+                            .await?;
+                        tracing::debug!("Mined funding block {} to enforcer wallet", i + 1);
                     }
                     drop(enforcer_guard_mut);
                     
                     // Wait for wallet to update
-                    sleep(std::time::Duration::from_secs(1)).await;
+                    sleep(std::time::Duration::from_secs(2)).await;
+                    
+                    // Verify the balance increased
+                    let enforcer_guard_check = shared_setup.enforcer.lock().await;
+                    let balance_str = enforcer_guard_check
+                        .bitcoin_cli
+                        .command::<String, _, String, _, _>([], "getbalance", [])
+                        .run_utf8()
+                        .await
+                        .unwrap_or_else(|_| "0".to_string());
+                    tracing::info!("Enforcer balance after mining: {} BTC", balance_str.trim());
+                    drop(enforcer_guard_check);
                     
                     // Continue loop to retry sendtoaddress
                     continue;
@@ -805,19 +841,44 @@ async fn fill_swap_test_task(
                                 tracing::info!("Enforcer has insufficient funds in PSBT creation, attempting to fund by mining signet blocks...");
                                 
                                 // Mine blocks to fund the wallet
-                                use bip300301_enforcer_integration_tests::mine::mine;
-                                let mut enforcer_guard_mut = shared_setup.enforcer.lock().await;
+                                // IMPORTANT: We need to mine to an address from the enforcer's wallet
+                                let enforcer_guard_mut = shared_setup.enforcer.lock().await;
+                                
+                                // Get an address from the enforcer's wallet
+                                use bip300301_enforcer_lib::bins::CommandExt;
+                                let mining_address_str = enforcer_guard_mut
+                                    .bitcoin_cli
+                                    .command::<String, _, String, _, _>([], "getnewaddress", [])
+                                    .run_utf8()
+                                    .await?;
+                                let mining_address = mining_address_str.trim();
+                                tracing::info!("Mining to enforcer wallet address: {}", mining_address);
+                                
                                 let required_btc = (L1_AMOUNT_SATS as f64 / 100_000_000.0) + 0.0001;
                                 let blocks_to_mine = ((required_btc / 0.00003125).ceil() as u32).max(5); // At least 5 blocks
                                 tracing::info!("Mining {} signet blocks to fund enforcer wallet...", blocks_to_mine);
+                                
+                                // Mine blocks to the enforcer's wallet address using the signet miner
                                 for i in 0..blocks_to_mine {
-                                    mine::<PostSetup>(&mut *enforcer_guard_mut, 1, Some(true)).await?;
-                                    tracing::debug!("Mined funding block {}", i + 1);
+                                    let _mine_output = enforcer_guard_mut
+                                        .signet_miner
+                                        .command(
+                                            "generate",
+                                            vec![
+                                                "--address",
+                                                mining_address,
+                                                "--block-interval",
+                                                "1",
+                                            ],
+                                        )
+                                        .run_utf8()
+                                        .await?;
+                                    tracing::debug!("Mined funding block {} to enforcer wallet", i + 1);
                                 }
                                 drop(enforcer_guard_mut);
                                 
                                 // Wait for wallet to update
-                                sleep(std::time::Duration::from_secs(1)).await;
+                                sleep(std::time::Duration::from_secs(2)).await;
                                 
                                 // Retry the PSBT creation
                                 let enforcer_guard_retry = shared_setup.enforcer.lock().await;
@@ -1028,6 +1089,370 @@ fn fill_swap_test_trial(
     AsyncTrial::new("fill_swap_test", fill_swap_test(bin_paths).boxed())
 }
 
+/// Test filling swap with regtest as parent_chain while sidechain uses signet
+/// Alice creates a swap on the sidechain (signet) targeting regtest as parent_chain
+/// Bob fills it using a transaction done on regtest
+async fn fill_swap_regtest_parent_chain_test_task(
+    bin_paths: BinPaths,
+    res_tx: mpsc::UnboundedSender<anyhow::Result<()>>,
+) -> anyhow::Result<()> {
+    tracing::info!("Testing swap fill with regtest parent_chain (sidechain on signet)");
+    
+    // Get or initialize shared signet setup (enforcer + sidechain, set up once for all tests)
+    let shared_setup = get_or_init_shared_signet_setup(&bin_paths, res_tx.clone()).await?;
+    tracing::info!("✓ Got shared signet setup");
+    
+    // Create isolated coinshift instance for this test
+    let mut coinshift = shared_setup.create_coinshift_instance(Some("fill-swap-regtest-parent-test".to_owned())).await?;
+    tracing::info!("✓ Created isolated coinshift instance");
+    
+    // Get deposit address
+    let deposit_address = coinshift.get_deposit_address().await?;
+    tracing::info!("✓ Got deposit address: {}", deposit_address);
+    
+    // Fund BTC from signet into the sidechain
+    const DEPOSIT_AMOUNT: bitcoin::Amount = bitcoin::Amount::from_sat(10_000_000); // 0.1 BTC
+    const DEPOSIT_FEE: bitcoin::Amount = bitcoin::Amount::from_sat(1_000); // 0.00001 BTC fee
+    
+    tracing::info!("Depositing {} sats to sidechain", DEPOSIT_AMOUNT.to_sat());
+    // Lock the shared enforcer for the deposit operation
+    {
+        let mut enforcer_guard = shared_setup.enforcer.lock().await;
+        let () = deposit(
+            &mut *enforcer_guard,
+            &mut coinshift,
+            &deposit_address,
+            DEPOSIT_AMOUNT,
+            DEPOSIT_FEE,
+        )
+        .await?;
+    }
+    tracing::info!("✓ Deposited to sidechain successfully");
+    
+    // Confirm the deposit by BMMing a block
+    tracing::info!("BMMing block to confirm deposit");
+    {
+        let mut enforcer_guard = shared_setup.enforcer.lock().await;
+        let () = coinshift.bmm_single(&mut *enforcer_guard).await?;
+    }
+    tracing::info!("✓ BMM complete");
+    
+    // Get initial balance
+    let initial_balance = coinshift.rpc_client.balance().await?;
+    tracing::info!("=== INITIAL BALANCES ===");
+    tracing::info!("L2 Balance (Coinshift): {} sats", initial_balance.total.to_sat());
+    tracing::info!("  Available: {} sats", initial_balance.available.to_sat());
+    
+    // Get a new address for the swap recipient
+    let l2_recipient_address = coinshift.rpc_client.get_new_address().await?;
+    tracing::info!("✓ Got L2 recipient address: {}", l2_recipient_address);
+    
+    // Create a swap (L2 → L1) with Regtest as parent_chain
+    const L1_AMOUNT_SATS: u64 = 5_000_000; // 0.05 BTC on regtest
+    const L2_AMOUNT_SATS: u64 = 5_000_000; // 0.05 BTC on sidechain
+    const SWAP_FEE_SATS: u64 = 1_000; // Fee for swap transaction
+    
+    // Set up a separate regtest instance for the parent_chain
+    tracing::info!("Setting up regtest instance for parent_chain");
+    use crate::setup::{Init, setup_regtest};
+    use bip300301_enforcer_integration_tests::setup::Mode;
+    let regtest_setup = setup_regtest(
+        &bin_paths,
+        Init {
+            coinshift_app: bin_paths.coinshift.clone(),
+            data_dir_suffix: Some("regtest-parent-chain".to_owned()),
+        },
+        Mode::Mempool,
+        res_tx.clone(),
+    )
+    .await?;
+    tracing::info!("✓ Regtest setup complete for parent_chain");
+    
+    // Get a regtest address for L1 recipient
+    use bip300301_enforcer_lib::bins::CommandExt;
+    let l1_recipient_address = {
+        regtest_setup
+            .enforcer
+            .bitcoin_cli
+            .command::<String, _, String, _, _>([], "getnewaddress", [])
+            .run_utf8()
+            .await?
+    };
+    tracing::info!("✓ Got L1 recipient address (Regtest): {}", l1_recipient_address);
+    
+    tracing::info!(
+        "Creating swap: {} sats L2 (Signet sidechain) → {} sats L1 (Regtest parent_chain)",
+        L2_AMOUNT_SATS,
+        L1_AMOUNT_SATS
+    );
+    let (swap_id, swap_txid) = coinshift
+        .rpc_client
+        .create_swap(
+            ParentChainType::Regtest,  // Use Regtest as parent_chain
+            l1_recipient_address.clone(),
+            L1_AMOUNT_SATS,
+            Some(l2_recipient_address),
+            L2_AMOUNT_SATS,
+            None, // Use default confirmations
+            SWAP_FEE_SATS,
+        )
+        .await?;
+    tracing::info!("✓ Swap created successfully");
+    tracing::info!("  Swap ID: {}", swap_id);
+    tracing::info!("  Coinshift TXID (L2): {:?}", swap_txid);
+    
+    // Wait longer for the swap transaction to be fully processed and the node to be ready
+    tracing::debug!("Waiting for swap transaction to be fully processed and mainchain sync...");
+    
+    // Wait and check mainchain sync status multiple times
+    let mut mainchain_ready = false;
+    for attempt in 1..=10 {
+        sleep(std::time::Duration::from_secs(1)).await;
+        let best_main_hash = coinshift.rpc_client.get_best_mainchain_block_hash().await?;
+        if best_main_hash.is_some() {
+            tracing::debug!("Mainchain appears synced (attempt {}/10)", attempt);
+            mainchain_ready = true;
+            break;
+        }
+        tracing::debug!("Waiting for mainchain sync (attempt {}/10)...", attempt);
+    }
+    if !mainchain_ready {
+        tracing::warn!("Mainchain sync check incomplete, but proceeding with BMM");
+    }
+    
+    // Additional wait to ensure transaction is in mempool and node is ready
+    sleep(std::time::Duration::from_secs(3)).await;
+    
+    // Debug: Check state before BMM
+    let block_count_before = coinshift.rpc_client.getblockcount().await?;
+    tracing::debug!("Block count before BMM: {}", block_count_before);
+    
+    // Mine a block to confirm the swap transaction (on signet sidechain)
+    tracing::info!("BMMing block to confirm swap transaction (signet sidechain)");
+    let mut bmm_result = {
+        let mut enforcer_guard = shared_setup.enforcer.lock().await;
+        coinshift.bmm_single(&mut *enforcer_guard).await
+    };
+    if let Err(ref err) = bmm_result {
+        tracing::error!("First BMM attempt failed with error: {:#}", err);
+        tracing::warn!("First BMM attempt failed, waiting longer and retrying...");
+        sleep(std::time::Duration::from_secs(10)).await;
+        
+        bmm_result = {
+            let mut enforcer_guard = shared_setup.enforcer.lock().await;
+            coinshift.bmm_single(&mut *enforcer_guard).await
+        };
+        if let Err(ref err) = bmm_result {
+            tracing::error!("Second BMM attempt failed with error: {:#}", err);
+            tracing::warn!("Second BMM attempt also failed, waiting even longer and retrying once more...");
+            sleep(std::time::Duration::from_secs(10)).await;
+            
+            bmm_result = {
+                let mut enforcer_guard = shared_setup.enforcer.lock().await;
+                coinshift.bmm_single(&mut *enforcer_guard).await
+            };
+        }
+    }
+    let () = bmm_result?;
+    
+    // Verify block count increased
+    let block_count_after = coinshift.rpc_client.getblockcount().await?;
+    tracing::info!("✓ BMM complete (block {} -> {})", block_count_before, block_count_after);
+    anyhow::ensure!(
+        block_count_after > block_count_before,
+        "Block count should increase after BMM (was {}, now {})",
+        block_count_before,
+        block_count_after
+    );
+    
+    // Wait a bit for the block to be fully processed
+    sleep(std::time::Duration::from_millis(500)).await;
+    
+    // Check balance after swap creation
+    let balance_after_swap = coinshift.rpc_client.balance().await?;
+    tracing::info!("=== BALANCE AFTER SWAP CREATION ===");
+    tracing::info!("L2 Balance (Coinshift): {} sats", balance_after_swap.total.to_sat());
+    tracing::info!("  Available: {} sats", balance_after_swap.available.to_sat());
+    
+    // Read swap to get details
+    let mut swap_status: Option<coinshift::types::Swap> = None;
+    for attempt in 1..=5 {
+        swap_status = coinshift
+            .rpc_client
+            .get_swap_status(swap_id)
+            .await?;
+        if swap_status.is_some() {
+            break;
+        }
+        if attempt < 5 {
+            sleep(std::time::Duration::from_millis(200)).await;
+        }
+    }
+    anyhow::ensure!(
+        swap_status.is_some(),
+        "Swap status should be available"
+    );
+    let swap = swap_status.unwrap();
+    tracing::info!("✓ Swap read successfully");
+    tracing::info!("  State: {:?}", swap.state);
+    tracing::info!("  Parent Chain: {:?}", swap.parent_chain);
+    tracing::info!("  L1 Recipient: {}", swap.l1_recipient_address.as_ref().unwrap_or(&"None".to_string()));
+    anyhow::ensure!(
+        swap.parent_chain == ParentChainType::Regtest,
+        "Swap parent_chain should be Regtest, got {:?}",
+        swap.parent_chain
+    );
+    
+    // Fill the swap by sending L1 transaction on Regtest
+    tracing::info!("=== FILLING SWAP ===");
+    tracing::info!("Sending {} sats to {} on Regtest", L1_AMOUNT_SATS, l1_recipient_address);
+    
+    // Fund the regtest wallet first by mining some blocks
+    tracing::info!("Mining regtest blocks to fund wallet...");
+    use bip300301_enforcer_integration_tests::mine::mine;
+    // Save out_dir before moving enforcer
+    let regtest_out_dir = regtest_setup.enforcer.out_dir.clone();
+    let mut regtest_enforcer = regtest_setup.enforcer;
+    for i in 0..101 {
+        mine::<PostSetup>(&mut regtest_enforcer, 1, Some(true)).await?;
+        if (i + 1) % 10 == 0 {
+            tracing::debug!("Mined {} regtest blocks", i + 1);
+        }
+    }
+    tracing::info!("✓ Mined 101 regtest blocks to fund wallet");
+    
+    // Send L1 transaction to fill the swap on regtest
+    let l1_txid_str = loop {
+        let result = regtest_enforcer
+            .bitcoin_cli
+            .command::<String, _, String, _, _>(
+                [],
+                "sendtoaddress",
+                [l1_recipient_address.clone(), L1_AMOUNT_SATS.to_string()],
+            )
+            .run_utf8()
+            .await;
+        
+        match result {
+            Ok(txid) => break txid,
+            Err(e) => {
+                let err_str = format!("{}", e);
+                if err_str.contains("Insufficient funds") {
+                    tracing::info!("Insufficient funds, mining more regtest blocks...");
+                    mine::<PostSetup>(&mut regtest_enforcer, 10, Some(true)).await?;
+                    sleep(std::time::Duration::from_secs(1)).await;
+                    continue;
+                } else {
+                    return Err(e.into());
+                }
+            }
+        }
+    };
+    let l1_txid: bitcoin::Txid = l1_txid_str.trim().parse()?;
+    tracing::info!("✓ L1 transaction sent (Regtest TXID): {}", l1_txid);
+    
+    // Mine regtest blocks to confirm the transaction
+    tracing::info!("Mining regtest blocks to confirm L1 transaction...");
+    for i in 0..3 {
+        mine::<PostSetup>(&mut regtest_enforcer, 1, Some(true)).await?;
+        tracing::info!("  Mined regtest block {}", i + 1);
+    }
+    
+    // Update swap with L1 transaction ID
+    tracing::info!("Updating swap with L1 transaction ID (Regtest)...");
+    let l1_txid_bytes: &[u8] = l1_txid.as_ref();
+    coinshift
+        .rpc_client
+        .update_swap_l1_txid(swap_id, hex::encode(l1_txid_bytes), 3)
+        .await?;
+    tracing::info!("✓ Swap updated with L1 transaction ID");
+    
+    // Wait a bit for processing
+    sleep(std::time::Duration::from_secs(1)).await;
+    
+    // Read swap again to check state
+    let swap_after_fill = coinshift
+        .rpc_client
+        .get_swap_status(swap_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Swap not found after fill"))?;
+    tracing::info!("✓ Swap state after fill: {:?}", swap_after_fill.state);
+    
+    // Check final balances
+    let final_balance = coinshift.rpc_client.balance().await?;
+    tracing::info!("=== FINAL BALANCES ===");
+    tracing::info!("L2 Balance (Coinshift): {} sats", final_balance.total.to_sat());
+    tracing::info!("  Available: {} sats", final_balance.available.to_sat());
+    
+    // Print all transaction IDs
+    tracing::info!("=== TRANSACTION IDs ===");
+    tracing::info!("Coinshift TXID (L2 swap creation on Signet sidechain): {:?}", swap_txid);
+    tracing::info!("Regtest TXID (L1 fill on Regtest parent_chain): {}", l1_txid);
+    
+    // Get regtest block info to show it's on regtest
+    let regtest_block_count: u32 = regtest_enforcer
+        .bitcoin_cli
+        .command::<String, _, String, _, _>([], "getblockcount", [])
+        .run_utf8()
+        .await?
+        .parse()?;
+    tracing::info!("Regtest block count: {}", regtest_block_count);
+    
+    // Get signet block info to show sidechain is on signet
+    let signet_block_count: u32 = {
+        let enforcer_guard = shared_setup.enforcer.lock().await;
+        enforcer_guard
+            .bitcoin_cli
+            .command::<String, _, String, _, _>([], "getblockcount", [])
+            .run_utf8()
+            .await?
+            .parse()?
+    };
+    tracing::info!("Signet block count (sidechain mainchain): {}", signet_block_count);
+    
+    // Get L2 block count
+    let l2_block_count = coinshift.rpc_client.getblockcount().await?;
+    tracing::info!("L2 (Coinshift) block count: {}", l2_block_count);
+    
+    // Cleanup - stop node gracefully first
+    // Note: We don't cleanup the shared enforcer here as it's shared across tests
+    let _unused = coinshift.rpc_client.stop().await;
+    sleep(std::time::Duration::from_secs(2)).await;
+    drop(coinshift);
+    
+    // Cleanup regtest setup
+    drop(regtest_setup.coinshift);
+    sleep(std::time::Duration::from_secs(1)).await;
+    drop(regtest_enforcer.tasks);
+    sleep(std::time::Duration::from_secs(1)).await;
+    regtest_out_dir.cleanup()?;
+    
+    tracing::info!("✓ Fill swap with regtest parent_chain test completed successfully");
+    Ok(())
+}
+
+async fn fill_swap_regtest_parent_chain_test(bin_paths: BinPaths) -> anyhow::Result<()> {
+    let (res_tx, mut res_rx) = mpsc::unbounded();
+    let _test_task: AbortOnDrop<()> = tokio::task::spawn({
+        let res_tx = res_tx.clone();
+        async move {
+            let res = fill_swap_regtest_parent_chain_test_task(bin_paths, res_tx.clone()).await;
+            let _send_err: Result<(), _> = res_tx.unbounded_send(res);
+        }
+        .in_current_span()
+    })
+    .into();
+    res_rx.next().await.ok_or_else(|| {
+        anyhow::anyhow!("Unexpected end of test task result stream")
+    })?
+}
+
+fn fill_swap_regtest_parent_chain_test_trial(
+    bin_paths: BinPaths,
+) -> AsyncTrial<BoxFuture<'static, anyhow::Result<()>>> {
+    AsyncTrial::new("fill_swap_regtest_parent_chain_test", fill_swap_regtest_parent_chain_test(bin_paths).boxed())
+}
+
 pub fn tests(
     bin_paths: BinPaths,
 ) -> Vec<AsyncTrial<BoxFuture<'static, anyhow::Result<()>>>> {
@@ -1039,6 +1464,7 @@ pub fn tests(
         unknown_withdrawal_trial(bin_paths.clone()),
         swap_test_trial(bin_paths.clone()),
         read_swap_test_trial(bin_paths.clone()),
-        fill_swap_test_trial(bin_paths),
+        fill_swap_test_trial(bin_paths.clone()),
+        fill_swap_regtest_parent_chain_test_trial(bin_paths),
     ]
 }
