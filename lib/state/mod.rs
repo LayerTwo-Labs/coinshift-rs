@@ -1659,15 +1659,18 @@ impl State {
                         );
                         
                         // Lock outputs for L2 → L1 swaps
+                        // Only lock SwapPending outputs (never change outputs)
                         if l1_recipient_address.is_some() {
-                            for (vout, _) in filled.transaction.outputs.iter().enumerate() {
-                                let outpoint = OutPoint::Regular {
-                                    txid,
-                                    vout: vout as u32,
-                                };
-                                // Only lock if not already locked (to handle reorgs)
-                                if self.is_output_locked_to_swap(rwtxn, &outpoint)?.is_none() {
-                                    self.lock_output_to_swap(rwtxn, &outpoint, &swap_id)?;
+                            for (vout, output) in filled.transaction.outputs.iter().enumerate() {
+                                if matches!(output.content, crate::types::OutputContent::SwapPending { .. }) {
+                                    let outpoint = OutPoint::Regular {
+                                        txid,
+                                        vout: vout as u32,
+                                    };
+                                    // Only lock if not already locked (to handle reorgs)
+                                    if self.is_output_locked_to_swap(rwtxn, &outpoint)?.is_none() {
+                                        self.lock_output_to_swap(rwtxn, &outpoint, &swap_id)?;
+                                    }
                                 }
                             }
                         }
