@@ -752,55 +752,212 @@ async fn fill_swap_test_task(
                     
                     // Mine blocks to fund the wallet
                     // On signet, each block gives ~0.00003125 BTC, so we need several blocks
-                    // IMPORTANT: We need to mine to an address from the enforcer's wallet
+                    // IMPORTANT: Use the enforcer's mining_address which is already in the wallet
                     let enforcer_guard_mut = shared_setup.enforcer.lock().await;
                     
-                    // Get an address from the enforcer's wallet
-                    use bip300301_enforcer_lib::bins::CommandExt;
-                    let mining_address_str = enforcer_guard_mut
-                        .bitcoin_cli
-                        .command::<String, _, String, _, _>([], "getnewaddress", [])
-                        .run_utf8()
-                        .await?;
-                    let mining_address = mining_address_str.trim();
+                    // Use the enforcer's mining_address (already in wallet, no need to create new address)
+                    let mining_address = enforcer_guard_mut.mining_address.to_string();
+                    tracing::info!("=== MINING SETUP ===");
                     tracing::info!("Mining to enforcer wallet address: {}", mining_address);
                     
-                    let required_btc = (L1_AMOUNT_SATS as f64 / 100_000_000.0) + 0.0001;
-                    let blocks_to_mine = ((required_btc / 0.00003125).ceil() as u32).max(5); // At least 5 blocks
-                    tracing::info!("Mining {} signet blocks to fund enforcer wallet...", blocks_to_mine);
-                    
-                    // Mine blocks to the enforcer's wallet address using the signet miner
-                    for i in 0..blocks_to_mine {
-                        let _mine_output = enforcer_guard_mut
-                            .signet_miner
-                            .command(
-                                "generate",
-                                vec![
-                                    "--address",
-                                    mining_address,
-                                    "--block-interval",
-                                    "1",
-                                ],
-                            )
-                            .run_utf8()
-                            .await?;
-                        tracing::debug!("Mined funding block {} to enforcer wallet", i + 1);
+                    // Verify address is in wallet
+                    let address_info = enforcer_guard_mut
+                        .bitcoin_cli
+                        .command::<String, _, String, _, _>([], "getaddressinfo", [mining_address.clone()])
+                        .run_utf8()
+                        .await;
+                    match address_info {
+                        Ok(info) => {
+                            tracing::info!("Address info: {}", info.trim());
+                        }
+                        Err(e) => {
+                            tracing::warn!("Could not get address info (may not be in wallet yet): {:#}", e);
+                        }
                     }
-                    drop(enforcer_guard_mut);
                     
-                    // Wait for wallet to update
-                    sleep(std::time::Duration::from_secs(2)).await;
+                    // Check block count before mining
+                    let block_count_before: u32 = enforcer_guard_mut
+                        .bitcoin_cli
+                        .command::<String, _, String, _, _>([], "getblockcount", [])
+                        .run_utf8()
+                        .await?
+                        .parse()?;
+                    tracing::info!("Block count before mining: {}", block_count_before);
                     
-                    // Verify the balance increased
-                    let enforcer_guard_check = shared_setup.enforcer.lock().await;
-                    let balance_str = enforcer_guard_check
+                    // Check current balance first
+                    let initial_balance_str = enforcer_guard_mut
                         .bitcoin_cli
                         .command::<String, _, String, _, _>([], "getbalance", [])
                         .run_utf8()
                         .await
                         .unwrap_or_else(|_| "0".to_string());
-                    tracing::info!("Enforcer balance after mining: {} BTC", balance_str.trim());
-                    drop(enforcer_guard_check);
+                    let initial_balance_btc: f64 = initial_balance_str.trim().parse().unwrap_or(0.0);
+                    tracing::info!("Current enforcer balance: {} BTC ({} sats)", 
+                        initial_balance_str.trim(), (initial_balance_btc * 100_000_000.0) as u64);
+                    
+                    let required_btc = (L1_AMOUNT_SATS as f64 / 100_000_000.0) + 0.0001; // Add buffer for fees
+                    let blocks_to_mine = ((required_btc / 0.00003125).ceil() as u32).max(10); // At least 10 blocks
+                    tracing::info!("Mining {} signet blocks to fund enforcer wallet (need {} BTC, have {} BTC)...", 
+                        blocks_to_mine, required_btc, initial_balance_btc);
+                    
+                    // Mine blocks to the enforcer's wallet address using signet miner
+                    // On signet, we must use the signet miner (generatetoaddress only works on regtest)
+                    // Check balance every 5 blocks to detect when sufficient funds arrive
+                    let required_btc_f64 = required_btc;
+                    let mut enforcer_guard_current = enforcer_guard_mut;
+                    let mut blocks_mined = 0;
+                    tracing::info!("Starting mining loop: will attempt to mine {} blocks", blocks_to_mine);
+                    for i in 0..blocks_to_mine {
+                        // Use signet_miner to mine blocks (required for signet, not generatetoaddress)
+                        tracing::debug!("Calling signet_miner for block {} (attempt {}/{})", i + 1, i + 1, blocks_to_mine);
+                        let mine_output = enforcer_guard_current
+                            .signet_miner
+                            .command(
+                                "generate",
+                                vec![
+                                    "--address",
+                                    &mining_address,
+                                    "--block-interval",
+                                    "1",
+                                ],
+                            )
+                            .run_utf8()
+                            .await;
+                        
+                        match mine_output {
+                            Ok(output) => {
+                                blocks_mined += 1;
+                                tracing::info!("✓ Mined funding block {} to address {} (output: {})", 
+                                    blocks_mined, mining_address, output.trim());
+                                
+                                // Verify block count increased after each block
+                                drop(enforcer_guard_current);
+                                sleep(std::time::Duration::from_millis(500)).await;
+                                let enforcer_guard_check = shared_setup.enforcer.lock().await;
+                                let block_count_check: u32 = enforcer_guard_check
+                                    .bitcoin_cli
+                                    .command::<String, _, String, _, _>([], "getblockcount", [])
+                                    .run_utf8()
+                                    .await?
+                                    .parse()?;
+                                tracing::debug!("Block count after block {}: {} (was {})", 
+                                    blocks_mined, block_count_check, block_count_before);
+                                enforcer_guard_current = enforcer_guard_check;
+                            }
+                            Err(e) => {
+                                tracing::error!("✗ Failed to mine block {}: {:#}", i + 1, e);
+                                tracing::error!("Mining address used: {}", mining_address);
+                                tracing::error!("Command: signet_miner generate --address {} --block-interval 1", mining_address);
+                                return Err(anyhow::anyhow!("Failed to mine signet block {}: {:#}", i + 1, e));
+                            }
+                        }
+                        
+                        // Check balance every 5 blocks (even if enforcer is locked)
+                        if (i + 1) % 5 == 0 || i == blocks_to_mine - 1 {
+                            // Release lock briefly to check balance, then reacquire if needed
+                            drop(enforcer_guard_current);
+                            sleep(std::time::Duration::from_millis(2000)).await; // Wait for wallet to update
+                            
+                            let enforcer_guard_check = shared_setup.enforcer.lock().await;
+                            
+                            // Verify block count increased
+                            let block_count: u32 = enforcer_guard_check
+                                .bitcoin_cli
+                                .command::<String, _, String, _, _>([], "getblockcount", [])
+                                .run_utf8()
+                                .await?
+                                .parse()?;
+                            let blocks_added = block_count.saturating_sub(block_count_before);
+                            tracing::info!("Block count: {} (added {} blocks, started at {})", 
+                                block_count, blocks_added, block_count_before);
+                            
+                            // Check if blocks were actually added
+                            if blocks_added < blocks_mined {
+                                tracing::warn!("Warning: Mined {} blocks but only {} blocks were added to chain!", 
+                                    blocks_mined, blocks_added);
+                            }
+                            
+                            let balance_str = enforcer_guard_check
+                                .bitcoin_cli
+                                .command::<String, _, String, _, _>([], "getbalance", [])
+                                .run_utf8()
+                                .await
+                                .unwrap_or_else(|_| "0".to_string());
+                            let balance_btc: f64 = balance_str.trim().parse().unwrap_or(0.0);
+                            let balance_sats = (balance_btc * 100_000_000.0) as u64;
+                            tracing::info!("Enforcer balance after {} blocks: {} BTC ({} sats) - required: {} BTC ({} sats)", 
+                                blocks_mined, balance_str.trim(), balance_sats, required_btc_f64, (required_btc_f64 * 100_000_000.0) as u64);
+                            
+                            // Check received by address to verify funds arrived at mining address
+                            let received_str = enforcer_guard_check
+                                .bitcoin_cli
+                                .command::<String, _, String, _, _>([], "getreceivedbyaddress", [mining_address.clone(), "0".to_string()])
+                                .run_utf8()
+                                .await
+                                .unwrap_or_else(|_| "0".to_string());
+                            let received_btc: f64 = received_str.trim().parse().unwrap_or(0.0);
+                            tracing::info!("Total received by mining address {}: {} BTC ({} sats)", 
+                                mining_address, received_str.trim(), (received_btc * 100_000_000.0) as u64);
+                            
+                            // If we have sufficient funds, we can stop mining early
+                            if balance_btc >= required_btc_f64 {
+                                tracing::info!("Sufficient funds received after {} blocks, stopping early", blocks_mined);
+                                drop(enforcer_guard_check);
+                                break;
+                            }
+                            
+                            // Reacquire lock for next iteration
+                            enforcer_guard_current = enforcer_guard_check;
+                        }
+                    }
+                    
+                    tracing::info!("=== MINING COMPLETE ===");
+                    tracing::info!("Mined {} blocks total", blocks_mined);
+                    
+                    // Final balance check - wait a bit longer and ensure wallet is synced
+                    sleep(std::time::Duration::from_secs(2)).await;
+                    let enforcer_guard_final = shared_setup.enforcer.lock().await;
+                    
+                    // Verify final block count
+                    let final_block_count: u32 = enforcer_guard_final
+                        .bitcoin_cli
+                        .command::<String, _, String, _, _>([], "getblockcount", [])
+                        .run_utf8()
+                        .await?
+                        .parse()?;
+                    let total_blocks_added = final_block_count.saturating_sub(block_count_before);
+                    tracing::info!("Final block count: {} (added {} blocks total)", final_block_count, total_blocks_added);
+                    
+                    // Try to sync the wallet to ensure it sees the new blocks
+                    let _sync_result = enforcer_guard_final
+                        .bitcoin_cli
+                        .command::<String, _, String, _, _>([], "syncwithvalidationinterfacequeue", [])
+                        .run_utf8()
+                        .await;
+                    
+                    let balance_str = enforcer_guard_final
+                        .bitcoin_cli
+                        .command::<String, _, String, _, _>([], "getbalance", [])
+                        .run_utf8()
+                        .await
+                        .unwrap_or_else(|_| "0".to_string());
+                    let balance_btc_final: f64 = balance_str.trim().parse().unwrap_or(0.0);
+                    let balance_sats_final = (balance_btc_final * 100_000_000.0) as u64;
+                    tracing::info!("Final enforcer balance: {} BTC ({} sats) - started with {} BTC ({} sats)", 
+                        balance_str.trim(), balance_sats_final, 
+                        initial_balance_str.trim(), (initial_balance_btc * 100_000_000.0) as u64);
+                    
+                    // Check received by mining address
+                    let received_final_str = enforcer_guard_final
+                        .bitcoin_cli
+                        .command::<String, _, String, _, _>([], "getreceivedbyaddress", [mining_address.clone(), "0".to_string()])
+                        .run_utf8()
+                        .await
+                        .unwrap_or_else(|_| "0".to_string());
+                    let received_final_btc: f64 = received_final_str.trim().parse().unwrap_or(0.0);
+                    tracing::info!("Final received by mining address {}: {} BTC ({} sats)", 
+                        mining_address, received_final_str.trim(), (received_final_btc * 100_000_000.0) as u64);
+                    drop(enforcer_guard_final);
                     
                     // Continue loop to retry sendtoaddress
                     continue;
@@ -841,54 +998,212 @@ async fn fill_swap_test_task(
                                 tracing::info!("Enforcer has insufficient funds in PSBT creation, attempting to fund by mining signet blocks...");
                                 
                                 // Mine blocks to fund the wallet
-                                // IMPORTANT: We need to mine to an address from the enforcer's wallet
+                                // IMPORTANT: Use the enforcer's mining_address which is already in the wallet
                                 let enforcer_guard_mut = shared_setup.enforcer.lock().await;
                                 
-                                // Get an address from the enforcer's wallet
-                                use bip300301_enforcer_lib::bins::CommandExt;
-                                let mining_address_str = enforcer_guard_mut
-                                    .bitcoin_cli
-                                    .command::<String, _, String, _, _>([], "getnewaddress", [])
-                                    .run_utf8()
-                                    .await?;
-                                let mining_address = mining_address_str.trim();
+                                // Use the enforcer's mining_address (already in wallet, no need to create new address)
+                                let mining_address = enforcer_guard_mut.mining_address.to_string();
+                                tracing::info!("=== MINING SETUP (PSBT) ===");
                                 tracing::info!("Mining to enforcer wallet address: {}", mining_address);
                                 
-                                let required_btc = (L1_AMOUNT_SATS as f64 / 100_000_000.0) + 0.0001;
-                                let blocks_to_mine = ((required_btc / 0.00003125).ceil() as u32).max(5); // At least 5 blocks
-                                tracing::info!("Mining {} signet blocks to fund enforcer wallet...", blocks_to_mine);
+                                // Verify address is in wallet
+                                let address_info = enforcer_guard_mut
+                                    .bitcoin_cli
+                                    .command::<String, _, String, _, _>([], "getaddressinfo", [mining_address.clone()])
+                                    .run_utf8()
+                                    .await;
+                                match address_info {
+                                    Ok(info) => {
+                                        tracing::info!("Address info: {}", info.trim());
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("Could not get address info (may not be in wallet yet): {:#}", e);
+                                    }
+                                }
                                 
-                                // Mine blocks to the enforcer's wallet address using the signet miner
+                                // Check block count before mining
+                                let block_count_before: u32 = enforcer_guard_mut
+                                    .bitcoin_cli
+                                    .command::<String, _, String, _, _>([], "getblockcount", [])
+                                    .run_utf8()
+                                    .await?
+                                    .parse()?;
+                                tracing::info!("Block count before mining: {}", block_count_before);
+                                
+                                // Check current balance first
+                                let initial_balance_str = enforcer_guard_mut
+                                    .bitcoin_cli
+                                    .command::<String, _, String, _, _>([], "getbalance", [])
+                                    .run_utf8()
+                                    .await
+                                    .unwrap_or_else(|_| "0".to_string());
+                                let initial_balance_btc: f64 = initial_balance_str.trim().parse().unwrap_or(0.0);
+                                tracing::info!("Current enforcer balance: {} BTC ({} sats)", 
+                                    initial_balance_str.trim(), (initial_balance_btc * 100_000_000.0) as u64);
+                                
+                                let required_btc = (L1_AMOUNT_SATS as f64 / 100_000_000.0) + 0.0001; // Add buffer for fees
+                                let blocks_to_mine = ((required_btc / 0.00003125).ceil() as u32).max(10); // At least 10 blocks
+                                tracing::info!("Mining {} signet blocks to fund enforcer wallet (need {} BTC, have {} BTC)...", 
+                                    blocks_to_mine, required_btc, initial_balance_btc);
+                                
+                                // Mine blocks to the enforcer's wallet address using signet miner
+                                // On signet, we must use the signet miner (generatetoaddress only works on regtest)
+                                // Check balance every 5 blocks to detect when sufficient funds arrive
+                                let required_btc_f64 = required_btc;
+                                let mut enforcer_guard_current = enforcer_guard_mut;
+                                let mut blocks_mined = 0;
+                                tracing::info!("Starting mining loop: will attempt to mine {} blocks", blocks_to_mine);
                                 for i in 0..blocks_to_mine {
-                                    let _mine_output = enforcer_guard_mut
+                                    // Use signet_miner to mine blocks (required for signet, not generatetoaddress)
+                                    tracing::debug!("Calling signet_miner for block {} (attempt {}/{})", i + 1, i + 1, blocks_to_mine);
+                                    let mine_output = enforcer_guard_current
                                         .signet_miner
                                         .command(
                                             "generate",
                                             vec![
                                                 "--address",
-                                                mining_address,
+                                                &mining_address,
                                                 "--block-interval",
                                                 "1",
                                             ],
                                         )
                                         .run_utf8()
-                                        .await?;
-                                    tracing::debug!("Mined funding block {} to enforcer wallet", i + 1);
+                                        .await;
+                                    
+                                    match mine_output {
+                                        Ok(output) => {
+                                            blocks_mined += 1;
+                                            tracing::info!("✓ Mined funding block {} to address {} (output: {})", 
+                                                blocks_mined, mining_address, output.trim());
+                                            
+                                            // Verify block count increased after each block
+                                            drop(enforcer_guard_current);
+                                            sleep(std::time::Duration::from_millis(500)).await;
+                                            let enforcer_guard_check = shared_setup.enforcer.lock().await;
+                                            let block_count_check: u32 = enforcer_guard_check
+                                                .bitcoin_cli
+                                                .command::<String, _, String, _, _>([], "getblockcount", [])
+                                                .run_utf8()
+                                                .await?
+                                                .parse()?;
+                                            tracing::debug!("Block count after block {}: {} (was {})", 
+                                                blocks_mined, block_count_check, block_count_before);
+                                            enforcer_guard_current = enforcer_guard_check;
+                                        }
+                                        Err(e) => {
+                                            tracing::error!("✗ Failed to mine block {}: {:#}", i + 1, e);
+                                            tracing::error!("Mining address used: {}", mining_address);
+                                            tracing::error!("Command: signet_miner generate --address {} --block-interval 1", mining_address);
+                                            return Err(anyhow::anyhow!("Failed to mine signet block {}: {:#}", i + 1, e));
+                                        }
+                                    }
+                                    
+                                    // Check balance every 5 blocks (even if enforcer is locked)
+                                    if (i + 1) % 5 == 0 || i == blocks_to_mine - 1 {
+                                        // Release lock briefly to check balance, then reacquire if needed
+                                        drop(enforcer_guard_current);
+                                        sleep(std::time::Duration::from_millis(2000)).await; // Wait for wallet to update
+                                        
+                                        let enforcer_guard_check = shared_setup.enforcer.lock().await;
+                                        
+                                        // Verify block count increased
+                                        let block_count: u32 = enforcer_guard_check
+                                            .bitcoin_cli
+                                            .command::<String, _, String, _, _>([], "getblockcount", [])
+                                            .run_utf8()
+                                            .await?
+                                            .parse()?;
+                                        let blocks_added = block_count.saturating_sub(block_count_before);
+                                        tracing::info!("Block count: {} (added {} blocks, started at {})", 
+                                            block_count, blocks_added, block_count_before);
+                                        
+                                        // Check if blocks were actually added
+                                        if blocks_added < blocks_mined {
+                                            tracing::warn!("Warning: Mined {} blocks but only {} blocks were added to chain!", 
+                                                blocks_mined, blocks_added);
+                                        }
+                                        
+                                        let balance_str = enforcer_guard_check
+                                            .bitcoin_cli
+                                            .command::<String, _, String, _, _>([], "getbalance", [])
+                                            .run_utf8()
+                                            .await
+                                            .unwrap_or_else(|_| "0".to_string());
+                                        let balance_btc: f64 = balance_str.trim().parse().unwrap_or(0.0);
+                                        let balance_sats = (balance_btc * 100_000_000.0) as u64;
+                                        tracing::info!("Enforcer balance after {} blocks: {} BTC ({} sats) - required: {} BTC ({} sats)", 
+                                            blocks_mined, balance_str.trim(), balance_sats, required_btc_f64, (required_btc_f64 * 100_000_000.0) as u64);
+                                        
+                                        // Check received by address to verify funds arrived at mining address
+                                        let received_str = enforcer_guard_check
+                                            .bitcoin_cli
+                                            .command::<String, _, String, _, _>([], "getreceivedbyaddress", [mining_address.clone(), "0".to_string()])
+                                            .run_utf8()
+                                            .await
+                                            .unwrap_or_else(|_| "0".to_string());
+                                        let received_btc: f64 = received_str.trim().parse().unwrap_or(0.0);
+                                        tracing::info!("Total received by mining address {}: {} BTC ({} sats)", 
+                                            mining_address, received_str.trim(), (received_btc * 100_000_000.0) as u64);
+                                        
+                                        // If we have sufficient funds, we can stop mining early
+                                        if balance_btc >= required_btc_f64 {
+                                            tracing::info!("Sufficient funds received after {} blocks, stopping early", blocks_mined);
+                                            drop(enforcer_guard_check);
+                                            break;
+                                        }
+                                        
+                                        // Reacquire lock for next iteration
+                                        enforcer_guard_current = enforcer_guard_check;
+                                    }
                                 }
-                                drop(enforcer_guard_mut);
                                 
-                                // Wait for wallet to update
+                                tracing::info!("=== MINING COMPLETE (PSBT) ===");
+                                tracing::info!("Mined {} blocks total", blocks_mined);
+                                
+                                // Final balance check before retrying PSBT creation
+                                // Wait a bit longer and ensure wallet is synced
                                 sleep(std::time::Duration::from_secs(2)).await;
-                                
-                                // Retry the PSBT creation
                                 let enforcer_guard_retry = shared_setup.enforcer.lock().await;
+                                
+                                // Verify final block count
+                                let final_block_count: u32 = enforcer_guard_retry
+                                    .bitcoin_cli
+                                    .command::<String, _, String, _, _>([], "getblockcount", [])
+                                    .run_utf8()
+                                    .await?
+                                    .parse()?;
+                                let total_blocks_added = final_block_count.saturating_sub(block_count_before);
+                                tracing::info!("Final block count: {} (added {} blocks total)", final_block_count, total_blocks_added);
+                                
+                                // Try to sync the wallet to ensure it sees the new blocks
+                                let _sync_result = enforcer_guard_retry
+                                    .bitcoin_cli
+                                    .command::<String, _, String, _, _>([], "syncwithvalidationinterfacequeue", [])
+                                    .run_utf8()
+                                    .await;
+                                
                                 let balance_str = enforcer_guard_retry
                                     .bitcoin_cli
                                     .command::<String, _, String, _, _>([], "getbalance", [])
                                     .run_utf8()
                                     .await
                                     .unwrap_or_else(|_| "0".to_string());
-                                tracing::info!("Enforcer balance after mining: {} BTC", balance_str.trim());
+                                let balance_btc_final: f64 = balance_str.trim().parse().unwrap_or(0.0);
+                                let balance_sats_final = (balance_btc_final * 100_000_000.0) as u64;
+                                tracing::info!("Final enforcer balance: {} BTC ({} sats) - started with {} BTC ({} sats)", 
+                                    balance_str.trim(), balance_sats_final,
+                                    initial_balance_str.trim(), (initial_balance_btc * 100_000_000.0) as u64);
+                                
+                                // Check received by mining address
+                                let received_final_str = enforcer_guard_retry
+                                    .bitcoin_cli
+                                    .command::<String, _, String, _, _>([], "getreceivedbyaddress", [mining_address.clone(), "0".to_string()])
+                                    .run_utf8()
+                                    .await
+                                    .unwrap_or_else(|_| "0".to_string());
+                                let received_final_btc: f64 = received_final_str.trim().parse().unwrap_or(0.0);
+                                tracing::info!("Final received by mining address {}: {} BTC ({} sats)", 
+                                    mining_address, received_final_str.trim(), (received_final_btc * 100_000_000.0) as u64);
                                 
                                 // Try PSBT creation again after funding
                                 let psbt_retry = enforcer_guard_retry

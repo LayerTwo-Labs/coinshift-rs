@@ -560,6 +560,7 @@ async fn mine_single_signet(
     signet_miner: &bip300301_enforcer_lib::bins::SignetMiner,
     mining_address: &bitcoin::Address,
 ) -> anyhow::Result<()> {
+    tracing::info!("Mining a single signet block to address: {}", mining_address);
     let _mine_output = signet_miner
         .command(
             "generate",
@@ -616,16 +617,33 @@ async fn setup_signet_enforcer_and_sidechain(
     })?;
     tracing::info!("setup_enforcer completed successfully");
     
-    tracing::info!("Enforcer setup complete, mining additional signet block to reach 2 blocks total");
+    tracing::info!("Enforcer setup complete, mining additional signet blocks to fund enforcer wallet");
     
-    // First block is already mined during setup, so we need 1 more to reach 2 blocks
-    let () = mine_single_signet(
-        &enforcer_post_setup.signet_miner,
-        &enforcer_post_setup.mining_address,
-    )
-    .await?;
+    // First block is already mined during setup, so we need 1 more to reach 2 blocks minimum
+    // But we should mine more blocks to ensure sufficient funding for all operations
+    // On signet, each block gives ~0.00003125 BTC
+    // We want at least 0.1 BTC (10,000,000 sats) for operations, so we need ~3200 blocks
+    // But that's too many, so let's mine a reasonable amount (e.g., 200 blocks = ~0.00625 BTC)
+    // This should be enough for most test operations
+    const INITIAL_FUNDING_BLOCKS: u32 = 200;
+    tracing::info!("Mining {} signet blocks to fund enforcer wallet (target: ~{} BTC)", 
+        INITIAL_FUNDING_BLOCKS, INITIAL_FUNDING_BLOCKS as f64 * 0.00003125);
     
-    // Verify we have at least 2 blocks
+    for i in 0..INITIAL_FUNDING_BLOCKS {
+        let () = mine_single_signet(
+            &enforcer_post_setup.signet_miner,
+            &enforcer_post_setup.mining_address,
+        )
+        .await?;
+        if (i + 1) % 50 == 0 {
+            tracing::debug!("Mined {} blocks so far...", i + 1);
+        }
+    }
+    
+    // Wait a bit for wallet to update
+    sleep(Duration::from_secs(2)).await;
+    
+    // Verify we have the expected blocks and check balance
     let block_count: u32 = enforcer_post_setup
         .bitcoin_cli
         .command::<String, _, String, _, _>([], "getblockcount", [])
@@ -633,7 +651,17 @@ async fn setup_signet_enforcer_and_sidechain(
         .await?
         .parse()?;
     anyhow::ensure!(block_count >= 2, "Expected at least 2 blocks, got {block_count}");
-    tracing::info!("Successfully mined 2 signet blocks (block count: {block_count})");
+    
+    // Check balance to verify funding
+    let balance_str = enforcer_post_setup
+        .bitcoin_cli
+        .command::<String, _, String, _, _>([], "getbalance", [])
+        .run_utf8()
+        .await
+        .unwrap_or_else(|_| "0".to_string());
+    let balance_btc: f64 = balance_str.trim().parse().unwrap_or(0.0);
+    tracing::info!("Successfully mined {} signet blocks (block count: {}, balance: {} BTC / {} sats)", 
+        INITIAL_FUNDING_BLOCKS, block_count, balance_str.trim(), (balance_btc * 100_000_000.0) as u64);
     
     // Setup coinshift sidechain (propose, activate, fund)
     tracing::info!("Setting up coinshift sidechain");
