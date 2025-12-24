@@ -2,12 +2,12 @@ use eframe::egui::{self, Button, ScrollArea};
 use coinshift::types::{Address, Swap, SwapId, SwapState, SwapTxId, ParentChainType};
 use coinshift::bitcoin_rpc::{BitcoinRpcClient, RpcConfig};
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 use hex;
 
 use crate::app::App;
 use crate::gui::util::show_btc_amount;
 
-#[derive(Default)]
 pub struct SwapList {
     swaps: Option<Vec<Swap>>,
     selected_swap_id: Option<String>,
@@ -15,6 +15,29 @@ pub struct SwapList {
     l2_recipient_input: String,  // L2 address that will receive the L2 amount (for L1 transaction detection)
     fetching_confirmations: bool,
     claimer_address_input: String,  // L2 claimer address when claiming (for open swaps)
+    last_confirmation_check: Option<Instant>,
+    checking_confirmations: bool,
+    success_message: Option<String>,  // Success message after claiming (contains txid)
+    swap_id_search: String,  // Swap ID search input field
+    searched_swap: Option<Swap>,  // Swap found by search
+}
+
+impl Default for SwapList {
+    fn default() -> Self {
+        Self {
+            swaps: None,
+            selected_swap_id: None,
+            l1_txid_input: String::new(),
+            l2_recipient_input: String::new(),
+            fetching_confirmations: false,
+            claimer_address_input: String::new(),
+            last_confirmation_check: None,
+            checking_confirmations: false,
+            success_message: None,
+            swap_id_search: String::new(),
+            searched_swap: None,
+        }
+    }
 }
 
 impl SwapList {
@@ -93,6 +116,18 @@ impl SwapList {
     }
 
     pub fn show(&mut self, app: Option<&App>, ui: &mut egui::Ui) {
+        // Periodically check confirmations for swaps in WaitingConfirmations state
+        // Check every 10 seconds
+        let should_check = self.last_confirmation_check
+            .map(|last| last.elapsed() >= Duration::from_secs(10))
+            .unwrap_or(true);
+        
+        if should_check && !self.checking_confirmations {
+            if let Some(app) = app {
+                self.check_confirmations_dynamically(app);
+            }
+        }
+        
         ui.horizontal(|ui| {
             ui.heading("My Swaps");
             if ui.button("Refresh").clicked() {
@@ -100,7 +135,46 @@ impl SwapList {
                     self.refresh_swaps(app);
                 }
             }
+            if self.checking_confirmations {
+                ui.label(egui::RichText::new("🔄 Checking confirmations...").small().color(egui::Color32::GRAY));
+            }
         });
+        
+        // Show success message if present
+        if let Some(msg) = &self.success_message {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("✅ ").size(16.0).color(egui::Color32::GREEN));
+                ui.label(egui::RichText::new(msg).color(egui::Color32::GREEN));
+                if ui.button("✕").clicked() {
+                    self.success_message = None;
+                }
+            });
+            ui.separator();
+        }
+        
+        // Swap ID search field
+        ui.horizontal(|ui| {
+            ui.label("Search Swap by ID:");
+            ui.text_edit_singleline(&mut self.swap_id_search);
+            if ui.button("Search").clicked() {
+                if let Some(app) = app {
+                    self.search_swap_by_id(app);
+                }
+            }
+            if !self.swap_id_search.is_empty() && ui.button("Clear").clicked() {
+                self.swap_id_search.clear();
+                self.searched_swap = None;
+            }
+        });
+        
+        // Show searched swap if found
+        if let Some(ref swap) = self.searched_swap {
+            ui.separator();
+            ui.label(egui::RichText::new("Searched Swap:").heading().color(egui::Color32::BLUE));
+            self.show_swap_row(swap, app, ui);
+            ui.separator();
+        }
+        
         ui.separator();
 
         let swaps = match &self.swaps {
@@ -237,6 +311,10 @@ impl SwapList {
             match &swap.state {
                 SwapState::Pending => {
                     ui.separator();
+                    ui.label(egui::RichText::new("⚠️ IMPORTANT: For users filling this swap").heading().color(egui::Color32::YELLOW));
+                    ui.label(egui::RichText::new(format!("Only send the L1 transaction to fill this swap after the swap has {} confirmations from the L2 sidechain.", swap.required_confirmations)).color(egui::Color32::YELLOW));
+                    ui.label(egui::RichText::new("This ensures the swap is fully confirmed before you commit your L1 funds.").small().color(egui::Color32::GRAY));
+                    ui.separator();
                     ui.label(egui::RichText::new("L1 Transaction Detection").heading());
                     ui.label("When someone sends an L1 transaction to fulfill this swap, update it here:");
                     ui.label(egui::RichText::new("Note: Automatic detection runs during block processing if RPC is configured. You can also manually update with the L1 txid - confirmations will be fetched automatically from RPC.").small().color(egui::Color32::GRAY));
@@ -330,6 +408,23 @@ impl SwapList {
                         }
                     }
                 }
+                SwapState::WaitingConfirmations(current, required) => {
+                    ui.separator();
+                    ui.label(egui::RichText::new("⏳ Waiting for Confirmations").heading().color(egui::Color32::YELLOW));
+                    ui.label(format!("Current confirmations: {}/{}", current, required));
+                    
+                    if *current < *required {
+                        let remaining = required - current;
+                        ui.label(egui::RichText::new(format!("⚠️ Still waiting for {} more confirmation(s) before coins can be claimed", remaining)).color(egui::Color32::YELLOW));
+                        ui.label(egui::RichText::new("Coins will be released when the swap is claimed after reaching the required confirmations.").small().color(egui::Color32::GRAY));
+                        ui.label(egui::RichText::new("💡 Confirmations are checked automatically every 10 seconds (works in both GUI and headless mode).").small().color(egui::Color32::GRAY));
+                        ui.label(egui::RichText::new("Note: State change to ReadyToClaim doesn't require a block, but claiming the swap requires a SwapClaim transaction in a block.").small().color(egui::Color32::GRAY));
+                    }
+                    
+                    // Show progress bar
+                    let progress = *current as f32 / *required as f32;
+                    ui.add(egui::ProgressBar::new(progress).show_percentage());
+                }
                 _ => {}
             }
         });
@@ -366,34 +461,56 @@ impl SwapList {
             }
         };
 
-        // Get locked outputs for this swap (from wallet UTXOs)
-        let wallet_utxos = match app.wallet.get_utxos() {
+        // Get locked outputs for this swap
+        // Note: We must query the node directly, not the wallet, because the wallet
+        // filters out SwapPending outputs. Locked outputs are identified by checking
+        // if the output content is SwapPending with the matching swap_id.
+        let all_utxos = match app.node.get_all_utxos() {
             Ok(utxos) => utxos,
             Err(err) => {
-                tracing::error!("Failed to get wallet UTXOs: {err:#}");
+                tracing::error!("Failed to get all UTXOs from node: {err:#}");
                 return;
             }
         };
 
-        let locked_outputs: Vec<_> = wallet_utxos
-            .into_iter()
-            .filter_map(|(outpoint, output)| {
-                if app
-                    .node
-                    .state()
-                    .is_output_locked_to_swap(&rotxn, &outpoint)
-                    .ok()?
-                    == Some(*swap_id)
-                {
-                    Some((outpoint, output))
-                } else {
-                    None
+        // Find locked outputs for this swap (same pattern as RPC server)
+        let mut locked_outputs = Vec::new();
+        for (outpoint, output) in all_utxos {
+            match &output.content {
+                coinshift::types::OutputContent::SwapPending { swap_id: locked_swap_id, .. } => {
+                    if *locked_swap_id == swap_id.0 {
+                        tracing::info!(
+                            "Found locked output for swap {}: {:?}",
+                            swap_id,
+                            outpoint
+                        );
+                        locked_outputs.push((outpoint, output));
+                    } else {
+                        tracing::debug!(
+                            "Output {:?} is SwapPending for different swap_id: {:?}",
+                            outpoint,
+                            locked_swap_id
+                        );
+                    }
                 }
-            })
-            .collect();
+                _ => {
+                    // Not a SwapPending output, skip
+                }
+            }
+        }
 
         if locked_outputs.is_empty() {
             tracing::error!("No locked outputs found for swap");
+            return;
+        }
+
+        // Add locked outputs to wallet temporarily so they can be used for signing
+        // SwapPending outputs are normally filtered out, but we need them in the wallet
+        // for the authorize() call to find the address and signing key
+        use std::collections::HashMap;
+        let locked_utxos: HashMap<_, _> = locked_outputs.iter().cloned().collect();
+        if let Err(err) = app.wallet.put_utxos(&locked_utxos) {
+            tracing::error!("Failed to add locked outputs to wallet for signing: {err:#}");
             return;
         }
 
@@ -967,6 +1084,170 @@ impl SwapList {
             tracing::info!(swap_id = %swap_id, "Deleted swap");
             self.refresh_swaps(app);
         }
+    }
+
+    /// Dynamically check and update confirmations for swaps in WaitingConfirmations state
+    /// This runs periodically to keep confirmation counts up-to-date even when blocks aren't being processed
+    fn check_confirmations_dynamically(&mut self, app: &App) {
+        if self.checking_confirmations {
+            return; // Already checking
+        }
+
+        self.checking_confirmations = true;
+        self.last_confirmation_check = Some(Instant::now());
+
+        // Get swaps from database
+        let rotxn = match app.node.env().read_txn() {
+            Ok(txn) => txn,
+            Err(err) => {
+                tracing::error!("Failed to get read transaction: {err:#}");
+                self.checking_confirmations = false;
+                return;
+            }
+        };
+
+        let swaps = match app.node.state().load_all_swaps(&rotxn) {
+            Ok(swaps) => swaps,
+            Err(err) => {
+                tracing::error!("Failed to load swaps: {err:#}");
+                self.checking_confirmations = false;
+                return;
+            }
+        };
+
+        // Filter swaps that are waiting for confirmations and have an L1 txid
+        let swaps_to_check: Vec<_> = swaps
+            .iter()
+            .filter(|swap| {
+                matches!(swap.state, SwapState::WaitingConfirmations(..))
+                    && !matches!(swap.l1_txid, SwapTxId::Hash32(h) if h == [0u8; 32])
+                    && !matches!(swap.l1_txid, SwapTxId::Hash(ref v) if v.is_empty() || v.iter().all(|&b| b == 0))
+            })
+            .collect();
+
+        drop(rotxn);
+
+        if swaps_to_check.is_empty() {
+            self.checking_confirmations = false;
+            return;
+        }
+
+        tracing::debug!(
+            swap_count = swaps_to_check.len(),
+            "Checking confirmations for {} swaps",
+            swaps_to_check.len()
+        );
+
+        let mut updated_count = 0;
+        let mut rwtxn = match app.node.env().write_txn() {
+            Ok(txn) => txn,
+            Err(err) => {
+                tracing::error!("Failed to get write transaction: {err:#}");
+                self.checking_confirmations = false;
+                return;
+            }
+        };
+
+        for swap in swaps_to_check {
+            // Get RPC config for this swap's parent chain
+            if let Some(rpc_config) = self.load_rpc_config(swap.parent_chain) {
+                // Convert L1 txid to hex string for RPC query
+                let l1_txid_hex = match &swap.l1_txid {
+                    SwapTxId::Hash32(hash) => {
+                        use bitcoin::hashes::Hash;
+                        let txid = bitcoin::Txid::from_slice(hash).unwrap_or_else(|_| {
+                            bitcoin::Txid::all_zeros()
+                        });
+                        txid.to_string()
+                    }
+                    SwapTxId::Hash(bytes) => hex::encode(bytes),
+                };
+
+                // Fetch current confirmations from RPC
+                let client = BitcoinRpcClient::new(rpc_config);
+                match client.get_transaction_confirmations(&l1_txid_hex) {
+                    Ok(new_confirmations) => {
+                        // Get current confirmations from swap state
+                        let current_confirmations = match swap.state {
+                            SwapState::WaitingConfirmations(current, _) => current,
+                            _ => 0,
+                        };
+
+                        // Only update if confirmations have increased
+                        if new_confirmations > current_confirmations {
+                            tracing::info!(
+                                swap_id = %swap.id,
+                                old_confirmations = %current_confirmations,
+                                new_confirmations = %new_confirmations,
+                                required = %swap.required_confirmations,
+                                "Updating swap confirmations dynamically"
+                            );
+
+                            // Get current block info for reference
+                            let block_hash = match app.node.state().try_get_tip(&rwtxn) {
+                                Ok(Some(hash)) => hash,
+                                Ok(None) | Err(_) => {
+                                    tracing::warn!("Could not get block hash for swap update");
+                                    continue;
+                                }
+                            };
+                            let block_height = match app.node.state().try_get_height(&rwtxn) {
+                                Ok(Some(height)) => height,
+                                Ok(None) | Err(_) => {
+                                    tracing::warn!("Could not get block height for swap update");
+                                    continue;
+                                }
+                            };
+
+                            // Update swap with new confirmations
+                            if let Err(err) = app.node.state().update_swap_l1_txid(
+                                &mut rwtxn,
+                                &swap.id,
+                                swap.l1_txid.clone(),
+                                new_confirmations,
+                                None, // l1_claimer_address - not needed for confirmation updates
+                                block_hash,
+                                block_height,
+                            ) {
+                                tracing::error!(
+                                    swap_id = %swap.id,
+                                    error = %err,
+                                    "Failed to update swap confirmations"
+                                );
+                            } else {
+                                updated_count += 1;
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        tracing::debug!(
+                            swap_id = %swap.id,
+                            l1_txid = %l1_txid_hex,
+                            error = %err,
+                            "Failed to fetch confirmations from RPC (this is normal if RPC is unavailable)"
+                        );
+                    }
+                }
+            }
+        }
+
+        if updated_count > 0 {
+            if let Err(err) = rwtxn.commit() {
+                tracing::error!("Failed to commit swap updates: {err:#}");
+            } else {
+                tracing::info!(
+                    updated_swaps = updated_count,
+                    "Dynamically updated confirmations for {} swaps",
+                    updated_count
+                );
+                // Refresh the swap list to show updated states
+                self.refresh_swaps(app);
+            }
+        } else {
+            drop(rwtxn);
+        }
+
+        self.checking_confirmations = false;
     }
 }
 

@@ -81,7 +81,18 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-ENFORCER_ADDR=$(echo "$ENFORCER_ADDR_RESPONSE" | grep -o '"address":"[^"]*"' | cut -d'"' -f4)
+# Try to parse with jq first (more reliable), fallback to grep/sed
+if command -v jq &> /dev/null; then
+    ENFORCER_ADDR=$(echo "$ENFORCER_ADDR_RESPONSE" | jq -r '.address // empty' 2>/dev/null)
+else
+    # Fallback: extract address value from JSON (handles both single-line and multi-line JSON)
+    # First try: match "address": "value" pattern (handles pretty-printed JSON)
+    ENFORCER_ADDR=$(echo "$ENFORCER_ADDR_RESPONSE" | grep -A1 '"address"' | grep -o '"[^"]*"' | tail -1 | tr -d '"')
+    # If that didn't work, try matching on same line
+    if [ -z "$ENFORCER_ADDR" ]; then
+        ENFORCER_ADDR=$(echo "$ENFORCER_ADDR_RESPONSE" | grep -o '"address"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*"address"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
+    fi
+fi
 
 if [ -z "$ENFORCER_ADDR" ]; then
     echo "ERROR: Could not parse address from response:"

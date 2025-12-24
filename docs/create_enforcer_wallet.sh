@@ -38,22 +38,6 @@ if ! grpcurl -plaintext "$ENFORCER_GRPC_ADDR" list >/dev/null 2>&1; then
 fi
 echo "Enforcer gRPC is accessible ✓"
 
-# Check if wallet already exists
-echo "Checking if wallet already exists..."
-WALLET_INFO=$(grpcurl -plaintext "$ENFORCER_GRPC_ADDR" \
-  cusf.mainchain.v1.WalletService/GetInfo 2>&1)
-if [ $? -eq 0 ] && echo "$WALLET_INFO" | grep -q "network"; then
-    echo "WARNING: Wallet already exists!"
-    echo "Wallet info:"
-    echo "$WALLET_INFO" | head -10
-    echo ""
-    read -p "Do you want to continue anyway? (y/N): " -n 1 -r
-    echo ""
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        exit 1
-    fi
-fi
-
 # Get password (first argument)
 PASSWORD="${1:-}"
 
@@ -125,11 +109,15 @@ echo "  Password: ${PASSWORD:-"(none - unencrypted)"}"
 echo "  Mnemonic: ${MNEMONIC_PATH:-"(will be generated)"}"
 echo ""
 
+# Temporarily disable exit on error to handle CreateWallet response
+set +e
 RESPONSE=$(grpcurl -plaintext -d @ "$ENFORCER_GRPC_ADDR" \
   cusf.mainchain.v1.WalletService/CreateWallet \
   <<< "$REQUEST_JSON" 2>&1)
+EXIT_CODE=$?
+set -e
 
-if [ $? -eq 0 ]; then
+if [ $EXIT_CODE -eq 0 ]; then
     echo "✓ Wallet created successfully!"
     echo ""
     echo "Next steps:"
@@ -142,8 +130,17 @@ if [ $? -eq 0 ]; then
     echo "  3. (Optional) Send funds from mainchain wallet to enforcer wallet address if needed"
     echo "  4. Mine blocks: ./mine_with_enforcer.sh"
 else
-    echo "✗ Failed to create wallet:"
-    echo "$RESPONSE"
-    exit 1
+    # Check if the error is "AlreadyExists"
+    if echo "$RESPONSE" | grep -qi "already exists\|AlreadyExists"; then
+        echo "⚠ Wallet already exists!"
+        echo ""
+        echo "The enforcer wallet has already been created."
+        echo "If you need to unlock it, use: ./unlock_enforcer_wallet.sh [password]"
+        exit 0
+    else
+        echo "✗ Failed to create wallet:"
+        echo "$RESPONSE"
+        exit 1
+    fi
 fi
 
