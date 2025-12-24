@@ -8,6 +8,16 @@ use hex;
 use crate::app::App;
 use crate::gui::util::show_btc_amount;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SwapStatusFilter {
+    All,
+    Pending,
+    WaitingConfirmations,
+    ReadyToClaim,
+    Completed,
+    Cancelled,
+}
+
 pub struct SwapList {
     swaps: Option<Vec<Swap>>,
     selected_swap_id: Option<String>,
@@ -20,6 +30,8 @@ pub struct SwapList {
     success_message: Option<String>,  // Success message after claiming (contains txid)
     swap_id_search: String,  // Swap ID search input field
     searched_swap: Option<Swap>,  // Swap found by search
+    status_filter: SwapStatusFilter,  // Filter swaps by status
+    search_error: Option<String>,  // Error message for search
 }
 
 impl Default for SwapList {
@@ -36,6 +48,8 @@ impl Default for SwapList {
             success_message: None,
             swap_id_search: String::new(),
             searched_swap: None,
+            status_filter: SwapStatusFilter::All,
+            search_error: None,
         }
     }
 }
@@ -141,7 +155,7 @@ impl SwapList {
         });
         
         // Show success message if present
-        if let Some(msg) = &self.success_message {
+        if let Some(msg) = self.success_message.clone() {
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new("✅ ").size(16.0).color(egui::Color32::GREEN));
                 ui.label(egui::RichText::new(msg).color(egui::Color32::GREEN));
@@ -164,16 +178,48 @@ impl SwapList {
             if !self.swap_id_search.is_empty() && ui.button("Clear").clicked() {
                 self.swap_id_search.clear();
                 self.searched_swap = None;
+                self.search_error = None;
             }
         });
         
+        // Show search error if any
+        if let Some(err_msg) = &self.search_error {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(format!("❌ Error: {}", err_msg)).color(egui::Color32::RED));
+            });
+        }
+        
         // Show searched swap if found
-        if let Some(ref swap) = self.searched_swap {
+        if let Some(swap) = self.searched_swap.clone() {
             ui.separator();
             ui.label(egui::RichText::new("Searched Swap:").heading().color(egui::Color32::BLUE));
-            self.show_swap_row(swap, app, ui);
+            self.show_swap_row(&swap, app, ui);
             ui.separator();
         }
+        
+        ui.separator();
+        
+        // Status filter
+        ui.horizontal(|ui| {
+            ui.label("Filter by Status:");
+            egui::ComboBox::from_id_salt("status_filter")
+                .selected_text(match self.status_filter {
+                    SwapStatusFilter::All => "All",
+                    SwapStatusFilter::Pending => "Pending",
+                    SwapStatusFilter::WaitingConfirmations => "Waiting Confirmations",
+                    SwapStatusFilter::ReadyToClaim => "Ready To Claim",
+                    SwapStatusFilter::Completed => "Completed",
+                    SwapStatusFilter::Cancelled => "Cancelled",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.status_filter, SwapStatusFilter::All, "All");
+                    ui.selectable_value(&mut self.status_filter, SwapStatusFilter::Pending, "Pending");
+                    ui.selectable_value(&mut self.status_filter, SwapStatusFilter::WaitingConfirmations, "Waiting Confirmations");
+                    ui.selectable_value(&mut self.status_filter, SwapStatusFilter::ReadyToClaim, "Ready To Claim");
+                    ui.selectable_value(&mut self.status_filter, SwapStatusFilter::Completed, "Completed");
+                    ui.selectable_value(&mut self.status_filter, SwapStatusFilter::Cancelled, "Cancelled");
+                });
+        });
         
         ui.separator();
 
@@ -185,22 +231,42 @@ impl SwapList {
             }
         };
 
-        if swaps.is_empty() {
-            ui.label("No swaps found.");
-            ui.separator();
-            ui.label("Note: Swaps need to be included in a block before they appear in the state.");
-            ui.label("If you just created a swap, it may be pending in the mempool.");
-            ui.label("Mine a block or wait for one to be mined to confirm your swap.");
+        // Filter swaps by status
+        let status_filter = self.status_filter;
+        let filtered_swaps: Vec<_> = swaps.iter()
+            .filter(|swap| {
+                match status_filter {
+                    SwapStatusFilter::All => true,
+                    SwapStatusFilter::Pending => matches!(swap.state, SwapState::Pending),
+                    SwapStatusFilter::WaitingConfirmations => matches!(swap.state, SwapState::WaitingConfirmations(..)),
+                    SwapStatusFilter::ReadyToClaim => matches!(swap.state, SwapState::ReadyToClaim),
+                    SwapStatusFilter::Completed => matches!(swap.state, SwapState::Completed),
+                    SwapStatusFilter::Cancelled => matches!(swap.state, SwapState::Cancelled),
+                }
+            })
+            .cloned()
+            .collect();
+
+        if filtered_swaps.is_empty() {
+            if swaps.is_empty() {
+                ui.label("No swaps found.");
+                ui.separator();
+                ui.label("Note: Swaps need to be included in a block before they appear in the state.");
+                ui.label("If you just created a swap, it may be pending in the mempool.");
+                ui.label("Mine a block or wait for one to be mined to confirm your swap.");
+            } else {
+                ui.label(format!("No swaps found with status: {:?}", status_filter));
+                ui.label("Try selecting a different filter or click 'All' to see all swaps.");
+            }
             return;
         }
 
-        let swaps_clone = swaps.clone();
         ScrollArea::vertical().show(ui, |ui| {
             egui::Grid::new("swaps_grid")
                 .num_columns(2)
                 .striped(true)
                 .show(ui, |ui| {
-                    for swap in &swaps_clone {
+                    for swap in &filtered_swaps {
                         self.show_swap_row(swap, app, ui);
                     }
                 });
@@ -555,90 +621,155 @@ impl SwapList {
     }
     
     fn search_swap_by_id(&mut self, app: &App) {
-        if self.swap_id_search.is_empty() {
-            self.searched_swap = None;
+        self.search_error = None;
+        self.searched_swap = None;
+        
+        if self.swap_id_search.trim().is_empty() {
             return;
         }
         
-        // Parse swap ID from hex string (SwapId displays as hex)
-        let swap_id = match hex::decode(&self.swap_id_search.trim()) {
-            Ok(bytes) => {
-                if bytes.len() == 32 {
-                    let mut id_bytes = [0u8; 32];
-                    id_bytes.copy_from_slice(&bytes);
-                    SwapId(id_bytes)
-                } else {
-                    tracing::warn!("Swap ID must be 32 bytes (64 hex characters), got {} bytes", bytes.len());
-                    self.searched_swap = None;
+        let search_input = self.swap_id_search.trim();
+        
+        // Try to find swap by partial or full ID
+        if search_input.len() == 64 {
+            // Full swap ID - parse and search
+            let swap_id = match hex::decode(search_input) {
+                Ok(bytes) => {
+                    if bytes.len() == 32 {
+                        let mut id_bytes = [0u8; 32];
+                        id_bytes.copy_from_slice(&bytes);
+                        SwapId(id_bytes)
+                    } else {
+                        self.search_error = Some(format!("Invalid swap ID length: expected 32 bytes, got {}", bytes.len()));
+                        return;
+                    }
+                }
+                Err(err) => {
+                    self.search_error = Some(format!("Invalid hex format: {}", err));
+                    return;
+                }
+            };
+            
+            // Search for full swap ID
+            let rotxn = match app.node.env().read_txn() {
+                Ok(txn) => txn,
+                Err(err) => {
+                    self.search_error = Some(format!("Failed to get read transaction: {}", err));
+                    return;
+                }
+            };
+            
+            match app.node.state().get_swap(&rotxn, &swap_id) {
+                Ok(Some(swap)) => {
+                    tracing::info!("Found swap by ID: {}", swap_id);
+                    self.searched_swap = Some(swap);
+                    return;
+                }
+                Ok(None) => {
+                    // Also check mempool
+                    if let Ok(mempool_txs) = app.node.get_all_transactions() {
+                        for tx in mempool_txs {
+                            if let coinshift::types::TxData::SwapCreate {
+                                swap_id: tx_swap_id,
+                                parent_chain,
+                                l1_txid_bytes: _,
+                                required_confirmations,
+                                l2_recipient,
+                                l2_amount,
+                                l1_recipient_address,
+                                l1_amount,
+                            } = &tx.transaction.data
+                            {
+                                if coinshift::types::SwapId(*tx_swap_id) == swap_id {
+                                    let l1_txid = coinshift::types::SwapTxId::from_bytes(&vec![0u8; 32]);
+                                    let swap = coinshift::types::Swap::new(
+                                        swap_id,
+                                        coinshift::types::SwapDirection::L2ToL1,
+                                        *parent_chain,
+                                        l1_txid,
+                                        Some(*required_confirmations),
+                                        *l2_recipient,
+                                        bitcoin::Amount::from_sat(*l2_amount),
+                                        l1_recipient_address.clone(),
+                                        l1_amount.map(bitcoin::Amount::from_sat),
+                                        0, // Height 0 for pending
+                                        None,
+                                    );
+                                    self.searched_swap = Some(swap);
+                                    tracing::info!("Found swap in mempool: {}", swap_id);
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                    self.search_error = Some(format!("Swap not found: {}", swap_id));
+                    return;
+                }
+                Err(err) => {
+                    self.search_error = Some(format!("Failed to get swap: {}", err));
                     return;
                 }
             }
-            Err(err) => {
-                tracing::warn!("Invalid swap ID hex format: {}", err);
-                self.searched_swap = None;
-                return;
-            }
-        };
-        
-        // Get swap from database
-        let rotxn = match app.node.env().read_txn() {
-            Ok(txn) => txn,
-            Err(err) => {
-                tracing::error!("Failed to get read transaction: {err:#}");
-                self.searched_swap = None;
-                return;
-            }
-        };
-        
-        match app.node.state().get_swap(&rotxn, &swap_id) {
-            Ok(Some(swap)) => {
-                tracing::info!("Found swap by ID: {}", swap_id);
-                self.searched_swap = Some(swap);
-            }
-            Ok(None) => {
-                tracing::warn!("Swap not found: {}", swap_id);
-                self.searched_swap = None;
+        } else if search_input.len() < 64 {
+            // Partial ID - search through all swaps to find matches
+            // Try to find swaps that start with this partial ID
+            let rotxn = match app.node.env().read_txn() {
+                Ok(txn) => txn,
+                Err(err) => {
+                    self.search_error = Some(format!("Failed to get read transaction: {}", err));
+                    return;
+                }
+            };
+            
+            let all_swaps = match app.node.state().load_all_swaps(&rotxn) {
+                Ok(swaps) => swaps,
+                Err(err) => {
+                    self.search_error = Some(format!("Failed to load swaps: {}", err));
+                    return;
+                }
+            };
+            
+            // Try to find swap by partial hex match
+            let search_lower = search_input.to_lowercase();
+            let matching_swaps: Vec<_> = all_swaps.iter()
+                .filter(|swap| {
+                    let swap_id_hex = hex::encode(swap.id.0);
+                    swap_id_hex.starts_with(&search_lower)
+                })
+                .collect();
+            
+            if matching_swaps.is_empty() {
                 // Also check mempool
                 if let Ok(mempool_txs) = app.node.get_all_transactions() {
                     for tx in mempool_txs {
                         if let coinshift::types::TxData::SwapCreate {
                             swap_id: tx_swap_id,
-                            parent_chain,
-                            l1_txid_bytes: _,
-                            required_confirmations,
-                            l2_recipient,
-                            l2_amount,
-                            l1_recipient_address,
-                            l1_amount,
+                            ..
                         } = &tx.transaction.data
                         {
-                            if coinshift::types::SwapId(*tx_swap_id) == swap_id {
-                                let l1_txid = coinshift::types::SwapTxId::from_bytes(&vec![0u8; 32]);
-                                let swap = coinshift::types::Swap::new(
-                                    swap_id,
-                                    coinshift::types::SwapDirection::L2ToL1,
-                                    *parent_chain,
-                                    l1_txid,
-                                    Some(*required_confirmations),
-                                    *l2_recipient,
-                                    bitcoin::Amount::from_sat(*l2_amount),
-                                    l1_recipient_address.clone(),
-                                    l1_amount.map(bitcoin::Amount::from_sat),
-                                    0, // Height 0 for pending
-                                    None,
-                                );
-                                self.searched_swap = Some(swap);
-                                tracing::info!("Found swap in mempool: {}", swap_id);
+                            let swap_id_hex = hex::encode(tx_swap_id);
+                            if swap_id_hex.starts_with(&search_lower) {
+                                // Found in mempool, but we need to construct the swap
+                                // For now, just show error that full ID is needed for mempool swaps
+                                self.search_error = Some("Partial ID found in mempool. Please use full 64-character swap ID for mempool swaps.".to_string());
                                 return;
                             }
                         }
                     }
                 }
+                self.search_error = Some(format!("No swap found starting with '{}'. Please enter full 64-character swap ID.", search_input));
+                return;
+            } else if matching_swaps.len() > 1 {
+                self.search_error = Some(format!("Multiple swaps found starting with '{}'. Please enter more characters to narrow down.", search_input));
+                return;
+            } else {
+                // Found exactly one match
+                self.searched_swap = Some(matching_swaps[0].clone());
+                return;
             }
-            Err(err) => {
-                tracing::error!("Failed to get swap: {err:#}");
-                self.searched_swap = None;
-            }
+        } else {
+            self.search_error = Some(format!("Swap ID too long: expected 64 hex characters, got {}", search_input.len()));
+            return;
         }
     }
 
