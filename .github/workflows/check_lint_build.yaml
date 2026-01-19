@@ -3,6 +3,7 @@ on:
   pull_request:
   push:
     branches:
+      - main
       - master
     tags:
       - '*'
@@ -115,7 +116,7 @@ jobs:
           export BITCOIND='../bitcoin-patched-bins/bitcoind'
           export BITCOIN_CLI='../bitcoin-patched-bins/bitcoin-cli'
           export ELECTRS='../electrs/target/release/electrs'
-          export THUNDER_APP='target/debug/thunder_app'
+          export COINSHIFT_APP='target/debug/coinshift_app'
           cargo run --example integration_tests
 
   build-release:
@@ -167,29 +168,29 @@ jobs:
 
       - name: 'Set environment variables: version number and output filenames'
         run: |
-          THUNDER_APP_VERSION=$(cargo metadata --format-version 1 | \
-            jq -er '.packages | map(select(.name == "thunder_app") | .version) | .[0]')
-          THUNDER_APP_FILENAME="thunder-${THUNDER_APP_VERSION}-${{ matrix.name }}${{ matrix.binary-suffix }}"
-          THUNDER_CLI_FILENAME="thunder-cli-${THUNDER_APP_VERSION}-${{ matrix.name }}${{ matrix.binary-suffix }}"
-          echo "THUNDER_APP_VERSION=$THUNDER_APP_VERSION" >> "$GITHUB_ENV"
-          echo "THUNDER_APP_FILENAME=$THUNDER_APP_FILENAME" >> "$GITHUB_ENV"
-          echo "THUNDER_CLI_FILENAME=$THUNDER_CLI_FILENAME" >> "$GITHUB_ENV"
+          COINSHIFT_APP_VERSION=$(cargo metadata --format-version 1 | \
+            jq -er '.packages | map(select(.name == "coinshift_app") | .version) | .[0]')
+          COINSHIFT_APP_FILENAME="coinshift-${COINSHIFT_APP_VERSION}-${{ matrix.name }}${{ matrix.binary-suffix }}"
+          COINSHIFT_CLI_FILENAME="coinshift-cli-${COINSHIFT_APP_VERSION}-${{ matrix.name }}${{ matrix.binary-suffix }}"
+          echo "COINSHIFT_APP_VERSION=$COINSHIFT_APP_VERSION" >> "$GITHUB_ENV"
+          echo "COINSHIFT_APP_FILENAME=$COINSHIFT_APP_FILENAME" >> "$GITHUB_ENV"
+          echo "COINSHIFT_CLI_FILENAME=$COINSHIFT_CLI_FILENAME" >> "$GITHUB_ENV"
 
       - name: 'Set filenames for release binaries'
         run: |
           pushd "target/${{ matrix.name }}/release/"
-          ln -fs "thunder_app${{ matrix.binary-suffix }}" "${THUNDER_APP_FILENAME}"
-          ln -fs "thunder_app_cli${{ matrix.binary-suffix }}" "${THUNDER_CLI_FILENAME}"
+          ln -fs "coinshift_app${{ matrix.binary-suffix }}" "${COINSHIFT_APP_FILENAME}"
+          ln -fs "coinshift_app_cli${{ matrix.binary-suffix }}" "${COINSHIFT_CLI_FILENAME}"
           popd
 
-      - name: 'Upload Artifacts (thunder)'
+      - name: 'Upload Artifacts (coinshift)'
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.THUNDER_APP_FILENAME }}
+          name: ${{ env.COINSHIFT_APP_FILENAME }}
           if-no-files-found: error
           path: |
-            target/${{ matrix.name }}/release/${{ env.THUNDER_APP_FILENAME }}
-            target/${{ matrix.name }}/release/${{ env.THUNDER_CLI_FILENAME }}
+            target/${{ matrix.name }}/release/${{ env.COINSHIFT_APP_FILENAME }}
+            target/${{ matrix.name }}/release/${{ env.COINSHIFT_CLI_FILENAME }}
 
       - name: Extract Git tag name
         id: git-tag-name
@@ -209,8 +210,8 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         with:
           files: |
-            target/${{ matrix.name }}/release/${{ env.THUNDER_APP_FILENAME }}
-            target/${{ matrix.name }}/release/${{ env.THUNDER_CLI_FILENAME }}
+            target/${{ matrix.name }}/release/${{ env.COINSHIFT_APP_FILENAME }}
+            target/${{ matrix.name }}/release/${{ env.COINSHIFT_CLI_FILENAME }}
           fail_on_unmatched_files: true
           prerelease: ${{ steps.parse-git-tag-name-semver.outputs.prerelease != '' }}
 
@@ -246,21 +247,21 @@ jobs:
       - name: Create zip files for releases.drivechain.info
         run: |
           shopt -s extglob
-          mv thunder-+([0-9]).+([0-9]).+([0-9])-x86_64-apple-darwin thunder-latest-x86_64-apple-darwin
-          mv thunder-cli-+([0-9]).+([0-9]).+([0-9])-x86_64-apple-darwin thunder-cli-latest-x86_64-apple-darwin
-          zip L2-S9-Thunder-latest-x86_64-apple-darwin.zip \
-            thunder-latest-x86_64-apple-darwin \
-            thunder-cli-latest-x86_64-apple-darwin
-          mv thunder-+([0-9]).+([0-9]).+([0-9])-x86_64-pc-windows-gnu.exe thunder-latest-x86_64-pc-windows-gnu.exe
-          mv thunder-cli-+([0-9]).+([0-9]).+([0-9])-x86_64-pc-windows-gnu.exe thunder-cli-latest-x86_64-pc-windows-gnu.exe
-          zip L2-S9-Thunder-latest-x86_64-pc-windows-gnu.zip \
-            thunder-latest-x86_64-pc-windows-gnu.exe \
-            thunder-cli-latest-x86_64-pc-windows-gnu.exe
-          mv thunder-+([0-9]).+([0-9]).+([0-9])-x86_64-unknown-linux-gnu thunder-latest-x86_64-unknown-linux-gnu
-          mv thunder-cli-+([0-9]).+([0-9]).+([0-9])-x86_64-unknown-linux-gnu thunder-cli-latest-x86_64-unknown-linux-gnu
-          zip L2-S9-Thunder-latest-x86_64-unknown-linux-gnu.zip \
-            thunder-latest-x86_64-unknown-linux-gnu \
-            thunder-cli-latest-x86_64-unknown-linux-gnu
+          mv coinshift-+([0-9]).+([0-9]).+([0-9])-x86_64-apple-darwin coinshift-latest-x86_64-apple-darwin
+          mv coinshift-cli-+([0-9]).+([0-9]).+([0-9])-x86_64-apple-darwin coinshift-cli-latest-x86_64-apple-darwin
+          zip L2-S255-Coinshift-latest-x86_64-apple-darwin.zip \
+            coinshift-latest-x86_64-apple-darwin \
+            coinshift-cli-latest-x86_64-apple-darwin
+          mv coinshift-+([0-9]).+([0-9]).+([0-9])-x86_64-pc-windows-gnu.exe coinshift-latest-x86_64-pc-windows-gnu.exe
+          mv coinshift-cli-+([0-9]).+([0-9]).+([0-9])-x86_64-pc-windows-gnu.exe coinshift-cli-latest-x86_64-pc-windows-gnu.exe
+          zip L2-S255-Coinshift-latest-x86_64-pc-windows-gnu.zip \
+            coinshift-latest-x86_64-pc-windows-gnu.exe \
+            coinshift-cli-latest-x86_64-pc-windows-gnu.exe
+          mv coinshift-+([0-9]).+([0-9]).+([0-9])-x86_64-unknown-linux-gnu coinshift-latest-x86_64-unknown-linux-gnu
+          mv coinshift-cli-+([0-9]).+([0-9]).+([0-9])-x86_64-unknown-linux-gnu coinshift-cli-latest-x86_64-unknown-linux-gnu
+          zip L2-S255-Coinshift-latest-x86_64-unknown-linux-gnu.zip \
+            coinshift-latest-x86_64-unknown-linux-gnu \
+            coinshift-cli-latest-x86_64-unknown-linux-gnu
 
       - name: Upload release assets to releases.drivechain.info
         uses: appleboy/scp-action@v1
@@ -269,5 +270,5 @@ jobs:
           username: root
           password: ${{ secrets.RELEASES_SERVER_PW }}
           port: 22
-          source: 'L2-S9-Thunder-latest-*.zip'
+          source: 'L2-S255-Coinshift-latest-*.zip'
           target: '/var/www/html/'
