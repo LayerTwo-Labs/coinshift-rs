@@ -1,6 +1,6 @@
+use coinshift::types::{GetValue, OutPoint};
 use eframe::egui;
 use human_size::{Byte, Kibibyte, Mebibyte, SpecificSize};
-use coinshift::types::{GetValue, OutPoint};
 
 use crate::app::App;
 

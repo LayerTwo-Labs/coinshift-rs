@@ -1,8 +1,8 @@
 use std::task::Poll;
 
+use coinshift::{util::Watchable, wallet::Wallet};
 use eframe::egui::{self, RichText};
 use strum::{EnumIter, IntoEnumIterator};
-use coinshift::{util::Watchable, wallet::Wallet};
 use util::{BITCOIN_LOGO_FA, BITCOIN_ORANGE, show_btc_amount};
 
 use crate::{app::App, line_buffer::LineBuffer, util::PromiseStream};
@@ -139,12 +139,16 @@ impl BottomPanel {
             }
             Some(Poll::Pending) => {
                 if self.balance.is_none() {
-                    tracing::trace!("Waiting for wallet update to load balance");
+                    tracing::trace!(
+                        "Waiting for wallet update to load balance"
+                    );
                 }
             }
             None => {
                 if self.balance.is_none() {
-                    tracing::warn!("Wallet update stream ended before balance could be loaded");
+                    tracing::warn!(
+                        "Wallet update stream ended before balance could be loaded"
+                    );
                 }
             }
         }

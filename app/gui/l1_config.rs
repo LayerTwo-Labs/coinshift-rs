@@ -1,11 +1,11 @@
-use eframe::egui::{self, Button, TextEdit, RichText, Color32, ComboBox};
-use std::sync::{Arc, Mutex};
+use coinshift::types::ParentChainType;
+use eframe::egui::{self, Button, Color32, ComboBox, RichText, TextEdit};
+use poll_promise::Promise;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use poll_promise::Promise;
-use serde_json::json;
-use coinshift::types::ParentChainType;
-use serde::{Deserialize, Serialize};
+use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Serialize, Deserialize)]
 struct RpcConfig {
@@ -73,10 +73,15 @@ impl L1Config {
     fn load(&mut self, _ctx: &egui::Context) {
         let config_path = Self::config_file_path();
         if let Ok(file_content) = std::fs::read_to_string(&config_path) {
-            if let Ok(stored_configs) = serde_json::from_str::<HashMap<ParentChainType, RpcConfig>>(&file_content) {
+            if let Ok(stored_configs) = serde_json::from_str::<
+                HashMap<ParentChainType, RpcConfig>,
+            >(&file_content)
+            {
                 self.configs = stored_configs;
                 // Load the currently selected parent chain's config
-                if let Some(config) = self.configs.get(&self.selected_parent_chain) {
+                if let Some(config) =
+                    self.configs.get(&self.selected_parent_chain)
+                {
                     self.rpc_url = config.url.clone();
                     self.rpc_user = config.user.clone();
                     self.rpc_password = config.password.clone();
@@ -91,9 +96,10 @@ impl L1Config {
             user: self.rpc_user.clone(),
             password: self.rpc_password.clone(),
         };
-        
-        self.configs.insert(self.selected_parent_chain, config.clone());
-        
+
+        self.configs
+            .insert(self.selected_parent_chain, config.clone());
+
         // Persist to file
         let config_path = Self::config_file_path();
         if let Some(parent_dir) = config_path.parent() {
@@ -102,7 +108,7 @@ impl L1Config {
         if let Ok(json) = serde_json::to_string_pretty(&self.configs) {
             drop(std::fs::write(&config_path, json));
         }
-        
+
         // Auto-check connection when saving
         if !config.url.is_empty() {
             self.check_connection(&config.url, &config.user, &config.password);
@@ -128,11 +134,17 @@ impl L1Config {
         self.configs.get(&parent_chain).map(|c| c.url.clone())
     }
 
-    pub fn get_rpc_user(&self, parent_chain: ParentChainType) -> Option<String> {
+    pub fn get_rpc_user(
+        &self,
+        parent_chain: ParentChainType,
+    ) -> Option<String> {
         self.configs.get(&parent_chain).map(|c| c.user.clone())
     }
 
-    pub fn get_rpc_password(&self, parent_chain: ParentChainType) -> Option<String> {
+    pub fn get_rpc_password(
+        &self,
+        parent_chain: ParentChainType,
+    ) -> Option<String> {
         self.configs.get(&parent_chain).map(|c| c.password.clone())
     }
 
@@ -145,23 +157,27 @@ impl L1Config {
         let user = user.to_string();
         let password = password.to_string();
         let status = self.connection_status.clone();
-        
+
         *status.lock().unwrap() = ConnectionStatus::Checking;
-        
+
         let promise = Promise::spawn_thread("l1_rpc_check", move || {
             Self::fetch_block_height(&url, &user, &password)
         });
-        
+
         self.status_promise = Some(promise);
     }
 
-    fn fetch_block_height(url: &str, user: &str, password: &str) -> anyhow::Result<u64> {
+    fn fetch_block_height(
+        url: &str,
+        user: &str,
+        password: &str,
+    ) -> anyhow::Result<u64> {
         use std::time::Duration;
-        
+
         let client = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(5))
             .build()?;
-        
+
         let request = json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -170,7 +186,7 @@ impl L1Config {
         });
 
         let mut request_builder = client.post(url).json(&request);
-        
+
         // Add HTTP basic authentication if user and password are provided
         if !user.is_empty() {
             request_builder = request_builder.basic_auth(user, Some(password));
@@ -179,18 +195,20 @@ impl L1Config {
         let response = request_builder.send()?;
 
         let json: serde_json::Value = response.json()?;
-        
+
         if let Some(error) = json.get("error") {
             anyhow::bail!("RPC error: {}", error);
         }
-        
-        let result = json.get("result")
+
+        let result = json
+            .get("result")
             .ok_or_else(|| anyhow::anyhow!("No result in response"))?;
-        
-        let blocks = result.get("blocks")
+
+        let blocks = result
+            .get("blocks")
             .and_then(|v| v.as_u64())
             .ok_or_else(|| anyhow::anyhow!("No blocks field in response"))?;
-        
+
         Ok(blocks)
     }
 
@@ -199,13 +217,15 @@ impl L1Config {
             if let Some(result) = promise.ready() {
                 match result {
                     Ok(block_height) => {
-                        *self.connection_status.lock().unwrap() = 
-                            ConnectionStatus::Connected { block_height: *block_height };
+                        *self.connection_status.lock().unwrap() =
+                            ConnectionStatus::Connected {
+                                block_height: *block_height,
+                            };
                     }
                     Err(err) => {
-                        *self.connection_status.lock().unwrap() = 
-                            ConnectionStatus::Disconnected { 
-                                error: format!("{err:#}") 
+                        *self.connection_status.lock().unwrap() =
+                            ConnectionStatus::Disconnected {
+                                error: format!("{err:#}"),
                             };
                     }
                 }
@@ -218,7 +238,9 @@ impl L1Config {
         ui.heading("L1 Node RPC Configuration");
         ui.separator();
 
-        ui.label("Configure the RPC URL for the L1 node (e.g., Bitcoin Core RPC)");
+        ui.label(
+            "Configure the RPC URL for the L1 node (e.g., Bitcoin Core RPC)",
+        );
         ui.label("This is used for monitoring L1 transactions for swaps.");
         ui.label("Each parent chain can have its own RPC configuration.");
         ui.add_space(10.0);
@@ -230,13 +252,33 @@ impl L1Config {
             ComboBox::from_id_salt("l1_config_parent_chain")
                 .selected_text(format!("{:?}", self.selected_parent_chain))
                 .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.selected_parent_chain, ParentChainType::BTC, "BTC");
-                    ui.selectable_value(&mut self.selected_parent_chain, ParentChainType::Signet, "Signet");
-                    ui.selectable_value(&mut self.selected_parent_chain, ParentChainType::Regtest, "Regtest");
-                    ui.selectable_value(&mut self.selected_parent_chain, ParentChainType::BCH, "BCH");
-                    ui.selectable_value(&mut self.selected_parent_chain, ParentChainType::LTC, "LTC");
+                    ui.selectable_value(
+                        &mut self.selected_parent_chain,
+                        ParentChainType::BTC,
+                        "BTC",
+                    );
+                    ui.selectable_value(
+                        &mut self.selected_parent_chain,
+                        ParentChainType::Signet,
+                        "Signet",
+                    );
+                    ui.selectable_value(
+                        &mut self.selected_parent_chain,
+                        ParentChainType::Regtest,
+                        "Regtest",
+                    );
+                    ui.selectable_value(
+                        &mut self.selected_parent_chain,
+                        ParentChainType::BCH,
+                        "BCH",
+                    );
+                    ui.selectable_value(
+                        &mut self.selected_parent_chain,
+                        ParentChainType::LTC,
+                        "LTC",
+                    );
                 });
-            
+
             // Load config when parent chain changes
             if previous_chain != self.selected_parent_chain {
                 self.load_selected_chain_config();
@@ -278,17 +320,25 @@ impl L1Config {
         });
 
         // Show current saved configuration
-        if let Some(saved_config) = self.configs.get(&self.selected_parent_chain) {
+        if let Some(saved_config) =
+            self.configs.get(&self.selected_parent_chain)
+        {
             ui.horizontal(|ui| {
                 ui.label("Current saved URL:");
                 use crate::gui::util::UiExt;
-                ui.monospace_selectable_singleline(true, saved_config.url.as_str());
+                ui.monospace_selectable_singleline(
+                    true,
+                    saved_config.url.as_str(),
+                );
             });
             if !saved_config.user.is_empty() {
                 ui.horizontal(|ui| {
                     ui.label("Current saved User:");
                     use crate::gui::util::UiExt;
-                    ui.monospace_selectable_singleline(true, saved_config.user.as_str());
+                    ui.monospace_selectable_singleline(
+                        true,
+                        saved_config.user.as_str(),
+                    );
                 });
             }
         } else {
@@ -299,15 +349,17 @@ impl L1Config {
 
         // Connection status
         self.update_status();
-        
+
         let status = {
             let lock = self.connection_status.lock().unwrap();
             lock.clone()
         };
-        
+
         match status {
             ConnectionStatus::Unknown => {
-                if let Some(saved_config) = self.configs.get(&self.selected_parent_chain) {
+                if let Some(saved_config) =
+                    self.configs.get(&self.selected_parent_chain)
+                {
                     if !saved_config.url.is_empty() {
                         let url = saved_config.url.clone();
                         let user = saved_config.user.clone();
@@ -325,16 +377,25 @@ impl L1Config {
             ConnectionStatus::Checking => {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("●").color(Color32::YELLOW));
-                    ui.label(RichText::new("Checking connection...").color(Color32::YELLOW));
+                    ui.label(
+                        RichText::new("Checking connection...")
+                            .color(Color32::YELLOW),
+                    );
                 });
             }
             ConnectionStatus::Connected { block_height } => {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("●").color(Color32::GREEN));
-                    ui.label(RichText::new("Connected").color(Color32::GREEN).strong());
+                    ui.label(
+                        RichText::new("Connected")
+                            .color(Color32::GREEN)
+                            .strong(),
+                    );
                     ui.label(format!("Latest Block Height: {}", block_height));
                 });
-                if let Some(saved_config) = self.configs.get(&self.selected_parent_chain) {
+                if let Some(saved_config) =
+                    self.configs.get(&self.selected_parent_chain)
+                {
                     if !saved_config.url.is_empty() {
                         let url = saved_config.url.clone();
                         let user = saved_config.user.clone();
@@ -348,11 +409,17 @@ impl L1Config {
             ConnectionStatus::Disconnected { error } => {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("●").color(Color32::RED));
-                    ui.label(RichText::new("Disconnected").color(Color32::RED).strong());
+                    ui.label(
+                        RichText::new("Disconnected")
+                            .color(Color32::RED)
+                            .strong(),
+                    );
                 });
                 let error_msg = format!("Error: {}", error);
                 ui.label(RichText::new(error_msg).small().color(Color32::RED));
-                if let Some(saved_config) = self.configs.get(&self.selected_parent_chain) {
+                if let Some(saved_config) =
+                    self.configs.get(&self.selected_parent_chain)
+                {
                     if !saved_config.url.is_empty() {
                         let url = saved_config.url.clone();
                         let user = saved_config.user.clone();
@@ -395,22 +462,26 @@ impl L1Config {
                     drop(std::fs::write(&config_path, json));
                 }
                 // Reset connection status
-                *self.connection_status.lock().unwrap() = ConnectionStatus::Unknown;
+                *self.connection_status.lock().unwrap() =
+                    ConnectionStatus::Unknown;
                 self.status_promise = None;
             }
         });
 
         if !self.rpc_url.is_empty() && !url_valid {
-            ui.label(egui::RichText::new("Invalid URL format").color(egui::Color32::RED));
+            ui.label(
+                egui::RichText::new("Invalid URL format")
+                    .color(egui::Color32::RED),
+            );
         }
 
         ui.add_space(20.0);
         ui.separator();
         ui.label(egui::RichText::new("Note:").strong());
         ui.label("This RPC URL is used to monitor L1 transactions for swaps.");
-        ui.label("Make sure the L1 node is running and accessible at this URL.");
+        ui.label(
+            "Make sure the L1 node is running and accessible at this URL.",
+        );
         ui.label("Configuration is saved per parent chain and persists across sessions.");
     }
 }
-
-

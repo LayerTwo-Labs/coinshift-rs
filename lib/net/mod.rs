@@ -320,12 +320,12 @@ impl Net {
     // TODO setup coinshift.bip300.xyz as the seed node
     pub const SEED_NODE_ADDRS: &[SocketAddr] = {
         const SIGNET_MINING_SERVER: SocketAddr = SocketAddr::new(
-            std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0,0,1)),
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
             4000 + THIS_SIDECHAIN as u16,
         );
         // thunder.bip300.xyz
         const BIP300_XYZ: SocketAddr = SocketAddr::new(
-            std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0,0,1)),
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
             4000 + THIS_SIDECHAIN as u16,
         );
         &[SIGNET_MINING_SERVER, BIP300_XYZ]
@@ -346,23 +346,28 @@ impl Net {
         tracing::debug!("Net::new: Opening database transaction");
         let mut rwtxn = env.write_txn()?;
         tracing::debug!("Net::new: Opening/creating known_peers database");
-        let known_peers =
-            match DatabaseUnique::open(env, &rwtxn, "known_peers")? {
-                Some(known_peers) => {
-                    tracing::debug!("Net::new: Found existing known_peers database");
-                    known_peers
-                },
-                None => {
-                    tracing::debug!("Net::new: Creating new known_peers database");
-                    let known_peers =
-                        DatabaseUnique::create(env, &mut rwtxn, "known_peers")?;
-                    for seed_node_addr in seed_node_addrs(network) {
-                        tracing::debug!(seed_node = %seed_node_addr, "Net::new: Adding seed node");
-                        known_peers.put(&mut rwtxn, seed_node_addr, &())?;
-                    }
-                    known_peers
+        let known_peers = match DatabaseUnique::open(
+            env,
+            &rwtxn,
+            "known_peers",
+        )? {
+            Some(known_peers) => {
+                tracing::debug!(
+                    "Net::new: Found existing known_peers database"
+                );
+                known_peers
+            }
+            None => {
+                tracing::debug!("Net::new: Creating new known_peers database");
+                let known_peers =
+                    DatabaseUnique::create(env, &mut rwtxn, "known_peers")?;
+                for seed_node_addr in seed_node_addrs(network) {
+                    tracing::debug!(seed_node = %seed_node_addr, "Net::new: Adding seed node");
+                    known_peers.put(&mut rwtxn, seed_node_addr, &())?;
                 }
-            };
+                known_peers
+            }
+        };
         tracing::debug!("Net::new: Creating net_version database");
         let version = DatabaseUnique::create(env, &mut rwtxn, "net_version")?;
         if version.try_get(&rwtxn, &())?.is_none() {
@@ -394,7 +399,10 @@ impl Net {
                 .map_err(DbError::from)?;
             known_peers
         };
-        tracing::info!(peer_count = known_peers.len(), "Net::new: Connecting to known peers");
+        tracing::info!(
+            peer_count = known_peers.len(),
+            "Net::new: Connecting to known peers"
+        );
         let connection_start = std::time::Instant::now();
         // Attempt to connect to all known peers, but don't fail if some connections fail
         for (peer_addr, _) in known_peers {
@@ -405,7 +413,7 @@ impl Net {
             match net.connect_peer(env.clone(), peer_addr) {
                 Ok(()) => {
                     tracing::debug!(peer_addr = %peer_addr, "Net::new: Successfully initiated connection to peer");
-                },
+                }
                 Err(Error::Connect(
                     quinn::ConnectError::InvalidRemoteAddress(addr),
                 )) => {
@@ -413,7 +421,9 @@ impl Net {
                         %addr, "Net::new: Known peer with invalid remote address, removing"
                     );
                     let mut rwtxn = env.write_txn()?;
-                    net.known_peers.delete(&mut rwtxn, &peer_addr).map_err(DbError::from)?;
+                    net.known_peers
+                        .delete(&mut rwtxn, &peer_addr)
+                        .map_err(DbError::from)?;
                     rwtxn.commit()?;
                     tracing::info!(
                         %addr,

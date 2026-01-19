@@ -2,8 +2,6 @@
 
 use std::net::SocketAddr;
 
-use jsonrpsee::{core::RpcResult, proc_macros::rpc};
-use l2l_openapi::open_api;
 use coinshift::{
     net::Peer,
     types::{
@@ -13,6 +11,8 @@ use coinshift::{
     },
     wallet::Balance,
 };
+use jsonrpsee::{core::RpcResult, proc_macros::rpc};
+use l2l_openapi::open_api;
 
 mod schema;
 
@@ -197,14 +197,16 @@ pub trait Rpc {
 
     /// Create a swap (L2 → L1)
     /// If l2_recipient is None, creates an open swap (anyone can fill it)
-    #[open_api_method(output_schema(PartialSchema = "schema::Tuple<SwapId, Txid>"))]
+    #[open_api_method(output_schema(
+        PartialSchema = "schema::Tuple<SwapId, Txid>"
+    ))]
     #[method(name = "create_swap")]
     async fn create_swap(
         &self,
         parent_chain: ParentChainType,
         l1_recipient_address: String,
         l1_amount_sats: u64,
-        l2_recipient: Option<Address>,  // Optional - None = open swap
+        l2_recipient: Option<Address>, // Optional - None = open swap
         l2_amount_sats: u64,
         required_confirmations: Option<u32>,
         fee_sats: u64,
@@ -228,7 +230,8 @@ pub trait Rpc {
     /// Get swap status
     #[open_api_method(output_schema(ToSchema))]
     #[method(name = "get_swap_status")]
-    async fn get_swap_status(&self, swap_id: SwapId) -> RpcResult<Option<Swap>>;
+    async fn get_swap_status(&self, swap_id: SwapId)
+    -> RpcResult<Option<Swap>>;
 
     /// Claim a swap (after L1 transaction has required confirmations)
     /// For open swaps, l2_claimer_address is required (the claimer's L2 address)
@@ -236,7 +239,7 @@ pub trait Rpc {
     async fn claim_swap(
         &self,
         swap_id: SwapId,
-        l2_claimer_address: Option<Address>,  // Required for open swaps
+        l2_claimer_address: Option<Address>, // Required for open swaps
     ) -> RpcResult<Txid>;
 
     /// List all swaps

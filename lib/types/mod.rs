@@ -36,8 +36,7 @@ pub use swap::{
 pub use transaction::{
     Authorized, AuthorizedTransaction, Content as OutputContent,
     FilledTransaction, GetAddress, GetValue, InPoint, OutPoint, OutPointKey,
-    Output, PointedOutput, PointedOutputRef, SpentOutput, Transaction,
-    TxData,
+    Output, PointedOutput, PointedOutputRef, SpentOutput, Transaction, TxData,
 };
 
 pub const THIS_SIDECHAIN: u8 = 255; // coinshift

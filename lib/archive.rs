@@ -188,7 +188,9 @@ impl Archive {
                 tracing::debug!("Archive::new: Database version check passed");
             }
             None => {
-                tracing::debug!("Archive::new: Setting initial database version");
+                tracing::debug!(
+                    "Archive::new: Setting initial database version"
+                );
                 version
                     .put(&mut rwtxn, &(), &*VERSION)
                     .map_err(DbError::from)?;
@@ -214,19 +216,25 @@ impl Archive {
         let bodies = DatabaseUnique::create(env, &mut rwtxn, "bodies")
             .map_err(EnvError::from)?;
         tracing::debug!("Archive::new: bodies database created");
-        tracing::debug!("Archive::new: Creating exponential_ancestors database");
+        tracing::debug!(
+            "Archive::new: Creating exponential_ancestors database"
+        );
         let exponential_ancestors =
             DatabaseUnique::create(env, &mut rwtxn, "exponential_ancestors")
                 .map_err(EnvError::from)?;
         tracing::debug!("Archive::new: exponential_ancestors database created");
-        tracing::debug!("Archive::new: Creating exponential_main_ancestors database");
+        tracing::debug!(
+            "Archive::new: Creating exponential_main_ancestors database"
+        );
         let exponential_main_ancestors = DatabaseUnique::create(
             env,
             &mut rwtxn,
             "exponential_main_ancestors",
         )
         .map_err(EnvError::from)?;
-        tracing::debug!("Archive::new: exponential_main_ancestors database created");
+        tracing::debug!(
+            "Archive::new: exponential_main_ancestors database created"
+        );
         tracing::debug!("Archive::new: Creating headers database");
         let headers = DatabaseUnique::create(env, &mut rwtxn, "headers")
             .map_err(EnvError::from)?;
@@ -251,7 +259,9 @@ impl Archive {
             DatabaseUnique::create(env, &mut rwtxn, "main_successors")
                 .map_err(EnvError::from)?;
         tracing::debug!("Archive::new: main_successors database created");
-        tracing::debug!("Archive::new: Initializing main_successors with zero hash");
+        tracing::debug!(
+            "Archive::new: Initializing main_successors with zero hash"
+        );
         if main_successors
             .try_get(&rwtxn, &bitcoin::BlockHash::all_zeros())
             .map_err(DbError::from)?

@@ -12,7 +12,9 @@ use bip300301_enforcer_integration_tests::{
 };
 use coinshift::types::{Address, ParentChainType, SwapId, SwapState};
 use coinshift_app_rpc_api::RpcClient as _;
-use futures::{FutureExt as _, StreamExt as _, channel::mpsc, future::BoxFuture};
+use futures::{
+    FutureExt as _, StreamExt as _, channel::mpsc, future::BoxFuture,
+};
 use tokio::time::sleep;
 use tracing::Instrument as _;
 
@@ -133,13 +135,17 @@ async fn verify_swap_locks_utxos(
     expected_locked_amount: u64,
 ) -> anyhow::Result<()> {
     let utxos = rpc_client.list_utxos().await?;
-    
+
     // Find locked outputs for this swap and calculate total locked amount
     let mut total_locked: u64 = 0;
     let mut has_locked_outputs = false;
-    
+
     for utxo in &utxos {
-        if let coinshift::types::OutputContent::SwapPending { value, swap_id: locked_swap_id } = &utxo.output.content {
+        if let coinshift::types::OutputContent::SwapPending {
+            value,
+            swap_id: locked_swap_id,
+        } = &utxo.output.content
+        {
             if *locked_swap_id == swap_id.0 {
                 has_locked_outputs = true;
                 total_locked += value.to_sat();
@@ -152,7 +158,7 @@ async fn verify_swap_locks_utxos(
         "No locked outputs found for swap {}",
         swap_id
     );
-    
+
     anyhow::ensure!(
         total_locked == expected_locked_amount,
         "Locked amount mismatch: expected {}, got {}",
@@ -178,8 +184,12 @@ async fn wait_for_locked_utxos(
     const RETRY_DELAY_MS: u64 = 200;
 
     for attempt in 0..MAX_RETRIES {
-        let res =
-            verify_swap_locks_utxos(rpc_client, swap_id, expected_locked_amount).await;
+        let res = verify_swap_locks_utxos(
+            rpc_client,
+            swap_id,
+            expected_locked_amount,
+        )
+        .await;
         if res.is_ok() {
             return Ok(());
         }
@@ -253,10 +263,10 @@ async fn swap_creation_fixed_task(
 
     // Get a new address for L2 recipient (pre-specified swap)
     let l2_recipient_address = sidechain.rpc_client.get_new_address().await?;
-    
+
     // Generate a regtest address for L1 recipient
     let l1_recipient_address = "bcrt1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh";
-    
+
     // Create a pre-specified swap (with l2_recipient)
     tracing::info!("Creating pre-specified swap");
     let (swap_id, swap_txid) = sidechain
@@ -278,9 +288,14 @@ async fn swap_creation_fixed_task(
     );
 
     // Wait for swap to be included in block (swaps are only saved when included in a block)
-    wait_for_swap_in_block(&mut sidechain, &mut enforcer_post_setup, swap_txid, swap_id)
-        .await?;
-    
+    wait_for_swap_in_block(
+        &mut sidechain,
+        &mut enforcer_post_setup,
+        swap_txid,
+        swap_id,
+    )
+    .await?;
+
     // Wait for wallet update task to sync state changes (locked outputs, spent UTXOs)
     // This ensures the wallet's view is current before proceeding
     sleep(std::time::Duration::from_millis(500)).await;
@@ -381,7 +396,7 @@ async fn swap_creation_open_task(
         None, // Open swap has no l2_recipient
     )
     .await?;
-    
+
     // Verify open swap locks UTXOs as expected
     verify_swap_locks_utxos(&sidechain.rpc_client, swap_id, SWAP_L2_AMOUNT)
         .await?;
@@ -391,7 +406,9 @@ async fn swap_creation_open_task(
         .rpc_client
         .get_swap_status(swap_id)
         .await?
-        .ok_or_else(|| anyhow::anyhow!("Open swap not found after block inclusion"))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("Open swap not found after block inclusion")
+        })?;
     anyhow::ensure!(
         open_swap.l2_recipient.is_none(),
         "Open swap should have no l2_recipient"
@@ -468,7 +485,8 @@ async fn swap_creation_open_fill_task(
         None,
     )
     .await?;
-    wait_for_locked_utxos(&sidechain.rpc_client, swap_id, SWAP_L2_AMOUNT).await?;
+    wait_for_locked_utxos(&sidechain.rpc_client, swap_id, SWAP_L2_AMOUNT)
+        .await?;
 
     // Simulate detecting the L1 tx: mark as confirmed so swap moves to ReadyToClaim
     let fake_l1_txid_hex = "11".repeat(32);
@@ -478,7 +496,8 @@ async fn swap_creation_open_fill_task(
         .await?;
     // Allow wallet/state tasks to catch up
     sleep(std::time::Duration::from_millis(500)).await;
-    wait_for_locked_utxos(&sidechain.rpc_client, swap_id, SWAP_L2_AMOUNT).await?;
+    wait_for_locked_utxos(&sidechain.rpc_client, swap_id, SWAP_L2_AMOUNT)
+        .await?;
 
     tracing::info!(
         "Open swap state updated to ReadyToClaim after L1 TXID update. swap_id={}, fake_l1_txid={}",
@@ -523,8 +542,9 @@ async fn swap_creation_open_fill_task(
         }
         sleep(std::time::Duration::from_millis(STATUS_DELAY_MS)).await;
     }
-    let completed_swap = completed
-        .ok_or_else(|| anyhow::anyhow!("Swap not marked Completed after claim"))?;
+    let completed_swap = completed.ok_or_else(|| {
+        anyhow::anyhow!("Swap not marked Completed after claim")
+    })?;
 
     // Locked outputs should be released
     let utxos_after = sidechain.rpc_client.list_utxos().await?;
@@ -597,7 +617,8 @@ async fn swap_creation_open_fill(bin_paths: BinPaths) -> anyhow::Result<()> {
     let _test_task: AbortOnDrop<()> = tokio::task::spawn({
         let res_tx = res_tx.clone();
         async move {
-            let res = swap_creation_open_fill_task(bin_paths, res_tx.clone()).await;
+            let res =
+                swap_creation_open_fill_task(bin_paths, res_tx.clone()).await;
             let _send_err: Result<(), _> = res_tx.unbounded_send(res);
         }
         .in_current_span()
@@ -611,7 +632,10 @@ async fn swap_creation_open_fill(bin_paths: BinPaths) -> anyhow::Result<()> {
 pub fn swap_creation_fixed_trial(
     bin_paths: BinPaths,
 ) -> AsyncTrial<BoxFuture<'static, anyhow::Result<()>>> {
-    AsyncTrial::new("swap_creation_fixed", swap_creation_fixed(bin_paths).boxed())
+    AsyncTrial::new(
+        "swap_creation_fixed",
+        swap_creation_fixed(bin_paths).boxed(),
+    )
 }
 
 pub fn swap_creation_open_trial(
@@ -628,4 +652,3 @@ pub fn swap_creation_open_fill_trial(
         swap_creation_open_fill(bin_paths).boxed(),
     )
 }
-

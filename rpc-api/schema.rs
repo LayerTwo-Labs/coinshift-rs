@@ -59,14 +59,8 @@ where
 {
     fn schema() -> openapi::RefOr<openapi::schema::Schema> {
         openapi::schema::Object::builder()
-            .property(
-                "0",
-                T::schema(),
-            )
-            .property(
-                "1",
-                U::schema(),
-            )
+            .property("0", T::schema())
+            .property("1", U::schema())
             .into()
     }
 }

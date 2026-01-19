@@ -1,5 +1,5 @@
-use eframe::egui::{self, Button, Color32, ComboBox, RichText};
 use coinshift::types::{Address, ParentChainType};
+use eframe::egui::{self, Button, Color32, ComboBox, RichText};
 
 use crate::app::App;
 
@@ -41,11 +41,31 @@ impl CreateSwap {
             ComboBox::from_id_salt("parent_chain")
                 .selected_text(format!("{:?}", self.parent_chain))
                 .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.parent_chain, ParentChainType::BTC, "BTC");
-                    ui.selectable_value(&mut self.parent_chain, ParentChainType::Signet, "Signet");
-                    ui.selectable_value(&mut self.parent_chain, ParentChainType::Regtest, "Regtest");
-                    ui.selectable_value(&mut self.parent_chain, ParentChainType::BCH, "BCH");
-                    ui.selectable_value(&mut self.parent_chain, ParentChainType::LTC, "LTC");
+                    ui.selectable_value(
+                        &mut self.parent_chain,
+                        ParentChainType::BTC,
+                        "BTC",
+                    );
+                    ui.selectable_value(
+                        &mut self.parent_chain,
+                        ParentChainType::Signet,
+                        "Signet",
+                    );
+                    ui.selectable_value(
+                        &mut self.parent_chain,
+                        ParentChainType::Regtest,
+                        "Regtest",
+                    );
+                    ui.selectable_value(
+                        &mut self.parent_chain,
+                        ParentChainType::BCH,
+                        "BCH",
+                    );
+                    ui.selectable_value(
+                        &mut self.parent_chain,
+                        ParentChainType::LTC,
+                        "LTC",
+                    );
                 });
         });
 
@@ -78,7 +98,9 @@ impl CreateSwap {
                                 self.l2_recipient = Some(addr.to_string());
                             }
                             Err(err) => {
-                                tracing::error!("Failed to get address: {err:#}");
+                                tracing::error!(
+                                    "Failed to get address: {err:#}"
+                                );
                             }
                         }
                     }
@@ -109,7 +131,11 @@ impl CreateSwap {
         // Display error message if any
         if let Some(error_msg) = &self.error_message {
             ui.add_space(5.0);
-            ui.label(RichText::new(format!("Error: {}", error_msg)).small().color(Color32::RED));
+            ui.label(
+                RichText::new(format!("Error: {}", error_msg))
+                    .small()
+                    .color(Color32::RED),
+            );
             ui.separator();
         }
 
@@ -131,16 +157,15 @@ impl CreateSwap {
         let l2_recipient: Option<Address> = if self.is_open_swap {
             None
         } else {
-            self.l2_recipient
-                .as_ref()
-                .and_then(|s| s.parse().ok())
+            self.l2_recipient.as_ref().and_then(|s| s.parse().ok())
         };
 
         let is_valid = app.is_some()
             && !self.l1_recipient_address.is_empty()
             && l1_amount.is_ok()
             && l2_amount.is_ok()
-            && (!self.is_open_swap && l2_recipient.is_some() || self.is_open_swap);
+            && (!self.is_open_swap && l2_recipient.is_some()
+                || self.is_open_swap);
 
         if ui
             .add_enabled(is_valid, Button::new("Create Swap"))
@@ -148,12 +173,13 @@ impl CreateSwap {
         {
             // Clear any previous error
             self.error_message = None;
-            
+
             let app = app.unwrap();
             let accumulator = match app.node.get_tip_accumulator() {
                 Ok(acc) => acc,
                 Err(err) => {
-                    let error_msg = format!("Failed to get accumulator: {err:#}");
+                    let error_msg =
+                        format!("Failed to get accumulator: {err:#}");
                     tracing::error!("{}", error_msg);
                     self.error_message = Some(error_msg);
                     return;
@@ -207,7 +233,8 @@ impl CreateSwap {
                     result
                 }
                 Err(err) => {
-                    let error_msg = format!("Failed to create swap transaction: {err:#}");
+                    let error_msg =
+                        format!("Failed to create swap transaction: {err:#}");
                     tracing::error!(
                         parent_chain = ?self.parent_chain,
                         l1_recipient = %self.l1_recipient_address,
@@ -250,4 +277,3 @@ impl CreateSwap {
         }
     }
 }
-

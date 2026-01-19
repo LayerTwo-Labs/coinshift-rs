@@ -1,5 +1,5 @@
-use eframe::egui::{self, Button};
 use coinshift::types::Address;
+use eframe::egui::{self, Button};
 
 use crate::{app::App, gui::util::UiExt};
 

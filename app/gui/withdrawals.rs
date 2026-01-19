@@ -1,5 +1,5 @@
-use eframe::egui;
 use coinshift::types::GetValue;
+use eframe::egui;
 
 use crate::app::App;
 

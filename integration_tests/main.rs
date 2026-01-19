@@ -121,4 +121,3 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     let exit_code = libtest_mimic::run(&args.test_args, tests).exit_code();
     Ok(exit_code)
 }
-

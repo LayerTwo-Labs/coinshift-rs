@@ -9,9 +9,9 @@ use bip300301_enforcer_integration_tests::{
     util::AbortOnDrop,
 };
 use bip300301_enforcer_lib::types::SidechainNumber;
-use futures::{TryFutureExt as _, channel::mpsc, future};
 use coinshift::types::{OutPoint, OutputContent, PointedOutput};
 use coinshift_app_rpc_api::RpcClient as _;
+use futures::{TryFutureExt as _, channel::mpsc, future};
 use reserve_port::ReservedPort;
 use thiserror::Error;
 use tokio::time::sleep;
@@ -213,16 +213,12 @@ impl Sidechain for PostSetup {
         let is_expected = |utxo: &PointedOutput| {
             utxo.output.address.to_string() == address
                 && match &utxo.output.content {
-                    OutputContent::Value(utxo_value) => {
-                        *utxo_value == value
-                    }
+                    OutputContent::Value(utxo_value) => *utxo_value == value,
                     OutputContent::Withdrawal { .. }
                     | OutputContent::SwapPending { .. } => false,
                 }
                 && match utxo.outpoint {
-                    OutPoint::Deposit(outpoint) => {
-                        outpoint.txid == txid
-                    }
+                    OutPoint::Deposit(outpoint) => outpoint.txid == txid,
                     _ => false,
                 }
         };
@@ -289,4 +285,3 @@ impl Sidechain for PostSetup {
         Ok(bip300301_enforcer_lib::types::M6id(m6id.0))
     }
 }
-

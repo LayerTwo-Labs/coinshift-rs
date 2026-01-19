@@ -1,9 +1,5 @@
 use std::{collections::HashMap, sync::Arc};
 
-use fallible_iterator::FallibleIterator as _;
-use futures::{StreamExt, TryFutureExt};
-use parking_lot::RwLock;
-use rustreexo::accumulator::proof::Proof;
 use coinshift::{
     miner::{self, Miner},
     node::{self, Node},
@@ -16,6 +12,10 @@ use coinshift::{
     },
     wallet::{self, Wallet},
 };
+use fallible_iterator::FallibleIterator as _;
+use futures::{StreamExt, TryFutureExt};
+use parking_lot::RwLock;
+use rustreexo::accumulator::proof::Proof;
 use tokio::{spawn, sync::RwLock as TokioRwLock, task::JoinHandle};
 use tokio_util::task::LocalPoolHandle;
 use tonic_health::{
@@ -60,7 +60,7 @@ fn update_wallet(node: &Node, wallet: &Wallet) -> Result<(), Error> {
     tracing::trace!("starting wallet update");
     let addresses = wallet.get_addresses()?;
     let mut utxos = node.get_utxos_by_addresses(&addresses)?;
-    
+
     // Filter out SwapPending outputs - they should not be in the wallet's UTXO database
     // SwapPending outputs are locked and should only be spent in SwapClaim transactions
     let swap_pending_count = utxos
@@ -74,7 +74,7 @@ fn update_wallet(node: &Node, wallet: &Wallet) -> Result<(), Error> {
         );
         utxos.retain(|_, output| !output.content.is_swap_pending());
     }
-    
+
     let outpoints: Vec<_> = wallet.get_utxos()?.into_keys().collect();
     let spent: Vec<_> = node
         .get_spent_utxos(&outpoints)?
@@ -142,27 +142,33 @@ impl App {
         use futures::FutureExt;
         use std::time::Duration;
         const SYNC_INTERVAL: Duration = Duration::from_secs(10);
-        
-        tracing::info!("L1 sync task started, will check every {} seconds", SYNC_INTERVAL.as_secs());
-        
+
+        tracing::info!(
+            "L1 sync task started, will check every {} seconds",
+            SYNC_INTERVAL.as_secs()
+        );
+
         loop {
             tokio::time::sleep(SYNC_INTERVAL).await;
             tracing::trace!("L1 sync task: checking for new L1 blocks");
-            
+
             // Get current L1 chain tip
             let l1_tip_hash = match node
                 .with_cusf_mainchain(|client| {
-                    client.get_chain_tip().map(|res| {
-                        res.map(|tip| tip.block_hash)
-                            .map_err(Error::CusfMainchain)
-                    }).boxed()
+                    client
+                        .get_chain_tip()
+                        .map(|res| {
+                            res.map(|tip| tip.block_hash)
+                                .map_err(Error::CusfMainchain)
+                        })
+                        .boxed()
                 })
                 .await
             {
                 Ok(hash) => {
                     tracing::trace!(l1_tip = %hash, "L1 sync task: got L1 chain tip");
                     hash
-                },
+                }
                 Err(err) => {
                     tracing::debug!(
                         error = %err,
@@ -171,12 +177,13 @@ impl App {
                     continue;
                 }
             };
-            
+
             // Get current sidechain tip's mainchain verification (latest synced L1 block)
             let synced_main_hash = {
                 let rotxn = node.env().read_txn().map_err(node::Error::from)?;
                 if let Some(sidechain_tip) = node.try_get_best_hash()? {
-                    let result = node.archive()
+                    let result = node
+                        .archive()
                         .try_get_best_main_verification(&rotxn, sidechain_tip)
                         .map_err(node::Error::from)?;
                     tracing::trace!(
@@ -190,7 +197,7 @@ impl App {
                     None
                 }
             };
-            
+
             // Check if we need to sync more L1 blocks
             // If we don't have a synced main hash yet, or if the L1 tip is ahead, sync
             let needs_sync = match synced_main_hash {
@@ -203,18 +210,22 @@ impl App {
                         "L1 sync task: comparing tips"
                     );
                     needs
-                },
+                }
                 None => {
-                    tracing::trace!("L1 sync task: no synced main hash, need to sync");
+                    tracing::trace!(
+                        "L1 sync task: no synced main hash, need to sync"
+                    );
                     true // No synced main hash yet, need to sync
                 }
             };
-            
+
             if needs_sync {
                 // Check if we already have the L1 tip in our archive
                 let has_l1_tip = {
-                    let rotxn = node.env().read_txn().map_err(node::Error::from)?;
-                    let result = node.archive()
+                    let rotxn =
+                        node.env().read_txn().map_err(node::Error::from)?;
+                    let result = node
+                        .archive()
                         .try_get_main_header_info(&rotxn, &l1_tip_hash)
                         .map_err(node::Error::from)?
                         .is_some();
@@ -225,7 +236,7 @@ impl App {
                     );
                     result
                 };
-                
+
                 if !has_l1_tip {
                     tracing::info!(
                         l1_tip = %l1_tip_hash,
@@ -246,7 +257,7 @@ impl App {
                                 elapsed_secs = elapsed.as_secs_f64(),
                                 "L1 sync task: Successfully requested L1 ancestor infos"
                             );
-                        },
+                        }
                         Ok(false) => {
                             let elapsed = start_time.elapsed();
                             tracing::warn!(
@@ -254,7 +265,7 @@ impl App {
                                 elapsed_secs = elapsed.as_secs_f64(),
                                 "L1 sync task: L1 ancestor infos request returned false (block not available)"
                             );
-                        },
+                        }
                         Err(err) => {
                             let elapsed = start_time.elapsed();
                             tracing::debug!(
@@ -272,7 +283,9 @@ impl App {
                     );
                 }
             } else {
-                tracing::trace!("L1 sync task: L1 is up to date, no sync needed");
+                tracing::trace!(
+                    "L1 sync task: L1 is up to date, no sync needed"
+                );
             }
         }
     }
@@ -286,19 +299,24 @@ impl App {
 
     /// Periodic task to check and update swap confirmations dynamically
     /// This works in both GUI and headless mode
-    async fn swap_confirmation_check_task(node: Arc<Node>) -> Result<(), Error> {
-        use std::time::Duration;
+    async fn swap_confirmation_check_task(
+        node: Arc<Node>,
+    ) -> Result<(), Error> {
         use coinshift::bitcoin_rpc::{BitcoinRpcClient, RpcConfig};
-        use coinshift::types::{SwapState, SwapTxId, ParentChainType};
-        use std::path::PathBuf;
-        use std::collections::HashMap;
-        use serde::{Deserialize, Serialize};
+        use coinshift::types::{ParentChainType, SwapState, SwapTxId};
         use hex;
-        
+        use serde::{Deserialize, Serialize};
+        use std::collections::HashMap;
+        use std::path::PathBuf;
+        use std::time::Duration;
+
         const CHECK_INTERVAL: Duration = Duration::from_secs(10);
-        
-        tracing::info!("Swap confirmation check task started, will check every {} seconds", CHECK_INTERVAL.as_secs());
-        
+
+        tracing::info!(
+            "Swap confirmation check task started, will check every {} seconds",
+            CHECK_INTERVAL.as_secs()
+        );
+
         // Helper to load RPC config (same as in GUI)
         fn load_rpc_config(parent_chain: ParentChainType) -> Option<RpcConfig> {
             #[derive(Clone, Serialize, Deserialize)]
@@ -307,14 +325,17 @@ impl App {
                 user: String,
                 password: String,
             }
-            
+
             let config_path = dirs::data_dir()
                 .unwrap_or_else(|| PathBuf::from("."))
                 .join("coinshift")
                 .join("l1_rpc_configs.json");
-            
+
             if let Ok(file_content) = std::fs::read_to_string(&config_path) {
-                if let Ok(configs) = serde_json::from_str::<HashMap<ParentChainType, LocalRpcConfig>>(&file_content) {
+                if let Ok(configs) = serde_json::from_str::<
+                    HashMap<ParentChainType, LocalRpcConfig>,
+                >(&file_content)
+                {
                     if let Some(local_config) = configs.get(&parent_chain) {
                         return Some(RpcConfig {
                             url: local_config.url.clone(),
@@ -326,11 +347,13 @@ impl App {
             }
             None
         }
-        
+
         loop {
             tokio::time::sleep(CHECK_INTERVAL).await;
-            tracing::trace!("Swap confirmation check task: checking for swap confirmations");
-            
+            tracing::trace!(
+                "Swap confirmation check task: checking for swap confirmations"
+            );
+
             // Get swaps from database
             let rotxn = match node.env().read_txn() {
                 Ok(txn) => txn,
@@ -339,7 +362,7 @@ impl App {
                     continue;
                 }
             };
-            
+
             let swaps = match node.state().load_all_swaps(&rotxn) {
                 Ok(swaps) => swaps,
                 Err(err) => {
@@ -347,7 +370,7 @@ impl App {
                     continue;
                 }
             };
-            
+
             // Filter swaps that are waiting for confirmations and have an L1 txid
             let swaps_to_check: Vec<_> = swaps
                 .iter()
@@ -357,19 +380,19 @@ impl App {
                         && !matches!(swap.l1_txid, SwapTxId::Hash(ref v) if v.is_empty() || v.iter().all(|&b| b == 0))
                 })
                 .collect();
-            
+
             drop(rotxn);
-            
+
             if swaps_to_check.is_empty() {
                 continue;
             }
-            
+
             tracing::debug!(
                 swap_count = swaps_to_check.len(),
                 "Checking confirmations for {} swaps",
                 swaps_to_check.len()
             );
-            
+
             let mut updated_count = 0;
             let mut rwtxn = match node.env().write_txn() {
                 Ok(txn) => txn,
@@ -378,7 +401,7 @@ impl App {
                     continue;
                 }
             };
-            
+
             for swap in swaps_to_check {
                 // Get RPC config for this swap's parent chain
                 if let Some(rpc_config) = load_rpc_config(swap.parent_chain) {
@@ -386,24 +409,25 @@ impl App {
                     let l1_txid_hex = match &swap.l1_txid {
                         SwapTxId::Hash32(hash) => {
                             use bitcoin::hashes::Hash;
-                            let txid = bitcoin::Txid::from_slice(hash).unwrap_or_else(|_| {
-                                bitcoin::Txid::all_zeros()
-                            });
+                            let txid = bitcoin::Txid::from_slice(hash)
+                                .unwrap_or_else(|_| bitcoin::Txid::all_zeros());
                             txid.to_string()
                         }
                         SwapTxId::Hash(bytes) => hex::encode(bytes),
                     };
-                    
+
                     // Fetch current confirmations from RPC
                     let client = BitcoinRpcClient::new(rpc_config);
                     match client.get_transaction_confirmations(&l1_txid_hex) {
                         Ok(new_confirmations) => {
                             // Get current confirmations from swap state
                             let current_confirmations = match swap.state {
-                                SwapState::WaitingConfirmations(current, _) => current,
+                                SwapState::WaitingConfirmations(current, _) => {
+                                    current
+                                }
                                 _ => 0,
                             };
-                            
+
                             // Only update if confirmations have increased
                             if new_confirmations > current_confirmations {
                                 tracing::info!(
@@ -413,33 +437,45 @@ impl App {
                                     required = %swap.required_confirmations,
                                     "Updating swap confirmations dynamically (headless mode)"
                                 );
-                                
+
                                 // Get current block info for reference
-                                let block_hash = match node.state().try_get_tip(&rwtxn) {
+                                let block_hash = match node
+                                    .state()
+                                    .try_get_tip(&rwtxn)
+                                {
                                     Ok(Some(hash)) => hash,
                                     Ok(None) | Err(_) => {
-                                        tracing::warn!("Could not get block hash for swap update");
+                                        tracing::warn!(
+                                            "Could not get block hash for swap update"
+                                        );
                                         continue;
                                     }
                                 };
-                                let block_height = match node.state().try_get_height(&rwtxn) {
+                                let block_height = match node
+                                    .state()
+                                    .try_get_height(&rwtxn)
+                                {
                                     Ok(Some(height)) => height,
                                     Ok(None) | Err(_) => {
-                                        tracing::warn!("Could not get block height for swap update");
+                                        tracing::warn!(
+                                            "Could not get block height for swap update"
+                                        );
                                         continue;
                                     }
                                 };
-                                
+
                                 // Update swap with new confirmations
-                                if let Err(err) = node.state().update_swap_l1_txid(
-                                    &mut rwtxn,
-                                    &swap.id,
-                                    swap.l1_txid.clone(),
-                                    new_confirmations,
-                                    None, // l1_claimer_address - not needed for confirmation updates
-                                    block_hash,
-                                    block_height,
-                                ) {
+                                if let Err(err) =
+                                    node.state().update_swap_l1_txid(
+                                        &mut rwtxn,
+                                        &swap.id,
+                                        swap.l1_txid.clone(),
+                                        new_confirmations,
+                                        None, // l1_claimer_address - not needed for confirmation updates
+                                        block_hash,
+                                        block_height,
+                                    )
+                                {
                                     tracing::error!(
                                         swap_id = %swap.id,
                                         error = %err,
@@ -461,7 +497,7 @@ impl App {
                     }
                 }
             }
-            
+
             if updated_count > 0 {
                 if let Err(err) = rwtxn.commit() {
                     tracing::error!("Failed to commit swap updates: {err:#}");
@@ -479,10 +515,12 @@ impl App {
     }
 
     fn spawn_swap_confirmation_check_task(node: Arc<Node>) -> JoinHandle<()> {
-        spawn(Self::swap_confirmation_check_task(node).unwrap_or_else(|err| {
-            let err = anyhow::Error::from(err);
-            tracing::error!("Swap confirmation check task error: {err:#}")
-        }))
+        spawn(
+            Self::swap_confirmation_check_task(node).unwrap_or_else(|err| {
+                let err = anyhow::Error::from(err);
+                tracing::error!("Swap confirmation check task error: {err:#}")
+            }),
+        )
     }
 
     async fn check_status_serving(
@@ -580,7 +618,8 @@ impl App {
         .concurrency_limit(256)
         .connect_lazy();
         // Add a timeout to the connection check so the GUI can start even if mainchain isn't synced
-        const CONNECTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+        const CONNECTION_TIMEOUT: std::time::Duration =
+            std::time::Duration::from_secs(5);
         let (cusf_mainchain, cusf_mainchain_wallet) = if runtime
             .block_on(tokio::time::timeout(
                 CONNECTION_TIMEOUT,
@@ -625,7 +664,7 @@ impl App {
             elapsed_secs = node_elapsed.as_secs_f64(),
             "Node instantiated successfully"
         );
-        
+
         tracing::debug!("Initializing UTXOs");
         let utxos_start = std::time::Instant::now();
         let utxos = {
@@ -657,7 +696,7 @@ impl App {
         tracing::debug!("Wrapping node in Arc");
         let node = Arc::new(node);
         tracing::debug!("Node wrapped in Arc");
-        
+
         // Check initial state
         tracing::debug!("Checking initial sidechain state");
         if let Ok(Some(tip)) = node.try_get_best_hash() {
@@ -671,43 +710,47 @@ impl App {
         } else {
             tracing::info!("No sidechain tip found (chain is empty)");
         }
-        
+
         // Perform initial wallet update to populate wallet with all existing UTXOs
-        tracing::info!("Performing initial wallet update to load all past transactions");
+        tracing::info!(
+            "Performing initial wallet update to load all past transactions"
+        );
         let initial_wallet_update_start = std::time::Instant::now();
         update_wallet(node.as_ref(), &wallet).inspect_err(|err| {
             tracing::error!("Failed to perform initial wallet update: {err:#}");
         })?;
-        let initial_wallet_update_elapsed = initial_wallet_update_start.elapsed();
+        let initial_wallet_update_elapsed =
+            initial_wallet_update_start.elapsed();
         tracing::info!(
             elapsed_secs = initial_wallet_update_elapsed.as_secs_f64(),
             "Initial wallet update completed"
         );
-        
+
         // Update the utxos after initial wallet update
         *utxos.write() = wallet.get_utxos()?;
         tracing::debug!(
             utxo_count = utxos.read().len(),
             "UTXOs updated after initial wallet sync"
         );
-        
+
         tracing::debug!("Wrapping miner in Arc and TokioRwLock");
         let miner = miner.map(|miner| Arc::new(TokioRwLock::new(miner)));
         tracing::info!("Spawning wallet update task");
         let task =
             Self::spawn_task(node.clone(), utxos.clone(), wallet.clone());
         tracing::info!("Wallet update task spawned");
-        
+
         // Spawn L1 sync task to periodically check for new deposits
         tracing::info!("Spawning L1 sync task for deposit scanning");
         let _l1_sync_task = Self::spawn_l1_sync_task(node.clone());
         tracing::info!("L1 sync task spawned");
-        
+
         // Spawn swap confirmation check task to periodically update swap confirmations
         tracing::info!("Spawning swap confirmation check task");
-        let _swap_confirmation_task = Self::spawn_swap_confirmation_check_task(node.clone());
+        let _swap_confirmation_task =
+            Self::spawn_swap_confirmation_check_task(node.clone());
         tracing::info!("Swap confirmation check task spawned");
-        
+
         tracing::debug!("Dropping runtime guard");
         drop(rt_guard);
         tracing::info!("App initialization complete");
@@ -736,7 +779,7 @@ impl App {
     pub fn sign_and_send(&self, tx: Transaction) -> Result<(), Error> {
         let txid = tx.txid();
         tracing::debug!(%txid, "sign_and_send: Starting transaction signing and sending");
-        
+
         let authorized_transaction = match self.wallet.authorize(tx) {
             Ok(auth_tx) => {
                 tracing::debug!(%txid, "sign_and_send: Transaction authorized successfully");
@@ -747,7 +790,7 @@ impl App {
                 return Err(err.into());
             }
         };
-        
+
         tracing::debug!(%txid, "sign_and_send: Submitting transaction to node");
         match self.node.submit_transaction(authorized_transaction) {
             Ok(()) => {
@@ -763,7 +806,7 @@ impl App {
                 return Err(err.into());
             }
         }
-        
+
         tracing::debug!(%txid, "sign_and_send: Updating wallet state");
         match self.update() {
             Ok(()) => {
@@ -779,7 +822,7 @@ impl App {
                 return Err(err);
             }
         }
-        
+
         tracing::info!(%txid, "sign_and_send: Transaction signed and sent successfully");
         Ok(())
     }
@@ -960,11 +1003,10 @@ impl App {
                 } else {
                     types::Accumulator::default()
                 };
-                let merkle_root = coinshift::types::Body::modify_memforest::<
-                    FilledTransaction,
-                >(
-                    &coinbase, &[], &mut accumulator.0
-                )?;
+                let merkle_root =
+                    coinshift::types::Body::modify_memforest::<
+                        FilledTransaction,
+                    >(&coinbase, &[], &mut accumulator.0)?;
                 let roots = accumulator
                     .0
                     .get_roots()
@@ -1002,7 +1044,10 @@ impl App {
                 .submit_block(main_hash, &header, &body)
                 .await
                 .inspect_err(|err| {
-                    tracing::error!("{:#}", coinshift::util::ErrorChain::new(err))
+                    tracing::error!(
+                        "{:#}",
+                        coinshift::util::ErrorChain::new(err)
+                    )
                 })? {
                 true => {
                     tracing::debug!(

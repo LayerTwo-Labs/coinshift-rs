@@ -1,5 +1,5 @@
-use eframe::egui::{self, Button};
 use coinshift::types::{self, Output, OutputContent, Transaction};
+use eframe::egui::{self, Button};
 
 use crate::app::App;
 

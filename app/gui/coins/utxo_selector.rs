@@ -1,9 +1,9 @@
 use std::collections::HashSet;
 
-use eframe::egui;
 use coinshift::types::{
     GetValue, OutPoint, Output, PointedOutput, Transaction, hash,
 };
+use eframe::egui;
 
 use crate::app::App;
 

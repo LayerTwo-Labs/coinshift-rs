@@ -1,8 +1,8 @@
 //! Bitcoin RPC client for querying L1 blockchain transactions
 
-use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::time::Duration;
 use thiserror::Error;
 
 use crate::types::ParentChainType;
@@ -79,7 +79,7 @@ impl BitcoinRpcClient {
             .timeout(Duration::from_secs(10))
             .build()
             .expect("Failed to create HTTP client");
-        
+
         Self { config, client }
     }
 
@@ -102,13 +102,12 @@ impl BitcoinRpcClient {
             "Making RPC call"
         );
 
-        let mut request_builder = self.client.post(&self.config.url).json(&request);
-        
+        let mut request_builder =
+            self.client.post(&self.config.url).json(&request);
+
         if !self.config.user.is_empty() {
-            request_builder = request_builder.basic_auth(
-                &self.config.user,
-                Some(&self.config.password),
-            );
+            request_builder = request_builder
+                .basic_auth(&self.config.user, Some(&self.config.password));
         }
 
         let response = match request_builder.send() {
@@ -133,7 +132,8 @@ impl BitcoinRpcClient {
         );
 
         // Get response headers
-        let content_type = response.headers()
+        let content_type = response
+            .headers()
             .get("content-type")
             .and_then(|h| h.to_str().ok())
             .unwrap_or("unknown");
@@ -191,19 +191,26 @@ impl BitcoinRpcClient {
                 rpc_error_message = %error.message,
                 "RPC returned error"
             );
-            return Err(Error::Rpc(format!("{}: {}", error.code, error.message)));
+            return Err(Error::Rpc(format!(
+                "{}: {}",
+                error.code, error.message
+            )));
         }
 
         json.result.ok_or(Error::InvalidResponse)
     }
 
     /// Get transaction by ID
-    pub fn get_transaction(&self, txid: &str) -> Result<TransactionInfo, Error> {
+    pub fn get_transaction(
+        &self,
+        txid: &str,
+    ) -> Result<TransactionInfo, Error> {
         tracing::debug!(
             txid = %txid,
             "Fetching transaction from RPC"
         );
-        let result = self.call::<TransactionInfo>("getrawtransaction", json!([txid, true]));
+        let result = self
+            .call::<TransactionInfo>("getrawtransaction", json!([txid, true]));
         match &result {
             Ok(tx_info) => {
                 tracing::debug!(
@@ -226,21 +233,25 @@ impl BitcoinRpcClient {
     }
 
     /// Get confirmations for a transaction by ID
-    pub fn get_transaction_confirmations(&self, txid: &str) -> Result<u32, Error> {
+    pub fn get_transaction_confirmations(
+        &self,
+        txid: &str,
+    ) -> Result<u32, Error> {
         let tx = self.get_transaction(txid)?;
         Ok(tx.confirmations)
     }
 
     /// Get transactions for an address
     /// Returns list of transaction IDs
-    pub fn list_transactions(&self, address: &str) -> Result<Vec<String>, Error> {
+    pub fn list_transactions(
+        &self,
+        address: &str,
+    ) -> Result<Vec<String>, Error> {
         // Use listunspent to find transactions (works for most cases)
         // For more comprehensive results, we'd need to use a block explorer API
         // or maintain our own index
-        let unspent: Vec<serde_json::Value> = self.call(
-            "listunspent",
-            json!([0, 999999, [address]]),
-        )?;
+        let unspent: Vec<serde_json::Value> =
+            self.call("listunspent", json!([0, 999999, [address]]))?;
 
         let mut txids = std::collections::HashSet::new();
         for utxo in unspent {
@@ -252,17 +263,16 @@ impl BitcoinRpcClient {
         // Also try to get transactions from getreceivedbyaddress (if available)
         // This is a fallback, but not all nodes support it
         // Note: We don't use the result, but calling it may help populate the node's internal index
-        let _result: Result<f64, _> = self.call(
-            "getreceivedbyaddress",
-            json!([address, 0]),
-        );
+        let _result: Result<f64, _> =
+            self.call("getreceivedbyaddress", json!([address, 0]));
 
         Ok(txids.into_iter().collect())
     }
 
     /// Get current block height
     pub fn get_block_height(&self) -> Result<u32, Error> {
-        let info: serde_json::Value = self.call("getblockchaininfo", json!([]))?;
+        let info: serde_json::Value =
+            self.call("getblockchaininfo", json!([]))?;
         let blocks = info
             .get("blocks")
             .and_then(|v| v.as_u64())
@@ -286,25 +296,54 @@ impl BitcoinRpcClient {
                 Ok(tx) => {
                     // Check if any output matches the address and amount
                     for vout in &tx.vout {
-                        let vout_value_sats = (vout.value * 100_000_000.0) as u64;
-                        let matches_address = vout.script_pub_key.address.as_ref()
+                        let vout_value_sats =
+                            (vout.value * 100_000_000.0) as u64;
+                        let matches_address = vout
+                            .script_pub_key
+                            .address
+                            .as_ref()
                             .map(|addr| addr == address)
                             .unwrap_or(false)
-                            || vout.script_pub_key.addresses.as_ref()
-                                .map(|addrs| addrs.contains(&address.to_string()))
+                            || vout
+                                .script_pub_key
+                                .addresses
+                                .as_ref()
+                                .map(|addrs| {
+                                    addrs.contains(&address.to_string())
+                                })
                                 .unwrap_or(false);
 
                         if matches_address && vout_value_sats == amount_sats {
                             // Extract sender address from first input
-                            let sender_address = if let Some(vin) = tx.vin.first() {
-                                if let (Some(input_txid), Some(input_vout)) = (&vin.txid, &vin.vout) {
+                            let sender_address = if let Some(vin) =
+                                tx.vin.first()
+                            {
+                                if let (Some(input_txid), Some(input_vout)) =
+                                    (&vin.txid, &vin.vout)
+                                {
                                     // Get the input transaction to find sender
                                     match self.get_transaction(input_txid) {
                                         Ok(input_tx) => {
-                                            if let Some(input_vout_data) = input_tx.vout.get(*input_vout as usize) {
-                                                input_vout_data.script_pub_key.address.clone()
-                                                    .or_else(|| input_vout_data.script_pub_key.addresses.as_ref()
-                                                        .and_then(|addrs| addrs.first().cloned()))
+                                            if let Some(input_vout_data) =
+                                                input_tx
+                                                    .vout
+                                                    .get(*input_vout as usize)
+                                            {
+                                                input_vout_data
+                                                    .script_pub_key
+                                                    .address
+                                                    .clone()
+                                                    .or_else(|| {
+                                                        input_vout_data
+                                                            .script_pub_key
+                                                            .addresses
+                                                            .as_ref()
+                                                            .and_then(|addrs| {
+                                                                addrs
+                                                                    .first()
+                                                                    .cloned()
+                                                            })
+                                                    })
                                             } else {
                                                 None
                                             }
@@ -319,7 +358,8 @@ impl BitcoinRpcClient {
                             };
 
                             let confirmations = tx.confirmations;
-                            let sender = sender_address.unwrap_or_else(|| "unknown".to_string());
+                            let sender = sender_address
+                                .unwrap_or_else(|| "unknown".to_string());
                             matches.push((txid.clone(), confirmations, sender));
                             break; // Found a match, no need to check other outputs
                         }
@@ -347,4 +387,3 @@ pub fn get_rpc_config(_parent_chain: ParentChainType) -> Option<RpcConfig> {
     // For now, return None to indicate no config available
     None
 }
-

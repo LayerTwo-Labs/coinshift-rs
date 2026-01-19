@@ -178,7 +178,9 @@ where
             tracing::debug!("Node::new: Opening database environment");
             let env = unsafe { Env::open(&env_open_opts, &env_path) }
                 .map_err(EnvError::from)?;
-            tracing::info!("Node::new: Database environment opened successfully");
+            tracing::info!(
+                "Node::new: Database environment opened successfully"
+            );
             env
         };
         tracing::debug!("Node::new: Creating State");
@@ -233,16 +235,18 @@ where
                 })
                 .unwrap_or_default();
             drop(rotxn);
-            
+
             if !corrupted_swaps.is_empty() {
                 tracing::warn!(
                     corrupted_count = corrupted_swaps.len(),
                     "Found {} corrupted swaps, automatically reconstructing from blockchain",
                     corrupted_swaps.len()
                 );
-                
+
                 let mut rwtxn = env.write_txn().map_err(EnvError::from)?;
-                match state.reconstruct_swaps_from_blockchain(&mut rwtxn, &archive, None) {
+                match state.reconstruct_swaps_from_blockchain(
+                    &mut rwtxn, &archive, None,
+                ) {
                     Ok(reconstructed_count) => {
                         rwtxn.commit().map_err(RwTxnError::from)?;
                         tracing::info!(
@@ -262,8 +266,10 @@ where
                 tracing::debug!("No corrupted swaps detected");
             }
         }
-        
-        tracing::info!("Node::new: Initialization complete, returning Node instance");
+
+        tracing::info!(
+            "Node::new: Initialization complete, returning Node instance"
+        );
         Ok(Self {
             archive,
             cusf_mainchain: Arc::new(Mutex::new(cusf_mainchain)),
@@ -317,7 +323,7 @@ where
     ) -> Result<(), Error> {
         {
             let mut rwtxn = self.env.write_txn().map_err(EnvError::from)?;
-            
+
             // Try to validate the transaction
             match self.state.validate_transaction(&rwtxn, &transaction) {
                 Ok(_) => {
@@ -328,14 +334,18 @@ where
                 Err(err) => {
                     // Check if it's an orphaned lock error
                     let err_str = format!("{err:#}");
-                    if err_str.contains("orphaned lock") || err_str.contains("corrupted swap") {
+                    if err_str.contains("orphaned lock")
+                        || err_str.contains("corrupted swap")
+                    {
                         tracing::warn!(
                             error = %err,
                             "Detected orphaned lock error, attempting to clean up"
                         );
-                        
+
                         // Clean up orphaned locks
-                        let cleaned = self.state.cleanup_orphaned_locks(&mut rwtxn)
+                        let cleaned = self
+                            .state
+                            .cleanup_orphaned_locks(&mut rwtxn)
                             .map_err(|e| Error::State(Box::new(e)))?;
                         if cleaned > 0 {
                             tracing::info!(
@@ -344,10 +354,15 @@ where
                                 cleaned
                             );
                             rwtxn.commit().map_err(RwTxnError::from)?;
-                            
+
                             // Retry validation after cleanup
-                            let mut retry_rwtxn = self.env.write_txn().map_err(EnvError::from)?;
-                            self.state.validate_transaction(&retry_rwtxn, &transaction)
+                            let mut retry_rwtxn =
+                                self.env.write_txn().map_err(EnvError::from)?;
+                            self.state
+                                .validate_transaction(
+                                    &retry_rwtxn,
+                                    &transaction,
+                                )
                                 .map_err(|e| Error::State(Box::new(e)))?;
                             self.mempool.put(&mut retry_rwtxn, &transaction)?;
                             retry_rwtxn.commit().map_err(RwTxnError::from)?;

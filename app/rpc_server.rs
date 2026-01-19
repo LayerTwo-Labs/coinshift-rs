@@ -1,11 +1,6 @@
 use std::net::SocketAddr;
 
 use bitcoin::Amount;
-use jsonrpsee::{
-    core::{RpcResult, async_trait, middleware::RpcServiceBuilder},
-    server::Server,
-    types::ErrorObject,
-};
 use coinshift::{
     net::Peer,
     types::{
@@ -15,6 +10,11 @@ use coinshift::{
     wallet::Balance,
 };
 use coinshift_app_rpc_api::RpcServer;
+use jsonrpsee::{
+    core::{RpcResult, async_trait, middleware::RpcServiceBuilder},
+    server::Server,
+    types::ErrorObject,
+};
 use tower_http::{
     request_id::{
         MakeRequestId, PropagateRequestIdLayer, RequestId, SetRequestIdLayer,
@@ -296,14 +296,14 @@ impl RpcServer for RpcServerImpl {
         parent_chain: ParentChainType,
         l1_recipient_address: String,
         l1_amount_sats: u64,
-        l2_recipient: Option<Address>,  // Optional - None = open swap
+        l2_recipient: Option<Address>, // Optional - None = open swap
         l2_amount_sats: u64,
         required_confirmations: Option<u32>,
         fee_sats: u64,
     ) -> RpcResult<(SwapId, Txid)> {
         let accumulator =
             self.app.node.get_tip_accumulator().map_err(custom_err)?;
-        
+
         // Create a closure that checks if an outpoint is locked to a swap
         // We create a new read transaction each time to avoid lifetime issues
         // This ensures we always read the latest state
@@ -312,7 +312,9 @@ impl RpcServer for RpcServerImpl {
             let rotxn = match node.env().read_txn() {
                 Ok(txn) => txn,
                 Err(_) => {
-                    tracing::warn!("Failed to create read transaction for locked output check");
+                    tracing::warn!(
+                        "Failed to create read transaction for locked output check"
+                    );
                     return false;
                 }
             };
@@ -329,7 +331,7 @@ impl RpcServer for RpcServerImpl {
                 }
             }
         };
-        
+
         let (tx, swap_id) = self
             .app
             .wallet
@@ -338,7 +340,7 @@ impl RpcServer for RpcServerImpl {
                 parent_chain,
                 l1_recipient_address,
                 Amount::from_sat(l1_amount_sats),
-                l2_recipient,  // Optional
+                l2_recipient, // Optional
                 Amount::from_sat(l2_amount_sats),
                 required_confirmations,
                 Amount::from_sat(fee_sats),
@@ -351,12 +353,7 @@ impl RpcServer for RpcServerImpl {
     }
 
     async fn reconstruct_swaps(&self) -> RpcResult<u32> {
-        let mut rwtxn = self
-            .app
-            .node
-            .env()
-            .write_txn()
-            .map_err(custom_err)?;
+        let mut rwtxn = self.app.node.env().write_txn().map_err(custom_err)?;
         let count = self
             .app
             .node
@@ -380,14 +377,9 @@ impl RpcServer for RpcServerImpl {
         let l1_txid_bytes = hex::decode(l1_txid_hex)
             .map_err(|e| custom_err_msg(format!("Invalid hex: {e}")))?;
         let l1_txid = SwapTxId::from_bytes(&l1_txid_bytes);
-        
-        let mut rwtxn = self
-            .app
-            .node
-            .env()
-            .write_txn()
-            .map_err(custom_err)?;
-        
+
+        let mut rwtxn = self.app.node.env().write_txn().map_err(custom_err)?;
+
         // Get current sidechain block hash and height for reference
         let block_hash = self
             .app
@@ -403,7 +395,7 @@ impl RpcServer for RpcServerImpl {
             .try_get_height(&rwtxn)
             .map_err(custom_err)?
             .ok_or_else(|| custom_err_msg("No tip height found"))?;
-        
+
         // TODO: Extract claimer address from L1 transaction
         // For now, pass None (will be set when L1 transaction detection is implemented)
         self.app
@@ -427,12 +419,7 @@ impl RpcServer for RpcServerImpl {
         &self,
         swap_id: SwapId,
     ) -> RpcResult<Option<Swap>> {
-        let rotxn = self
-            .app
-            .node
-            .env()
-            .read_txn()
-            .map_err(custom_err)?;
+        let rotxn = self.app.node.env().read_txn().map_err(custom_err)?;
         let swap = self
             .app
             .node
@@ -448,12 +435,7 @@ impl RpcServer for RpcServerImpl {
         l2_claimer_address: Option<Address>,
     ) -> RpcResult<Txid> {
         // Get swap to verify it's ready and get recipient
-        let rotxn = self
-            .app
-            .node
-            .env()
-            .read_txn()
-            .map_err(custom_err)?;
+        let rotxn = self.app.node.env().read_txn().map_err(custom_err)?;
         let swap = self
             .app
             .node
@@ -469,18 +451,20 @@ impl RpcServer for RpcServerImpl {
             )));
         }
 
-        
         // Get locked outputs for this swap
         // Note: We must query the node directly, not the wallet, because the wallet
         // filters out SwapPending outputs. Locked outputs are identified by checking
         // if the output content is SwapPending with the matching swap_id.
         let all_utxos = self.app.node.get_all_utxos().map_err(custom_err)?;
-        
+
         // Find locked outputs for this swap (same pattern as verify_swap_locks_utxos in integration tests)
         let mut locked_outputs = Vec::new();
         for (outpoint, output) in all_utxos {
             match &output.content {
-                coinshift::types::OutputContent::SwapPending { swap_id: locked_swap_id, .. } => {
+                coinshift::types::OutputContent::SwapPending {
+                    swap_id: locked_swap_id,
+                    ..
+                } => {
                     if *locked_swap_id == swap_id.0 {
                         tracing::info!(
                             "Found locked output for swap {}: {:?}",
@@ -514,16 +498,21 @@ impl RpcServer for RpcServerImpl {
         }
 
         // Determine recipient: pre-specified swap uses swap.l2_recipient, open swap uses claimer address
-        let recipient = swap.l2_recipient
-            .or(l2_claimer_address)
-            .ok_or_else(|| custom_err_msg("Open swap requires l2_claimer_address"))?;
+        let recipient =
+            swap.l2_recipient.or(l2_claimer_address).ok_or_else(|| {
+                custom_err_msg("Open swap requires l2_claimer_address")
+            })?;
 
         // Add locked outputs to wallet temporarily so they can be used for signing
         // SwapPending outputs are normally filtered out, but we need them in the wallet
         // for the authorize() call to find the address and signing key
         use std::collections::HashMap;
-        let locked_utxos: HashMap<_, _> = locked_outputs.iter().cloned().collect();
-        self.app.wallet.put_utxos(&locked_utxos).map_err(custom_err)?;
+        let locked_utxos: HashMap<_, _> =
+            locked_outputs.iter().cloned().collect();
+        self.app
+            .wallet
+            .put_utxos(&locked_utxos)
+            .map_err(custom_err)?;
         tracing::debug!(
             swap_id = %swap_id,
             num_locked_outputs = locked_outputs.len(),
@@ -540,7 +529,7 @@ impl RpcServer for RpcServerImpl {
                 swap_id,
                 recipient,
                 locked_outputs,
-                l2_claimer_address,  // Pass claimer address for open swaps
+                l2_claimer_address, // Pass claimer address for open swaps
             )
             .map_err(custom_err)?;
         let txid = tx.txid();
@@ -549,12 +538,7 @@ impl RpcServer for RpcServerImpl {
     }
 
     async fn list_swaps(&self) -> RpcResult<Vec<Swap>> {
-        let rotxn = self
-            .app
-            .node
-            .env()
-            .read_txn()
-            .map_err(custom_err)?;
+        let rotxn = self.app.node.env().read_txn().map_err(custom_err)?;
         let swaps = self
             .app
             .node
@@ -568,12 +552,7 @@ impl RpcServer for RpcServerImpl {
         &self,
         recipient: Address,
     ) -> RpcResult<Vec<Swap>> {
-        let rotxn = self
-            .app
-            .node
-            .env()
-            .read_txn()
-            .map_err(custom_err)?;
+        let rotxn = self.app.node.env().read_txn().map_err(custom_err)?;
         let swaps = self
             .app
             .node

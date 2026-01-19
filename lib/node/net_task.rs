@@ -112,7 +112,12 @@ fn connect_tip_(
             prevalidated,
         )?;
     }
-    let () = state.connect_two_way_peg_data(rwtxn, two_way_peg_data, None, wallet)?;
+    let () = state.connect_two_way_peg_data(
+        rwtxn,
+        two_way_peg_data,
+        None,
+        wallet,
+    )?;
     let accumulator = state.get_accumulator(rwtxn)?;
     let () = archive.put_header(rwtxn, header)?;
     let () = archive.put_body(rwtxn, block_hash, body)?;
@@ -620,7 +625,10 @@ impl NetTask {
 
                         // If the receiver is gone, log and continue - this shouldn't happen
                         // but if it does, we don't want to crash the net task
-                        if new_tip_ready_tx.unbounded_send((block_tip, Some(addr), None)).is_err() {
+                        if new_tip_ready_tx
+                            .unbounded_send((block_tip, Some(addr), None))
+                            .is_err()
+                        {
                             tracing::warn!(
                                 %addr,
                                 ?block_tip,
@@ -707,11 +715,14 @@ impl NetTask {
                                     tracing::trace!(%addr, new_tip = ?next_tip, "sending new tip ready");
                                     // If the receiver is gone, log and continue - this shouldn't happen
                                     // but if it does, we don't want to crash the net task
-                                    if new_tip_ready_tx.unbounded_send((
-                                        next_tip,
-                                        Some(addr),
-                                        None,
-                                    )).is_err() {
+                                    if new_tip_ready_tx
+                                        .unbounded_send((
+                                            next_tip,
+                                            Some(addr),
+                                            None,
+                                        ))
+                                        .is_err()
+                                    {
                                         tracing::warn!(
                                             %addr,
                                             ?next_tip,
@@ -1045,7 +1056,10 @@ impl NetTask {
                     }
                     impl OneshotGuard {
                         fn new(resp_tx: Option<oneshot::Sender<bool>>) -> Self {
-                            Self { resp_tx, sent: false }
+                            Self {
+                                resp_tx,
+                                sent: false,
+                            }
                         }
                     }
                     impl Drop for OneshotGuard {
@@ -1059,7 +1073,7 @@ impl NetTask {
                         }
                     }
                     let mut guard = OneshotGuard::new(resp_tx);
-                    
+
                     let reorg_result = task::block_in_place(|| {
                         reorg_to_tip(
                             &self.ctxt.env,
@@ -1170,7 +1184,11 @@ impl NetTask {
                             );
                             // If the receiver is gone, log and continue - this shouldn't happen
                             // but if it does, we don't want to crash the net task
-                            if self.new_tip_ready_tx.unbounded_send((new_tip, Some(addr), None)).is_err() {
+                            if self
+                                .new_tip_ready_tx
+                                .unbounded_send((new_tip, Some(addr), None))
+                                .is_err()
+                            {
                                 tracing::warn!(
                                     %addr,
                                     ?new_tip,
@@ -1193,10 +1211,10 @@ impl NetTask {
                                 self.ctxt.mempool.put(&mut rwtxn, &new_tx)?;
                                 rwtxn.commit().map_err(RwTxnError::from)?;
                                 // broadcast
-                                let () = self
-                                    .ctxt
-                                    .net
-                                    .push_tx(HashSet::from_iter([addr]), new_tx);
+                                let () = self.ctxt.net.push_tx(
+                                    HashSet::from_iter([addr]),
+                                    new_tx,
+                                );
                                 Ok(())
                             })() {
                                 let err = anyhow::Error::from(err);
@@ -1216,16 +1234,18 @@ impl NetTask {
                                 "mail box: received PeerConnectionInfo::Response"
                             );
                             // Handle response errors gracefully - log but don't crash the net task
-                            if let Err(err) = tokio::task::block_in_place(|| {
-                                Self::handle_response(
-                                    &self.ctxt,
-                                    &mut descendant_tips,
-                                    &self.new_tip_ready_tx,
-                                    addr,
-                                    resp,
-                                    req,
-                                )
-                            }) {
+                            if let Err(err) =
+                                tokio::task::block_in_place(|| {
+                                    Self::handle_response(
+                                        &self.ctxt,
+                                        &mut descendant_tips,
+                                        &self.new_tip_ready_tx,
+                                        addr,
+                                        resp,
+                                        req,
+                                    )
+                                })
+                            {
                                 let err = anyhow::Error::from(err);
                                 tracing::error!(
                                     %addr,
@@ -1337,10 +1357,11 @@ impl NetTaskHandle {
         let task_finished = self.task.is_finished();
 
         let (oneshot_tx, oneshot_rx) = oneshot::channel();
-        match self
-            .new_tip_ready_tx
-            .unbounded_send((new_tip, None, Some(oneshot_tx)))
-        {
+        match self.new_tip_ready_tx.unbounded_send((
+            new_tip,
+            None,
+            Some(oneshot_tx),
+        )) {
             Ok(()) => {
                 oneshot_rx.await.map_err(Error::ReceiveReorgResultOneshot)
             }
@@ -1367,7 +1388,10 @@ impl NetTaskHandle {
                              waiting briefly to see if task finishes or channel recovers"
                         );
                         // Wait a short time to see if the task finishes or if it's a transient issue
-                        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                        tokio::time::sleep(tokio::time::Duration::from_millis(
+                            100,
+                        ))
+                        .await;
                         let task_finished_after_wait = self.task.is_finished();
                         if task_finished_after_wait {
                             tracing::error!(
@@ -1387,7 +1411,9 @@ impl NetTaskHandle {
                     }
                 } else if err.is_full() {
                     // This shouldn't happen with unbounded channels, but handle it anyway
-                    tracing::error!("Unexpected Full error from unbounded channel");
+                    tracing::error!(
+                        "Unexpected Full error from unbounded channel"
+                    );
                 }
                 Err(Error::SendNewTipReady(err))
             }

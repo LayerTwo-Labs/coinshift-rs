@@ -40,4 +40,3 @@ pub fn tests(
         // unknown_withdrawal_trial(bin_paths),
     ]
 }
-

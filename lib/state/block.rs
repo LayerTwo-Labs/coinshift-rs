@@ -299,7 +299,7 @@ pub fn connect_prevalidated(
                     *parent_chain,
                     l1_txid,
                     Some(*required_confirmations),
-                    *l2_recipient,  // Now optional
+                    *l2_recipient, // Now optional
                     bitcoin::Amount::from_sat(*l2_amount),
                     l1_recipient_address.clone(),
                     l1_amount.map(bitcoin::Amount::from_sat),
@@ -326,9 +326,14 @@ pub fn connect_prevalidated(
                 // Lock outputs for L2 → L1 swaps
                 // Only lock outputs with SwapPending content, not change outputs
                 if l1_recipient_address.is_some() {
-                    for (vout, output) in filled.transaction.outputs.iter().enumerate() {
+                    for (vout, output) in
+                        filled.transaction.outputs.iter().enumerate()
+                    {
                         // Only lock SwapPending outputs, not regular Value outputs (change)
-                        if matches!(output.content, crate::types::OutputContent::SwapPending { .. }) {
+                        if matches!(
+                            output.content,
+                            crate::types::OutputContent::SwapPending { .. }
+                        ) {
                             let outpoint = OutPoint::Regular {
                                 txid,
                                 vout: vout as u32,
@@ -351,7 +356,11 @@ pub fn connect_prevalidated(
                     "Swap saved during block connection"
                 );
             }
-            TxData::SwapClaim { swap_id, l2_claimer_address, .. } => {
+            TxData::SwapClaim {
+                swap_id,
+                l2_claimer_address,
+                ..
+            } => {
                 let swap_id = SwapId(*swap_id);
 
                 // Get swap
@@ -370,13 +379,16 @@ pub fn connect_prevalidated(
                 // For open swaps, verify claimer address is provided
                 if swap.l2_recipient.is_none() && l2_claimer_address.is_none() {
                     return Err(Error::InvalidTransaction(
-                        "Open swap claim requires l2_claimer_address".to_string(),
+                        "Open swap claim requires l2_claimer_address"
+                            .to_string(),
                     ));
                 }
 
                 // Unlock outputs
                 for (outpoint, _) in &filled.transaction.inputs {
-                    if state.is_output_locked_to_swap(rwtxn, outpoint)? == Some(swap_id) {
+                    if state.is_output_locked_to_swap(rwtxn, outpoint)?
+                        == Some(swap_id)
+                    {
                         state.unlock_output_from_swap(rwtxn, outpoint)?;
                     }
                 }
@@ -684,12 +696,17 @@ pub fn disconnect_tip(
                 // Unlock outputs for L2 → L1 swaps
                 // Only unlock SwapPending outputs that were locked
                 for (vout, output) in tx.outputs.iter().enumerate().rev() {
-                    if matches!(output.content, crate::types::OutputContent::SwapPending { .. }) {
+                    if matches!(
+                        output.content,
+                        crate::types::OutputContent::SwapPending { .. }
+                    ) {
                         let outpoint = OutPoint::Regular {
                             txid,
                             vout: vout as u32,
                         };
-                        if state.is_output_locked_to_swap(rwtxn, &outpoint)? == Some(swap_id) {
+                        if state.is_output_locked_to_swap(rwtxn, &outpoint)?
+                            == Some(swap_id)
+                        {
                             state.unlock_output_from_swap(rwtxn, &outpoint)?;
                         }
                     }
@@ -708,7 +725,10 @@ pub fn disconnect_tip(
 
                 // Re-lock outputs
                 for (outpoint, _) in tx.inputs.iter().rev() {
-                    if state.is_output_locked_to_swap(rwtxn, outpoint)?.is_none() {
+                    if state
+                        .is_output_locked_to_swap(rwtxn, outpoint)?
+                        .is_none()
+                    {
                         state.lock_output_to_swap(rwtxn, outpoint, &swap_id)?;
                     }
                 }

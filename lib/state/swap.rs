@@ -5,8 +5,7 @@ use sneed::RoTxn;
 use crate::{
     state::{Error, State},
     types::{
-        FilledTransaction, SwapId,
-        SwapState, SwapTxId, Transaction, TxData,
+        FilledTransaction, SwapId, SwapState, SwapTxId, Transaction, TxData,
     },
 };
 
@@ -39,22 +38,23 @@ pub fn validate_swap_create(
     {
         // L2 → L1 swap
         // We need the sender's address - get it from the first input
-        let first_input = filled_transaction
-            .spent_utxos
-            .first()
-            .ok_or_else(|| {
-                Error::InvalidTransaction("SwapCreate must have inputs".to_string())
+        let first_input =
+            filled_transaction.spent_utxos.first().ok_or_else(|| {
+                Error::InvalidTransaction(
+                    "SwapCreate must have inputs".to_string(),
+                )
             })?;
         let l2_sender_address = first_input.address;
         SwapId::from_l2_to_l1(
             l1_addr,
             bitcoin::Amount::from_sat(*l1_amt),
             &l2_sender_address,
-            l2_recipient.as_ref(),  // Now optional
+            l2_recipient.as_ref(), // Now optional
         )
     } else {
         return Err(Error::InvalidTransaction(
-            "L2 → L1 swap requires l1_recipient_address and l1_amount".to_string(),
+            "L2 → L1 swap requires l1_recipient_address and l1_amount"
+                .to_string(),
         ));
     };
 
@@ -116,7 +116,8 @@ pub fn validate_swap_create(
                             // Check if it's a deserialization error (corrupted swap)
                             let err_str = format!("{err:#}");
                             let err_debug = format!("{err:?}");
-                            let is_deserialization_error = err_str.contains("Decoding")
+                            let is_deserialization_error = err_str
+                                .contains("Decoding")
                                 || err_str.contains("InvalidTagEncoding")
                                 || err_str.contains("deserialize")
                                 || err_str.contains("bincode")
@@ -127,16 +128,20 @@ pub fn validate_swap_create(
 
                             if is_deserialization_error {
                                 // Swap is corrupted - orphaned lock
-                                return Err(Error::InvalidTransaction(format!(
-                                    "Input {} is locked to corrupted swap {} (orphaned lock). Please run cleanup_orphaned_locks to fix this.",
-                                    outpoint, locked_swap_id
-                                )));
+                                return Err(Error::InvalidTransaction(
+                                    format!(
+                                        "Input {} is locked to corrupted swap {} (orphaned lock). Please run cleanup_orphaned_locks to fix this.",
+                                        outpoint, locked_swap_id
+                                    ),
+                                ));
                             } else {
                                 // Other database error - return original error
-                                return Err(Error::InvalidTransaction(format!(
-                                    "Input {} is locked to swap {}, but error checking swap: {}",
-                                    outpoint, locked_swap_id, err
-                                )));
+                                return Err(Error::InvalidTransaction(
+                                    format!(
+                                        "Input {} is locked to swap {}, but error checking swap: {}",
+                                        outpoint, locked_swap_id, err
+                                    ),
+                                ));
                             }
                         }
                     }
@@ -202,10 +207,11 @@ pub fn validate_swap_claim(
         let zero_hash32 = [0u8; 32];
         let has_l1_tx = !matches!(swap.l1_txid, SwapTxId::Hash32(h) if h == zero_hash32)
             && !matches!(swap.l1_txid, SwapTxId::Hash(ref v) if v.is_empty() || v.iter().all(|&b| b == 0));
-        
+
         if !has_l1_tx {
             return Err(Error::InvalidTransaction(
-                "Open swap cannot be claimed until L1 transaction is detected".to_string(),
+                "Open swap cannot be claimed until L1 transaction is detected"
+                    .to_string(),
             ));
         }
     }
@@ -213,7 +219,9 @@ pub fn validate_swap_claim(
     // 3. Verify at least one input is locked to this swap
     let mut found_locked_input = false;
     for (outpoint, _) in &transaction.inputs {
-        if let Some(locked_swap_id) = state.is_output_locked_to_swap(rotxn, outpoint)? {
+        if let Some(locked_swap_id) =
+            state.is_output_locked_to_swap(rotxn, outpoint)?
+        {
             if locked_swap_id != swap_id {
                 return Err(Error::InvalidTransaction(format!(
                     "Input {} is locked to different swap {}",
@@ -226,12 +234,16 @@ pub fn validate_swap_claim(
 
     if !found_locked_input {
         return Err(Error::InvalidTransaction(
-            "SwapClaim must spend at least one output locked to the swap".to_string(),
+            "SwapClaim must spend at least one output locked to the swap"
+                .to_string(),
         ));
     }
 
     // 4. Verify output goes to correct recipient
-    let TxData::SwapClaim { l2_claimer_address, .. } = &transaction.data else {
+    let TxData::SwapClaim {
+        l2_claimer_address, ..
+    } = &transaction.data
+    else {
         unreachable!()
     };
 
@@ -275,7 +287,9 @@ pub fn validate_no_locked_outputs(
 
     // Check that no inputs are locked
     for (outpoint, _) in &transaction.inputs {
-        if let Some(locked_swap_id) = state.is_output_locked_to_swap(rotxn, outpoint)? {
+        if let Some(locked_swap_id) =
+            state.is_output_locked_to_swap(rotxn, outpoint)?
+        {
             return Err(Error::InvalidTransaction(format!(
                 "Cannot spend locked output {} (locked to swap {})",
                 outpoint, locked_swap_id
@@ -285,4 +299,3 @@ pub fn validate_no_locked_outputs(
 
     Ok(())
 }
-

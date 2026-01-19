@@ -195,30 +195,31 @@ where
         // Writing all headers during IBD can starve archive readers.
         let store_start = Instant::now();
         tracing::info!(%block_hash, "request_ancestor_infos: Starting to store ancestor headers/info to archive");
-        let stored_count: usize = task::block_in_place(|| -> Result<usize, ResponseError> {
-            let mut rwtxn = env.write_txn().map_err(EnvError::from)?;
-            let mut stored_count = 0;
-            for (header_info, block_info) in block_infos {
-                let () =
-                    archive.put_main_header_info(&mut rwtxn, &header_info)?;
-                let () = archive.put_main_block_info(
-                    &mut rwtxn,
-                    header_info.block_hash,
-                    &block_info,
-                )?;
-                stored_count += 1;
-                if stored_count % 1000 == 0 {
-                    tracing::info!(
-                        %block_hash,
-                        stored = stored_count,
-                        "request_ancestor_infos: Stored {} blocks so far",
-                        stored_count
-                    );
+        let stored_count: usize =
+            task::block_in_place(|| -> Result<usize, ResponseError> {
+                let mut rwtxn = env.write_txn().map_err(EnvError::from)?;
+                let mut stored_count = 0;
+                for (header_info, block_info) in block_infos {
+                    let () = archive
+                        .put_main_header_info(&mut rwtxn, &header_info)?;
+                    let () = archive.put_main_block_info(
+                        &mut rwtxn,
+                        header_info.block_hash,
+                        &block_info,
+                    )?;
+                    stored_count += 1;
+                    if stored_count % 1000 == 0 {
+                        tracing::info!(
+                            %block_hash,
+                            stored = stored_count,
+                            "request_ancestor_infos: Stored {} blocks so far",
+                            stored_count
+                        );
+                    }
                 }
-            }
-            rwtxn.commit().map_err(RwTxnError::from)?;
-            Ok(stored_count)
-        })?;
+                rwtxn.commit().map_err(RwTxnError::from)?;
+                Ok(stored_count)
+            })?;
         let store_elapsed = store_start.elapsed();
         let total_elapsed = start_time.elapsed();
         tracing::info!(

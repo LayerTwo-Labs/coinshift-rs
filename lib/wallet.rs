@@ -294,7 +294,7 @@ impl Wallet {
         parent_chain: ParentChainType,
         l1_recipient_address: String,
         l1_amount: bitcoin::Amount,
-        l2_recipient: Option<Address>,  // Optional - None = open swap
+        l2_recipient: Option<Address>, // Optional - None = open swap
         l2_amount: bitcoin::Amount,
         required_confirmations: Option<u32>,
         fee: bitcoin::Amount,
@@ -317,10 +317,10 @@ impl Wallet {
         // IMPORTANT: We must use the address from the first UTXO being spent, not a new address.
         // The validation logic in lib/state/swap.rs uses the address from the first input's UTXO
         // to compute the swap ID, so we must match that here.
-        let required_total = l2_amount
-            .checked_add(fee)
-            .ok_or(AmountOverflowError)?;
-        let (total, coins) = self.select_coins_with_filter(required_total, is_locked)?;
+        let required_total =
+            l2_amount.checked_add(fee).ok_or(AmountOverflowError)?;
+        let (total, coins) =
+            self.select_coins_with_filter(required_total, is_locked)?;
         let change = total - l2_amount - fee;
 
         // Get the sender address from the first UTXO (this is what validation will use)
@@ -337,9 +337,9 @@ impl Wallet {
             &l1_recipient_address,
             l1_amount,
             &l2_sender_address,
-            l2_recipient.as_ref(),  // Optional
+            l2_recipient.as_ref(), // Optional
         );
-        
+
         tracing::debug!(
             swap_id = %swap_id,
             l2_sender_address = %l2_sender_address,
@@ -388,7 +388,7 @@ impl Wallet {
                 parent_chain,
                 l1_txid_bytes: vec![0u8; 32], // Placeholder for L2 → L1
                 required_confirmations,
-                l2_recipient,  // Optional
+                l2_recipient, // Optional
                 l2_amount: l2_amount.to_sat(),
                 l1_recipient_address: Some(l1_recipient_address),
                 l1_amount: Some(l1_amount.to_sat()),
@@ -407,7 +407,7 @@ impl Wallet {
         swap_id: SwapId,
         recipient: Address,
         locked_outputs: Vec<(OutPoint, Output)>,
-        l2_claimer_address: Option<Address>,  // Required for open swaps
+        l2_claimer_address: Option<Address>, // Required for open swaps
     ) -> Result<Transaction, Error> {
         tracing::trace!(
             swap_id = %swap_id,
@@ -454,7 +454,7 @@ impl Wallet {
             outputs,
             data: TxData::SwapClaim {
                 swap_id: swap_id.0,
-                l2_claimer_address: l2_claimer_address,  // For open swaps
+                l2_claimer_address: l2_claimer_address, // For open swaps
                 proof_data: None,
             },
         };
@@ -524,7 +524,7 @@ impl Wallet {
             .collect()
             .map_err(DbError::from)?;
         utxos.par_sort_unstable_by_key(|(_, output)| output.get_value());
-        
+
         tracing::debug!(
             total_utxos_in_wallet = utxos.len(),
             required_value = %value,
@@ -536,7 +536,7 @@ impl Wallet {
         let mut skipped_withdrawal = 0;
         let mut skipped_swap_pending = 0;
         let mut skipped_locked = 0;
-        
+
         for (outpoint_key, output) in &utxos {
             let outpoint: OutPoint = outpoint_key.into();
             let content_kind = if output.content.is_swap_pending() {
@@ -555,7 +555,7 @@ impl Wallet {
                 is_locked = is_locked_output,
                 "Coin selection: evaluating UTXO"
             );
-            
+
             if output.content.is_withdrawal() {
                 skipped_withdrawal += 1;
                 continue;
@@ -590,7 +590,7 @@ impl Wallet {
             );
             selected.insert(outpoint, output.clone());
         }
-        
+
         // Emit a short sample of the selected UTXOs to help debug selection issues
         for (outpoint, output) in selected.iter().take(10) {
             tracing::info!(

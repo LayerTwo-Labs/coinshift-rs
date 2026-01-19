@@ -11,11 +11,11 @@ use bip300301_enforcer_integration_tests::{
     },
     util::{AbortOnDrop, AsyncTrial},
 };
+use coinshift::types::OutPoint;
+use coinshift_app_rpc_api::RpcClient as _;
 use futures::{
     FutureExt as _, StreamExt as _, channel::mpsc, future::BoxFuture,
 };
-use coinshift::types::OutPoint;
-use coinshift_app_rpc_api::RpcClient as _;
 use tokio::time::sleep;
 use tracing::Instrument as _;
 
@@ -170,4 +170,3 @@ pub fn unknown_withdrawal_trial(
 ) -> AsyncTrial<BoxFuture<'static, anyhow::Result<()>>> {
     AsyncTrial::new("unknown_withdrawal", unknown_withdrawal(bin_paths).boxed())
 }
-

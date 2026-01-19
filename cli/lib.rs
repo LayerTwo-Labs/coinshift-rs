@@ -6,10 +6,7 @@ use jsonrpsee::{core::client::ClientT, http_client::HttpClientBuilder};
 
 use coinshift::types::{Address, Txid};
 use coinshift_app_rpc_api::RpcClient;
-use tracing_subscriber::{
-    filter::Targets,
-    layer::SubscriberExt as _,
-};
+use tracing_subscriber::{filter::Targets, layer::SubscriberExt as _};
 
 #[derive(Clone, Debug, Subcommand)]
 #[command(arg_required_else_help(true))]
@@ -263,7 +260,7 @@ where
 
 fn set_tracing_subscriber(log_level: tracing::Level) -> anyhow::Result<()> {
     let filter = Targets::new().with_default(log_level);
-    
+
     let stdout_layer = tracing_subscriber::fmt::layer()
         .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
         .with_file(true)

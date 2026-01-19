@@ -1,7 +1,7 @@
 //! Swap data structures and types
 
-use blake3;
 use bitcoin::{self, hashes::Hash as _};
+use blake3;
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -140,7 +140,7 @@ impl ParentChainType {
 }
 
 /// Swap state
-/// 
+///
 /// Note: Using tuple variants instead of named fields for better bincode compatibility
 #[derive(
     BorshSerialize,
@@ -228,14 +228,16 @@ impl SwapTxId {
     }
 }
 
-
 // Custom serde module for Option<Amount> that serializes as Option<u64>
 // This ensures proper roundtrip serialization with bincode
 mod amount_opt_serde {
     use bitcoin::Amount;
     use serde::{Deserialize, Deserializer, Serializer};
 
-    pub fn serialize<S>(amount: &Option<Amount>, serializer: S) -> Result<S::Ok, S::Error>
+    pub fn serialize<S>(
+        amount: &Option<Amount>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
@@ -245,7 +247,9 @@ mod amount_opt_serde {
         }
     }
 
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<Amount>, D::Error>
+    pub fn deserialize<'de, D>(
+        deserializer: D,
+    ) -> Result<Option<Amount>, D::Error>
     where
         D: Deserializer<'de>,
     {
@@ -256,13 +260,7 @@ mod amount_opt_serde {
 
 /// Swap data structure
 #[derive(
-    Clone,
-    Debug,
-    Deserialize,
-    Eq,
-    PartialEq,
-    Serialize,
-    utoipa::ToSchema,
+    Clone, Debug, Deserialize, Eq, PartialEq, Serialize, utoipa::ToSchema,
 )]
 pub struct Swap {
     pub id: SwapId,
@@ -294,7 +292,10 @@ pub struct Swap {
 // Custom Borsh serialization for Swap (needed for integration tests)
 // Amount fields are serialized as u64 for compatibility
 impl BorshSerialize for Swap {
-    fn serialize<W: std::io::Write>(&self, writer: &mut W) -> std::io::Result<()> {
+    fn serialize<W: std::io::Write>(
+        &self,
+        writer: &mut W,
+    ) -> std::io::Result<()> {
         BorshSerialize::serialize(&self.id, writer)?;
         BorshSerialize::serialize(&self.direction, writer)?;
         BorshSerialize::serialize(&self.parent_chain, writer)?;
@@ -306,28 +307,40 @@ impl BorshSerialize for Swap {
         BorshSerialize::serialize(&self.l2_amount.to_sat(), writer)?;
         BorshSerialize::serialize(&self.l1_recipient_address, writer)?;
         // Serialize Option<Amount> as Option<u64>
-        BorshSerialize::serialize(&self.l1_amount.map(|amt| amt.to_sat()), writer)?;
+        BorshSerialize::serialize(
+            &self.l1_amount.map(|amt| amt.to_sat()),
+            writer,
+        )?;
         BorshSerialize::serialize(&self.l1_claimer_address, writer)?;
         BorshSerialize::serialize(&self.created_at_height, writer)?;
         BorshSerialize::serialize(&self.expires_at_height, writer)?;
-        BorshSerialize::serialize(&self.l1_txid_validated_at_block_hash, writer)?;
+        BorshSerialize::serialize(
+            &self.l1_txid_validated_at_block_hash,
+            writer,
+        )?;
         BorshSerialize::serialize(&self.l1_txid_validated_at_height, writer)?;
         Ok(())
     }
 }
 
 impl BorshDeserialize for Swap {
-    fn deserialize_reader<R: std::io::Read>(reader: &mut R) -> std::io::Result<Self> {
+    fn deserialize_reader<R: std::io::Read>(
+        reader: &mut R,
+    ) -> std::io::Result<Self> {
         Ok(Self {
             id: BorshDeserialize::deserialize_reader(reader)?,
             direction: BorshDeserialize::deserialize_reader(reader)?,
             parent_chain: BorshDeserialize::deserialize_reader(reader)?,
             l1_txid: BorshDeserialize::deserialize_reader(reader)?,
-            required_confirmations: BorshDeserialize::deserialize_reader(reader)?,
+            required_confirmations: BorshDeserialize::deserialize_reader(
+                reader,
+            )?,
             state: BorshDeserialize::deserialize_reader(reader)?,
             l2_recipient: BorshDeserialize::deserialize_reader(reader)?,
             // Deserialize u64 and convert to Amount
-            l2_amount: bitcoin::Amount::from_sat(BorshDeserialize::deserialize_reader(reader)?),
+            l2_amount: bitcoin::Amount::from_sat(
+                BorshDeserialize::deserialize_reader(reader)?,
+            ),
             l1_recipient_address: BorshDeserialize::deserialize_reader(reader)?,
             // Deserialize Option<u64> and convert to Option<Amount>
             l1_amount: Option::<u64>::deserialize_reader(reader)?
@@ -335,8 +348,11 @@ impl BorshDeserialize for Swap {
             l1_claimer_address: BorshDeserialize::deserialize_reader(reader)?,
             created_at_height: BorshDeserialize::deserialize_reader(reader)?,
             expires_at_height: BorshDeserialize::deserialize_reader(reader)?,
-            l1_txid_validated_at_block_hash: BorshDeserialize::deserialize_reader(reader)?,
-            l1_txid_validated_at_height: BorshDeserialize::deserialize_reader(reader)?,
+            l1_txid_validated_at_block_hash:
+                BorshDeserialize::deserialize_reader(reader)?,
+            l1_txid_validated_at_height: BorshDeserialize::deserialize_reader(
+                reader,
+            )?,
         })
     }
 }
@@ -421,4 +437,3 @@ pub enum SwapError {
     #[error("Swap expired")]
     SwapExpired,
 }
-

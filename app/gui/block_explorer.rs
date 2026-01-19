@@ -1,10 +1,10 @@
 use bitcoin::Amount;
-use eframe::egui;
-use human_size::{Byte, Kibibyte, Mebibyte, SpecificSize};
 use coinshift::{
     state::State,
     types::{Body, GetValue, Header},
 };
+use eframe::egui;
+use human_size::{Byte, Kibibyte, Mebibyte, SpecificSize};
 
 use crate::app::App;
 

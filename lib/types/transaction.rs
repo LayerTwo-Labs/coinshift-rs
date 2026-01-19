@@ -616,9 +616,7 @@ impl From<PointedOutputRef<'_>> for BitcoinNodeHash {
     }
 }
 
-#[derive(
-    BorshSerialize, Clone, Debug, Deserialize, Serialize, ToSchema,
-)]
+#[derive(BorshSerialize, Clone, Debug, Deserialize, Serialize, ToSchema)]
 pub struct Transaction {
     #[schema(value_type = Vec<(OutPoint, String)>)]
     pub inputs: Vec<(OutPoint, Hash)>,

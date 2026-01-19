@@ -1,9 +1,11 @@
-use eframe::egui::{self, Button, ScrollArea};
-use coinshift::types::{Address, Swap, SwapId, SwapState, SwapTxId, ParentChainType};
 use coinshift::bitcoin_rpc::{BitcoinRpcClient, RpcConfig};
+use coinshift::types::{
+    Address, ParentChainType, Swap, SwapId, SwapState, SwapTxId,
+};
+use eframe::egui::{self, Button, ScrollArea};
+use hex;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
-use hex;
 
 use crate::app::App;
 use crate::gui::util::show_btc_amount;
@@ -22,16 +24,16 @@ pub struct SwapList {
     swaps: Option<Vec<Swap>>,
     selected_swap_id: Option<String>,
     l1_txid_input: String,
-    l2_recipient_input: String,  // L2 address that will receive the L2 amount (for L1 transaction detection)
+    l2_recipient_input: String, // L2 address that will receive the L2 amount (for L1 transaction detection)
     fetching_confirmations: bool,
-    claimer_address_input: String,  // L2 claimer address when claiming (for open swaps)
+    claimer_address_input: String, // L2 claimer address when claiming (for open swaps)
     last_confirmation_check: Option<Instant>,
     checking_confirmations: bool,
-    success_message: Option<String>,  // Success message after claiming (contains txid)
-    swap_id_search: String,  // Swap ID search input field
-    searched_swap: Option<Swap>,  // Swap found by search
-    status_filter: SwapStatusFilter,  // Filter swaps by status
-    search_error: Option<String>,  // Error message for search
+    success_message: Option<String>, // Success message after claiming (contains txid)
+    swap_id_search: String,          // Swap ID search input field
+    searched_swap: Option<Swap>,     // Swap found by search
+    status_filter: SwapStatusFilter, // Filter swaps by status
+    search_error: Option<String>,    // Error message for search
 }
 
 impl Default for SwapList {
@@ -82,7 +84,7 @@ impl SwapList {
 
         // Also get pending swaps from mempool
         drop(rotxn); // Release the transaction before getting mempool transactions
-        
+
         if let Ok(mempool_txs) = app.node.get_all_transactions() {
             for tx in mempool_txs {
                 if let coinshift::types::TxData::SwapCreate {
@@ -101,7 +103,11 @@ impl SwapList {
                     if !swaps_result.iter().any(|s| s.id == swap_id_obj) {
                         // Create a pending swap entry
                         let txid = tx.transaction.txid();
-                        let l1_txid = coinshift::types::SwapTxId::from_bytes(&vec![0u8; 32]);
+                        let l1_txid =
+                            coinshift::types::SwapTxId::from_bytes(&vec![
+                                0u8;
+                                32
+                            ]);
                         let swap = coinshift::types::Swap::new(
                             swap_id_obj,
                             coinshift::types::SwapDirection::L2ToL1,
@@ -112,7 +118,7 @@ impl SwapList {
                             bitcoin::Amount::from_sat(*l2_amount),
                             l1_recipient_address.clone(),
                             l1_amount.map(bitcoin::Amount::from_sat),
-                            0, // Height 0 for pending (not yet in a block)
+                            0,    // Height 0 for pending (not yet in a block)
                             None, // No expiration
                         );
                         swaps_result.push(swap);
@@ -132,16 +138,17 @@ impl SwapList {
     pub fn show(&mut self, app: Option<&App>, ui: &mut egui::Ui) {
         // Periodically check confirmations for swaps in WaitingConfirmations state
         // Check every 10 seconds
-        let should_check = self.last_confirmation_check
+        let should_check = self
+            .last_confirmation_check
             .map(|last| last.elapsed() >= Duration::from_secs(10))
             .unwrap_or(true);
-        
+
         if should_check && !self.checking_confirmations {
             if let Some(app) = app {
                 self.check_confirmations_dynamically(app);
             }
         }
-        
+
         ui.horizontal(|ui| {
             ui.heading("My Swaps");
             if ui.button("Refresh").clicked() {
@@ -150,14 +157,22 @@ impl SwapList {
                 }
             }
             if self.checking_confirmations {
-                ui.label(egui::RichText::new("🔄 Checking confirmations...").small().color(egui::Color32::GRAY));
+                ui.label(
+                    egui::RichText::new("🔄 Checking confirmations...")
+                        .small()
+                        .color(egui::Color32::GRAY),
+                );
             }
         });
-        
+
         // Show success message if present
         if let Some(msg) = self.success_message.clone() {
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("✅ ").size(16.0).color(egui::Color32::GREEN));
+                ui.label(
+                    egui::RichText::new("✅ ")
+                        .size(16.0)
+                        .color(egui::Color32::GREEN),
+                );
                 ui.label(egui::RichText::new(msg).color(egui::Color32::GREEN));
                 if ui.button("✕").clicked() {
                     self.success_message = None;
@@ -165,7 +180,7 @@ impl SwapList {
             });
             ui.separator();
         }
-        
+
         // Swap ID search field
         ui.horizontal(|ui| {
             ui.label("Search Swap by ID:");
@@ -181,24 +196,31 @@ impl SwapList {
                 self.search_error = None;
             }
         });
-        
+
         // Show search error if any
         if let Some(err_msg) = &self.search_error {
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(format!("❌ Error: {}", err_msg)).color(egui::Color32::RED));
+                ui.label(
+                    egui::RichText::new(format!("❌ Error: {}", err_msg))
+                        .color(egui::Color32::RED),
+                );
             });
         }
-        
+
         // Show searched swap if found
         if let Some(swap) = self.searched_swap.clone() {
             ui.separator();
-            ui.label(egui::RichText::new("Searched Swap:").heading().color(egui::Color32::BLUE));
+            ui.label(
+                egui::RichText::new("Searched Swap:")
+                    .heading()
+                    .color(egui::Color32::BLUE),
+            );
             self.show_swap_row(&swap, app, ui);
             ui.separator();
         }
-        
+
         ui.separator();
-        
+
         // Status filter
         ui.horizontal(|ui| {
             ui.label("Filter by Status:");
@@ -206,21 +228,47 @@ impl SwapList {
                 .selected_text(match self.status_filter {
                     SwapStatusFilter::All => "All",
                     SwapStatusFilter::Pending => "Pending",
-                    SwapStatusFilter::WaitingConfirmations => "Waiting Confirmations",
+                    SwapStatusFilter::WaitingConfirmations => {
+                        "Waiting Confirmations"
+                    }
                     SwapStatusFilter::ReadyToClaim => "Ready To Claim",
                     SwapStatusFilter::Completed => "Completed",
                     SwapStatusFilter::Cancelled => "Cancelled",
                 })
                 .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.status_filter, SwapStatusFilter::All, "All");
-                    ui.selectable_value(&mut self.status_filter, SwapStatusFilter::Pending, "Pending");
-                    ui.selectable_value(&mut self.status_filter, SwapStatusFilter::WaitingConfirmations, "Waiting Confirmations");
-                    ui.selectable_value(&mut self.status_filter, SwapStatusFilter::ReadyToClaim, "Ready To Claim");
-                    ui.selectable_value(&mut self.status_filter, SwapStatusFilter::Completed, "Completed");
-                    ui.selectable_value(&mut self.status_filter, SwapStatusFilter::Cancelled, "Cancelled");
+                    ui.selectable_value(
+                        &mut self.status_filter,
+                        SwapStatusFilter::All,
+                        "All",
+                    );
+                    ui.selectable_value(
+                        &mut self.status_filter,
+                        SwapStatusFilter::Pending,
+                        "Pending",
+                    );
+                    ui.selectable_value(
+                        &mut self.status_filter,
+                        SwapStatusFilter::WaitingConfirmations,
+                        "Waiting Confirmations",
+                    );
+                    ui.selectable_value(
+                        &mut self.status_filter,
+                        SwapStatusFilter::ReadyToClaim,
+                        "Ready To Claim",
+                    );
+                    ui.selectable_value(
+                        &mut self.status_filter,
+                        SwapStatusFilter::Completed,
+                        "Completed",
+                    );
+                    ui.selectable_value(
+                        &mut self.status_filter,
+                        SwapStatusFilter::Cancelled,
+                        "Cancelled",
+                    );
                 });
         });
-        
+
         ui.separator();
 
         let swaps = match &self.swaps {
@@ -233,15 +281,24 @@ impl SwapList {
 
         // Filter swaps by status
         let status_filter = self.status_filter;
-        let filtered_swaps: Vec<_> = swaps.iter()
-            .filter(|swap| {
-                match status_filter {
-                    SwapStatusFilter::All => true,
-                    SwapStatusFilter::Pending => matches!(swap.state, SwapState::Pending),
-                    SwapStatusFilter::WaitingConfirmations => matches!(swap.state, SwapState::WaitingConfirmations(..)),
-                    SwapStatusFilter::ReadyToClaim => matches!(swap.state, SwapState::ReadyToClaim),
-                    SwapStatusFilter::Completed => matches!(swap.state, SwapState::Completed),
-                    SwapStatusFilter::Cancelled => matches!(swap.state, SwapState::Cancelled),
+        let filtered_swaps: Vec<_> = swaps
+            .iter()
+            .filter(|swap| match status_filter {
+                SwapStatusFilter::All => true,
+                SwapStatusFilter::Pending => {
+                    matches!(swap.state, SwapState::Pending)
+                }
+                SwapStatusFilter::WaitingConfirmations => {
+                    matches!(swap.state, SwapState::WaitingConfirmations(..))
+                }
+                SwapStatusFilter::ReadyToClaim => {
+                    matches!(swap.state, SwapState::ReadyToClaim)
+                }
+                SwapStatusFilter::Completed => {
+                    matches!(swap.state, SwapState::Completed)
+                }
+                SwapStatusFilter::Cancelled => {
+                    matches!(swap.state, SwapState::Cancelled)
                 }
             })
             .cloned()
@@ -255,7 +312,10 @@ impl SwapList {
                 ui.label("If you just created a swap, it may be pending in the mempool.");
                 ui.label("Mine a block or wait for one to be mined to confirm your swap.");
             } else {
-                ui.label(format!("No swaps found with status: {:?}", status_filter));
+                ui.label(format!(
+                    "No swaps found with status: {:?}",
+                    status_filter
+                ));
                 ui.label("Try selecting a different filter or click 'All' to see all swaps.");
             }
             return;
@@ -288,7 +348,10 @@ impl SwapList {
 
         // Swap ID
         ui.horizontal(|ui| {
-            if ui.selectable_label(is_selected, &swap_id_str[..16]).clicked() {
+            if ui
+                .selectable_label(is_selected, &swap_id_str[..16])
+                .clicked()
+            {
                 if is_selected {
                     self.selected_swap_id = None;
                 } else {
@@ -355,7 +418,7 @@ impl SwapList {
                     }
                     ui.label("(Unlocks outputs and marks as cancelled)");
                 }
-                
+
                 // Delete button (only for pending or cancelled swaps)
                 if matches!(swap.state, SwapState::Pending | SwapState::Cancelled) {
                     if ui
@@ -384,25 +447,25 @@ impl SwapList {
                     ui.label(egui::RichText::new("L1 Transaction Detection").heading());
                     ui.label("When someone sends an L1 transaction to fulfill this swap, update it here:");
                     ui.label(egui::RichText::new("Note: Automatic detection runs during block processing if RPC is configured. You can also manually update with the L1 txid - confirmations will be fetched automatically from RPC.").small().color(egui::Color32::GRAY));
-                    
+
                     ui.vertical(|ui| {
                         ui.horizontal(|ui| {
                             ui.label("L2 Address (that will receive L2 amount):");
                             ui.add(egui::TextEdit::singleline(&mut self.l2_recipient_input).desired_width(400.0));
                         });
-                        
+
                         ui.horizontal(|ui| {
                             ui.label("L1 Transaction ID (hex):");
                             ui.add(egui::TextEdit::singleline(&mut self.l1_txid_input).desired_width(400.0));
                         });
-                        
+
                         if self.fetching_confirmations {
                             ui.label(egui::RichText::new("⏳ Fetching confirmations from L1 RPC...").color(egui::Color32::YELLOW));
                         }
-                        
+
                         // Note: For open swaps, the L2 address will be used when claiming
                         // For pre-specified swaps, this field can be left empty (swap already has l2_recipient)
-                        
+
                         ui.horizontal(|ui| {
                             if ui
                                 .add_enabled(
@@ -415,7 +478,7 @@ impl SwapList {
                                     self.update_swap_with_auto_confirmations(app, &swap);
                                 }
                             }
-                            
+
                             if ui
                                 .add_enabled(
                                     app.is_some() && !self.l1_txid_input.is_empty(),
@@ -428,7 +491,7 @@ impl SwapList {
                                 }
                             }
                         });
-                        
+
                         ui.label(egui::RichText::new("Note: Confirmations will be automatically fetched from the L1 RPC node if configured in L1 Config.").small().color(egui::Color32::GRAY));
                     });
                 }
@@ -439,7 +502,7 @@ impl SwapList {
                         if self.claimer_address_input.is_empty() && !self.l2_recipient_input.is_empty() {
                             self.claimer_address_input = self.l2_recipient_input.clone();
                         }
-                        
+
                         ui.horizontal(|ui| {
                             ui.label("Claimer Address:");
                             ui.text_edit_singleline(&mut self.claimer_address_input);
@@ -478,7 +541,7 @@ impl SwapList {
                     ui.separator();
                     ui.label(egui::RichText::new("⏳ Waiting for Confirmations").heading().color(egui::Color32::YELLOW));
                     ui.label(format!("Current confirmations: {}/{}", current, required));
-                    
+
                     if *current < *required {
                         let remaining = required - current;
                         ui.label(egui::RichText::new(format!("⚠️ Still waiting for {} more confirmation(s) before coins can be claimed", remaining)).color(egui::Color32::YELLOW));
@@ -486,7 +549,7 @@ impl SwapList {
                         ui.label(egui::RichText::new("💡 Confirmations are checked automatically every 10 seconds (works in both GUI and headless mode).").small().color(egui::Color32::GRAY));
                         ui.label(egui::RichText::new("Note: State change to ReadyToClaim doesn't require a block, but claiming the swap requires a SwapClaim transaction in a block.").small().color(egui::Color32::GRAY));
                     }
-                    
+
                     // Show progress bar
                     let progress = *current as f32 / *required as f32;
                     ui.add(egui::ProgressBar::new(progress).show_percentage());
@@ -498,7 +561,12 @@ impl SwapList {
         ui.end_row();
     }
 
-    fn claim_swap(&mut self, app: &App, swap_id: &SwapId, l2_claimer_address: Option<Address>) {
+    fn claim_swap(
+        &mut self,
+        app: &App,
+        swap_id: &SwapId,
+        l2_claimer_address: Option<Address>,
+    ) {
         let accumulator = match app.node.get_tip_accumulator() {
             Ok(acc) => acc,
             Err(err) => {
@@ -543,7 +611,10 @@ impl SwapList {
         let mut locked_outputs = Vec::new();
         for (outpoint, output) in all_utxos {
             match &output.content {
-                coinshift::types::OutputContent::SwapPending { swap_id: locked_swap_id, .. } => {
+                coinshift::types::OutputContent::SwapPending {
+                    swap_id: locked_swap_id,
+                    ..
+                } => {
                     if *locked_swap_id == swap_id.0 {
                         tracing::info!(
                             "Found locked output for swap {}: {:?}",
@@ -574,9 +645,12 @@ impl SwapList {
         // SwapPending outputs are normally filtered out, but we need them in the wallet
         // for the authorize() call to find the address and signing key
         use std::collections::HashMap;
-        let locked_utxos: HashMap<_, _> = locked_outputs.iter().cloned().collect();
+        let locked_utxos: HashMap<_, _> =
+            locked_outputs.iter().cloned().collect();
         if let Err(err) = app.wallet.put_utxos(&locked_utxos) {
-            tracing::error!("Failed to add locked outputs to wallet for signing: {err:#}");
+            tracing::error!(
+                "Failed to add locked outputs to wallet for signing: {err:#}"
+            );
             return;
         }
 
@@ -616,20 +690,23 @@ impl SwapList {
 
         tracing::info!("Swap claimed: swap_id={}, txid={}", swap_id, txid);
         self.claimer_address_input.clear();
-        self.success_message = Some(format!("Swap claimed successfully! Transaction ID: {}", txid));
+        self.success_message = Some(format!(
+            "Swap claimed successfully! Transaction ID: {}",
+            txid
+        ));
         self.refresh_swaps(app);
     }
-    
+
     fn search_swap_by_id(&mut self, app: &App) {
         self.search_error = None;
         self.searched_swap = None;
-        
+
         if self.swap_id_search.trim().is_empty() {
             return;
         }
-        
+
         let search_input = self.swap_id_search.trim();
-        
+
         // Try to find swap by partial or full ID
         if search_input.len() == 64 {
             // Full swap ID - parse and search
@@ -640,25 +717,32 @@ impl SwapList {
                         id_bytes.copy_from_slice(&bytes);
                         SwapId(id_bytes)
                     } else {
-                        self.search_error = Some(format!("Invalid swap ID length: expected 32 bytes, got {}", bytes.len()));
+                        self.search_error = Some(format!(
+                            "Invalid swap ID length: expected 32 bytes, got {}",
+                            bytes.len()
+                        ));
                         return;
                     }
                 }
                 Err(err) => {
-                    self.search_error = Some(format!("Invalid hex format: {}", err));
+                    self.search_error =
+                        Some(format!("Invalid hex format: {}", err));
                     return;
                 }
             };
-            
+
             // Search for full swap ID
             let rotxn = match app.node.env().read_txn() {
                 Ok(txn) => txn,
                 Err(err) => {
-                    self.search_error = Some(format!("Failed to get read transaction: {}", err));
+                    self.search_error = Some(format!(
+                        "Failed to get read transaction: {}",
+                        err
+                    ));
                     return;
                 }
             };
-            
+
             match app.node.state().get_swap(&rotxn, &swap_id) {
                 Ok(Some(swap)) => {
                     tracing::info!("Found swap by ID: {}", swap_id);
@@ -680,8 +764,13 @@ impl SwapList {
                                 l1_amount,
                             } = &tx.transaction.data
                             {
-                                if coinshift::types::SwapId(*tx_swap_id) == swap_id {
-                                    let l1_txid = coinshift::types::SwapTxId::from_bytes(&vec![0u8; 32]);
+                                if coinshift::types::SwapId(*tx_swap_id)
+                                    == swap_id
+                                {
+                                    let l1_txid =
+                                        coinshift::types::SwapTxId::from_bytes(
+                                            &vec![0u8; 32],
+                                        );
                                     let swap = coinshift::types::Swap::new(
                                         swap_id,
                                         coinshift::types::SwapDirection::L2ToL1,
@@ -691,22 +780,28 @@ impl SwapList {
                                         *l2_recipient,
                                         bitcoin::Amount::from_sat(*l2_amount),
                                         l1_recipient_address.clone(),
-                                        l1_amount.map(bitcoin::Amount::from_sat),
+                                        l1_amount
+                                            .map(bitcoin::Amount::from_sat),
                                         0, // Height 0 for pending
                                         None,
                                     );
                                     self.searched_swap = Some(swap);
-                                    tracing::info!("Found swap in mempool: {}", swap_id);
+                                    tracing::info!(
+                                        "Found swap in mempool: {}",
+                                        swap_id
+                                    );
                                     return;
                                 }
                             }
                         }
                     }
-                    self.search_error = Some(format!("Swap not found: {}", swap_id));
+                    self.search_error =
+                        Some(format!("Swap not found: {}", swap_id));
                     return;
                 }
                 Err(err) => {
-                    self.search_error = Some(format!("Failed to get swap: {}", err));
+                    self.search_error =
+                        Some(format!("Failed to get swap: {}", err));
                     return;
                 }
             }
@@ -716,28 +811,33 @@ impl SwapList {
             let rotxn = match app.node.env().read_txn() {
                 Ok(txn) => txn,
                 Err(err) => {
-                    self.search_error = Some(format!("Failed to get read transaction: {}", err));
+                    self.search_error = Some(format!(
+                        "Failed to get read transaction: {}",
+                        err
+                    ));
                     return;
                 }
             };
-            
+
             let all_swaps = match app.node.state().load_all_swaps(&rotxn) {
                 Ok(swaps) => swaps,
                 Err(err) => {
-                    self.search_error = Some(format!("Failed to load swaps: {}", err));
+                    self.search_error =
+                        Some(format!("Failed to load swaps: {}", err));
                     return;
                 }
             };
-            
+
             // Try to find swap by partial hex match
             let search_lower = search_input.to_lowercase();
-            let matching_swaps: Vec<_> = all_swaps.iter()
+            let matching_swaps: Vec<_> = all_swaps
+                .iter()
                 .filter(|swap| {
                     let swap_id_hex = hex::encode(swap.id.0);
                     swap_id_hex.starts_with(&search_lower)
                 })
                 .collect();
-            
+
             if matching_swaps.is_empty() {
                 // Also check mempool
                 if let Ok(mempool_txs) = app.node.get_all_transactions() {
@@ -757,10 +857,16 @@ impl SwapList {
                         }
                     }
                 }
-                self.search_error = Some(format!("No swap found starting with '{}'. Please enter full 64-character swap ID.", search_input));
+                self.search_error = Some(format!(
+                    "No swap found starting with '{}'. Please enter full 64-character swap ID.",
+                    search_input
+                ));
                 return;
             } else if matching_swaps.len() > 1 {
-                self.search_error = Some(format!("Multiple swaps found starting with '{}'. Please enter more characters to narrow down.", search_input));
+                self.search_error = Some(format!(
+                    "Multiple swaps found starting with '{}'. Please enter more characters to narrow down.",
+                    search_input
+                ));
                 return;
             } else {
                 // Found exactly one match
@@ -768,30 +874,39 @@ impl SwapList {
                 return;
             }
         } else {
-            self.search_error = Some(format!("Swap ID too long: expected 64 hex characters, got {}", search_input.len()));
+            self.search_error = Some(format!(
+                "Swap ID too long: expected 64 hex characters, got {}",
+                search_input.len()
+            ));
             return;
         }
     }
 
-    fn load_rpc_config(&self, parent_chain: ParentChainType) -> Option<RpcConfig> {
-        use std::path::PathBuf;
+    fn load_rpc_config(
+        &self,
+        parent_chain: ParentChainType,
+    ) -> Option<RpcConfig> {
         use dirs;
         use serde::{Deserialize, Serialize};
-        
+        use std::path::PathBuf;
+
         #[derive(Clone, Serialize, Deserialize)]
         struct LocalRpcConfig {
             url: String,
             user: String,
             password: String,
         }
-        
+
         let config_path = dirs::data_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("coinshift")
             .join("l1_rpc_configs.json");
-        
+
         if let Ok(file_content) = std::fs::read_to_string(&config_path) {
-            if let Ok(configs) = serde_json::from_str::<HashMap<ParentChainType, LocalRpcConfig>>(&file_content) {
+            if let Ok(configs) = serde_json::from_str::<
+                HashMap<ParentChainType, LocalRpcConfig>,
+            >(&file_content)
+            {
                 if let Some(local_config) = configs.get(&parent_chain) {
                     return Some(RpcConfig {
                         url: local_config.url.clone(),
@@ -827,10 +942,10 @@ impl SwapList {
                 rpc_user = %rpc_config.user,
                 "Loaded RPC config"
             );
-            
+
             self.fetching_confirmations = true;
             let txid_hex = self.l1_txid_input.clone();
-            
+
             // Spawn a thread to fetch confirmations
             let client = BitcoinRpcClient::new(rpc_config);
             match client.get_transaction_confirmations(&txid_hex) {
@@ -885,7 +1000,9 @@ impl SwapList {
         }
 
         // Check if swap is in mempool
-        let swap_in_mempool = app.node.get_all_transactions()
+        let swap_in_mempool = app
+            .node
+            .get_all_transactions()
             .ok()
             .map(|txs| {
                 txs.iter().any(|tx| {
@@ -924,7 +1041,8 @@ impl SwapList {
         // Debug: List all swaps in database for comparison
         let all_db_swaps = app.node.state().load_all_swaps(&rotxn);
         if let Ok(swaps) = &all_db_swaps {
-            let swap_ids: Vec<String> = swaps.iter().map(|s| s.id.to_string()).collect();
+            let swap_ids: Vec<String> =
+                swaps.iter().map(|s| s.id.to_string()).collect();
             tracing::debug!(
                 swap_id = %swap.id,
                 total_swaps_in_db = %swaps.len(),
@@ -1015,39 +1133,52 @@ impl SwapList {
         let l1_txid = SwapTxId::from_bytes(&l1_txid_bytes);
 
         // Fetch transaction from RPC to validate amount and recipient address
-        let confirmations = if let Some(rpc_config) = self.load_rpc_config(swap.parent_chain) {
+        let confirmations = if let Some(rpc_config) =
+            self.load_rpc_config(swap.parent_chain)
+        {
             tracing::debug!(
                 swap_id = %swap.id,
                 l1_txid = %self.l1_txid_input,
                 rpc_url = %rpc_config.url,
                 "Fetching transaction from RPC for validation and confirmations"
             );
-            
+
             let client = BitcoinRpcClient::new(rpc_config);
             match client.get_transaction(&self.l1_txid_input) {
                 Ok(tx_info) => {
                     let conf = tx_info.confirmations;
-                    
+
                     // Validate transaction matches swap requirements
                     let mut found_matching_output = false;
-                    
+
                     // Check if swap has expected L1 recipient and amount
-                    if let (Some(expected_recipient), Some(expected_amount)) = 
-                        (&swap.l1_recipient_address, swap.l1_amount) 
+                    if let (Some(expected_recipient), Some(expected_amount)) =
+                        (&swap.l1_recipient_address, swap.l1_amount)
                     {
                         let expected_amount_sats = expected_amount.to_sat();
-                        
+
                         // Check all outputs for matching address and amount
                         for vout in &tx_info.vout {
-                            let vout_value_sats = (vout.value * 100_000_000.0) as u64;
-                            let matches_address = vout.script_pub_key.address.as_ref()
+                            let vout_value_sats =
+                                (vout.value * 100_000_000.0) as u64;
+                            let matches_address = vout
+                                .script_pub_key
+                                .address
+                                .as_ref()
                                 .map(|addr| addr == expected_recipient)
                                 .unwrap_or(false)
-                                || vout.script_pub_key.addresses.as_ref()
-                                    .map(|addrs| addrs.contains(expected_recipient))
+                                || vout
+                                    .script_pub_key
+                                    .addresses
+                                    .as_ref()
+                                    .map(|addrs| {
+                                        addrs.contains(expected_recipient)
+                                    })
                                     .unwrap_or(false);
-                            
-                            if matches_address && vout_value_sats == expected_amount_sats {
+
+                            if matches_address
+                                && vout_value_sats == expected_amount_sats
+                            {
                                 found_matching_output = true;
                                 tracing::info!(
                                     swap_id = %swap.id,
@@ -1059,7 +1190,7 @@ impl SwapList {
                                 break;
                             }
                         }
-                        
+
                         if !found_matching_output {
                             tracing::error!(
                                 swap_id = %swap.id,
@@ -1079,14 +1210,14 @@ impl SwapList {
                             "Cannot validate transaction: swap missing expected L1 recipient address or amount"
                         );
                     }
-                    
+
                     tracing::info!(
                         swap_id = %swap.id,
                         l1_txid = %self.l1_txid_input,
                         confirmations = %conf,
                         "Fetched transaction and confirmations from L1 RPC"
                     );
-                    
+
                     conf
                 }
                 Err(err) => {
@@ -1171,9 +1302,12 @@ impl SwapList {
 
     fn cancel_swap(&mut self, app: &App, swap_id: &SwapId) {
         // Check if this is a pending swap (in mempool, not yet in a block)
-        let is_pending = self.swaps.as_ref().and_then(|swaps| {
-            swaps.iter().find(|s| s.id == *swap_id)
-        }).map(|s| s.created_at_height == 0).unwrap_or(false);
+        let is_pending = self
+            .swaps
+            .as_ref()
+            .and_then(|swaps| swaps.iter().find(|s| s.id == *swap_id))
+            .map(|s| s.created_at_height == 0)
+            .unwrap_or(false);
 
         if is_pending {
             // For pending swaps, remove from mempool
@@ -1186,7 +1320,8 @@ impl SwapList {
                     {
                         if coinshift::types::SwapId(*tx_swap_id) == *swap_id {
                             let txid = tx.transaction.txid();
-                            if let Err(err) = app.node.remove_from_mempool(txid) {
+                            if let Err(err) = app.node.remove_from_mempool(txid)
+                            {
                                 tracing::error!(
                                     swap_id = %swap_id,
                                     txid = %txid,
@@ -1242,9 +1377,12 @@ impl SwapList {
 
     fn delete_swap(&mut self, app: &App, swap_id: &SwapId) {
         // Check if this is a pending swap (in mempool, not yet in a block)
-        let is_pending = self.swaps.as_ref().and_then(|swaps| {
-            swaps.iter().find(|s| s.id == *swap_id)
-        }).map(|s| s.created_at_height == 0).unwrap_or(false);
+        let is_pending = self
+            .swaps
+            .as_ref()
+            .and_then(|swaps| swaps.iter().find(|s| s.id == *swap_id))
+            .map(|s| s.created_at_height == 0)
+            .unwrap_or(false);
 
         if is_pending {
             // For pending swaps, remove from mempool
@@ -1257,7 +1395,8 @@ impl SwapList {
                     {
                         if coinshift::types::SwapId(*tx_swap_id) == *swap_id {
                             let txid = tx.transaction.txid();
-                            if let Err(err) = app.node.remove_from_mempool(txid) {
+                            if let Err(err) = app.node.remove_from_mempool(txid)
+                            {
                                 tracing::error!(
                                     swap_id = %swap_id,
                                     txid = %txid,
@@ -1291,7 +1430,8 @@ impl SwapList {
                 }
             };
 
-            if let Err(err) = app.node.state().delete_swap(&mut rwtxn, swap_id) {
+            if let Err(err) = app.node.state().delete_swap(&mut rwtxn, swap_id)
+            {
                 tracing::error!("Failed to delete swap: {err:#}");
                 return;
             }
@@ -1375,9 +1515,8 @@ impl SwapList {
                 let l1_txid_hex = match &swap.l1_txid {
                     SwapTxId::Hash32(hash) => {
                         use bitcoin::hashes::Hash;
-                        let txid = bitcoin::Txid::from_slice(hash).unwrap_or_else(|_| {
-                            bitcoin::Txid::all_zeros()
-                        });
+                        let txid = bitcoin::Txid::from_slice(hash)
+                            .unwrap_or_else(|_| bitcoin::Txid::all_zeros());
                         txid.to_string()
                     }
                     SwapTxId::Hash(bytes) => hex::encode(bytes),
@@ -1389,7 +1528,9 @@ impl SwapList {
                     Ok(new_confirmations) => {
                         // Get current confirmations from swap state
                         let current_confirmations = match swap.state {
-                            SwapState::WaitingConfirmations(current, _) => current,
+                            SwapState::WaitingConfirmations(current, _) => {
+                                current
+                            }
                             _ => 0,
                         };
 
@@ -1404,31 +1545,45 @@ impl SwapList {
                             );
 
                             // Get current block info for reference
-                            let block_hash = match app.node.state().try_get_tip(&rwtxn) {
+                            let block_hash = match app
+                                .node
+                                .state()
+                                .try_get_tip(&rwtxn)
+                            {
                                 Ok(Some(hash)) => hash,
                                 Ok(None) | Err(_) => {
-                                    tracing::warn!("Could not get block hash for swap update");
+                                    tracing::warn!(
+                                        "Could not get block hash for swap update"
+                                    );
                                     continue;
                                 }
                             };
-                            let block_height = match app.node.state().try_get_height(&rwtxn) {
+                            let block_height = match app
+                                .node
+                                .state()
+                                .try_get_height(&rwtxn)
+                            {
                                 Ok(Some(height)) => height,
                                 Ok(None) | Err(_) => {
-                                    tracing::warn!("Could not get block height for swap update");
+                                    tracing::warn!(
+                                        "Could not get block height for swap update"
+                                    );
                                     continue;
                                 }
                             };
 
                             // Update swap with new confirmations
-                            if let Err(err) = app.node.state().update_swap_l1_txid(
-                                &mut rwtxn,
-                                &swap.id,
-                                swap.l1_txid.clone(),
-                                new_confirmations,
-                                None, // l1_claimer_address - not needed for confirmation updates
-                                block_hash,
-                                block_height,
-                            ) {
+                            if let Err(err) =
+                                app.node.state().update_swap_l1_txid(
+                                    &mut rwtxn,
+                                    &swap.id,
+                                    swap.l1_txid.clone(),
+                                    new_confirmations,
+                                    None, // l1_claimer_address - not needed for confirmation updates
+                                    block_hash,
+                                    block_height,
+                                )
+                            {
                                 tracing::error!(
                                     swap_id = %swap.id,
                                     error = %err,
@@ -1470,4 +1625,3 @@ impl SwapList {
         self.checking_confirmations = false;
     }
 }
-
