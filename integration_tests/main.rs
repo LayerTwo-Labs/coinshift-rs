@@ -7,6 +7,7 @@ use tracing_subscriber::{filter as tracing_filter, layer::SubscriberExt};
 
 mod ibd;
 mod integration_test;
+mod multi_node_verification;
 mod setup;
 mod swap_creation;
 mod unknown_withdrawal;

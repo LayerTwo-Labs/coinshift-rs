@@ -6,6 +6,7 @@ use futures::{FutureExt, future::BoxFuture};
 
 use crate::{
     ibd::ibd_trial,
+    multi_node_verification::multi_node_verification_trial,
     setup::{Init, PostSetup},
     swap_creation::{
         swap_creation_fixed_trial, swap_creation_open_fill_trial,
@@ -71,6 +72,11 @@ pub fn tests(
             failure_collector.clone(),
         ),
         swap_creation_open_fill_trial(
+            bin_paths.clone(),
+            file_registry.clone(),
+            failure_collector.clone(),
+        ),
+        multi_node_verification_trial(
             bin_paths.clone(),
             file_registry.clone(),
             failure_collector.clone(),
