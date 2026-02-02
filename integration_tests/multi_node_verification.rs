@@ -10,11 +10,12 @@ use bip300301_enforcer_integration_tests::{
     },
     util::{AbortOnDrop, AsyncTrial, TestFailureCollector, TestFileRegistry},
 };
-use coinshift::types::{Address, ParentChainType, SwapId};
+use coinshift::types::ParentChainType;
 use coinshift_app_rpc_api::RpcClient as _;
 use futures::{
     FutureExt as _, StreamExt as _, channel::mpsc, future::BoxFuture,
 };
+use std::collections::HashSet;
 use tokio::time::sleep;
 use tracing::Instrument as _;
 
