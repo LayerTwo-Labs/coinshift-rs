@@ -93,7 +93,11 @@ async fn setup(
     .await?;
     tracing::info!("Setup Charles's node successfully");
 
-    let multi_node_setup = MultiNodeSetup { bob, alice, charles };
+    let multi_node_setup = MultiNodeSetup {
+        bob,
+        alice,
+        charles,
+    };
 
     Ok((enforcer_post_setup, multi_node_setup))
 }
@@ -168,7 +172,8 @@ async fn verify_transactions(
     // (after syncing, all nodes should see the same blockchain state)
     let bob_swap_ids: HashSet<_> = bob_swaps.iter().map(|s| s.id).collect();
     let alice_swap_ids: HashSet<_> = alice_swaps.iter().map(|s| s.id).collect();
-    let charles_swap_ids: HashSet<_> = charles_swaps.iter().map(|s| s.id).collect();
+    let charles_swap_ids: HashSet<_> =
+        charles_swaps.iter().map(|s| s.id).collect();
 
     // Charles should see all swaps that Bob created
     for swap_id in &bob_swap_ids {
@@ -259,14 +264,18 @@ async fn multi_node_verification_task(
     tracing::info!("Deposited to Alice successfully");
 
     // Sync nodes
-    sync_nodes(&[&nodes.bob, &nodes.alice, &nodes.charles], &mut enforcer_post_setup)
-        .await?;
+    sync_nodes(
+        &[&nodes.bob, &nodes.alice, &nodes.charles],
+        &mut enforcer_post_setup,
+    )
+    .await?;
 
     // Bob and Alice perform different operations
 
     // 1. Bob transfers to Alice
     tracing::info!("Bob transferring to Alice");
-    let alice_receive_address = nodes.alice.rpc_client.get_new_address().await?;
+    let alice_receive_address =
+        nodes.alice.rpc_client.get_new_address().await?;
     let transfer_txid = nodes
         .bob
         .rpc_client
@@ -349,8 +358,11 @@ async fn multi_node_verification_task(
     connect_charles_to_peers(&nodes.charles, &nodes.bob, &nodes.alice).await?;
 
     // Sync all nodes to ensure Charles sees all transactions
-    sync_nodes(&[&nodes.bob, &nodes.alice, &nodes.charles], &mut enforcer_post_setup)
-        .await?;
+    sync_nodes(
+        &[&nodes.bob, &nodes.alice, &nodes.charles],
+        &mut enforcer_post_setup,
+    )
+    .await?;
 
     // Wait a bit for state to propagate
     sleep(std::time::Duration::from_secs(2)).await;
@@ -379,7 +391,8 @@ async fn multi_node_verification(bin_paths: BinPaths) -> anyhow::Result<()> {
     let _test_task: AbortOnDrop<()> = tokio::task::spawn({
         let res_tx = res_tx.clone();
         async move {
-            let res = multi_node_verification_task(bin_paths, res_tx.clone()).await;
+            let res =
+                multi_node_verification_task(bin_paths, res_tx.clone()).await;
             let _send_err: Result<(), _> = res_tx.unbounded_send(res);
         }
         .in_current_span()
