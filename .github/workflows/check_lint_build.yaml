@@ -246,22 +246,14 @@ jobs:
 
       - name: Create zip files for releases.drivechain.info
         run: |
-          shopt -s extglob
-          mv coinshift-+([0-9]).+([0-9]).+([0-9])-x86_64-apple-darwin coinshift-latest-x86_64-apple-darwin
-          mv coinshift-cli-+([0-9]).+([0-9]).+([0-9])-x86_64-apple-darwin coinshift-cli-latest-x86_64-apple-darwin
-          zip L2-S255-Coinshift-latest-x86_64-apple-darwin.zip \
-            coinshift-latest-x86_64-apple-darwin \
-            coinshift-cli-latest-x86_64-apple-darwin
-          mv coinshift-+([0-9]).+([0-9]).+([0-9])-x86_64-pc-windows-gnu.exe coinshift-latest-x86_64-pc-windows-gnu.exe
-          mv coinshift-cli-+([0-9]).+([0-9]).+([0-9])-x86_64-pc-windows-gnu.exe coinshift-cli-latest-x86_64-pc-windows-gnu.exe
-          zip L2-S255-Coinshift-latest-x86_64-pc-windows-gnu.zip \
-            coinshift-latest-x86_64-pc-windows-gnu.exe \
-            coinshift-cli-latest-x86_64-pc-windows-gnu.exe
-          mv coinshift-+([0-9]).+([0-9]).+([0-9])-x86_64-unknown-linux-gnu coinshift-latest-x86_64-unknown-linux-gnu
-          mv coinshift-cli-+([0-9]).+([0-9]).+([0-9])-x86_64-unknown-linux-gnu coinshift-cli-latest-x86_64-unknown-linux-gnu
-          zip L2-S255-Coinshift-latest-x86_64-unknown-linux-gnu.zip \
-            coinshift-latest-x86_64-unknown-linux-gnu \
-            coinshift-cli-latest-x86_64-unknown-linux-gnu
+          shopt -s extglob nullglob
+          version='+([0-9]).+([0-9]).+([0-9])?(-+([a-zA-Z0-9.]))'
+          for target in x86_64-apple-darwin x86_64-pc-windows-gnu x86_64-unknown-linux-gnu; do
+            ext=""; [[ $target == *windows* ]] && ext=".exe"
+            mv coinshift-${version}-${target}${ext} coinshift-latest-${target}${ext}
+            mv coinshift-cli-${version}-${target}${ext} coinshift-cli-latest-${target}${ext}
+            zip L2-S255-Coinshift-latest-${target}.zip coinshift-latest-${target}${ext} coinshift-cli-latest-${target}${ext}
+          done
 
       - name: Upload release assets to releases.drivechain.info
         uses: appleboy/scp-action@v1
