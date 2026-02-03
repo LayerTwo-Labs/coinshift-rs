@@ -321,7 +321,6 @@ async fn multi_node_verification_task(
     )
     .await?;
 
-
     // Bob and Alice perform different operations
 
     // 1. Bob transfers to Alice
