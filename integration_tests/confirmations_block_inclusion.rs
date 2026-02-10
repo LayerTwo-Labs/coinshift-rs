@@ -12,14 +12,13 @@ use bip300301_enforcer_integration_tests::{
 };
 use coinshift::types::{ParentChainType, SwapState};
 use coinshift_app_rpc_api::RpcClient as _;
-use futures::{FutureExt as _, StreamExt as _, channel::mpsc, future::BoxFuture};
+use futures::{
+    FutureExt as _, StreamExt as _, channel::mpsc, future::BoxFuture,
+};
 use tokio::time::sleep;
 use tracing::Instrument as _;
 
-use crate::{
-    setup::PostSetup,
-    util::BinPaths,
-};
+use crate::{setup::PostSetup, util::BinPaths};
 
 const DEPOSIT_AMOUNT: bitcoin::Amount = bitcoin::Amount::from_sat(21_000_000);
 const DEPOSIT_FEE: bitcoin::Amount = bitcoin::Amount::from_sat(1_000_000);
@@ -50,7 +49,12 @@ async fn confirmations_block_inclusion_task(
     res_tx: mpsc::UnboundedSender<anyhow::Result<()>>,
 ) -> anyhow::Result<()> {
     let (mut sidechain, mut enforcer_post_setup) =
-        crate::swap_creation::setup_swapper(&bin_paths, res_tx.clone(), "confirmations").await?;
+        crate::swap_creation::setup_swapper(
+            &bin_paths,
+            res_tx.clone(),
+            "confirmations",
+        )
+        .await?;
 
     let deposit_address = sidechain.get_deposit_address().await?;
     let () = deposit(
@@ -76,7 +80,13 @@ async fn confirmations_block_inclusion_task(
             SWAP_FEE,
         )
         .await?;
-    wait_for_swap_in_block(&mut sidechain, &mut enforcer_post_setup, txid, swap_id).await?;
+    wait_for_swap_in_block(
+        &mut sidechain,
+        &mut enforcer_post_setup,
+        txid,
+        swap_id,
+    )
+    .await?;
     sleep(std::time::Duration::from_millis(500)).await;
 
     // Reject confirmations == 0
@@ -138,8 +148,11 @@ pub fn confirmations_block_inclusion_trial(
             let _task: AbortOnDrop<()> = tokio::task::spawn({
                 let res_tx = res_tx.clone();
                 async move {
-                    let res =
-                        confirmations_block_inclusion_task(bin_paths, res_tx.clone()).await;
+                    let res = confirmations_block_inclusion_task(
+                        bin_paths,
+                        res_tx.clone(),
+                    )
+                    .await;
                     drop(res_tx.unbounded_send(res));
                 }
                 .in_current_span()

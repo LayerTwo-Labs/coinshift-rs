@@ -237,7 +237,11 @@ impl L1Config {
                         ui.selectable_value(
                             &mut self.selected_parent_chain,
                             *chain,
-                            format!("{} ({})", chain.coin_name(), chain.ticker()),
+                            format!(
+                                "{} ({})",
+                                chain.coin_name(),
+                                chain.ticker()
+                            ),
                         );
                     }
                 });
@@ -253,10 +257,16 @@ impl L1Config {
         // Show chain-specific info
         ui.horizontal(|ui| {
             ui.label(RichText::new("Default RPC Port:").weak());
-            ui.label(format!("{}", self.selected_parent_chain.default_rpc_port()));
+            ui.label(format!(
+                "{}",
+                self.selected_parent_chain.default_rpc_port()
+            ));
             ui.label(RichText::new("|").weak());
             ui.label(RichText::new("Required Confirmations:").weak());
-            ui.label(format!("{}", self.selected_parent_chain.default_confirmations()));
+            ui.label(format!(
+                "{}",
+                self.selected_parent_chain.default_confirmations()
+            ));
         });
 
         ui.add_space(10.0);
@@ -265,7 +275,9 @@ impl L1Config {
             ui.label("RPC URL:");
             ui.add(
                 TextEdit::singleline(&mut self.rpc_url)
-                    .hint_text(self.selected_parent_chain.default_rpc_url_hint())
+                    .hint_text(
+                        self.selected_parent_chain.default_rpc_url_hint(),
+                    )
                     .desired_width(300.0),
             );
         });

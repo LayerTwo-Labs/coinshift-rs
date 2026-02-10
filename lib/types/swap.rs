@@ -144,10 +144,10 @@ impl ParentChainType {
     pub fn default_rpc_port(&self) -> u16 {
         match self {
             Self::BTC => 8332,
-            Self::BCH => 8332,       // Bitcoin Cash ABC/BCHN default
-            Self::LTC => 9332,       // Litecoin Core default
-            Self::Signet => 38332,   // Bitcoin Signet default
-            Self::Regtest => 18443,  // Bitcoin Regtest default
+            Self::BCH => 8332, // Bitcoin Cash ABC/BCHN default
+            Self::LTC => 9332, // Litecoin Core default
+            Self::Signet => 38332, // Bitcoin Signet default
+            Self::Regtest => 18443, // Bitcoin Regtest default
         }
     }
 
@@ -193,13 +193,7 @@ impl ParentChainType {
 
     /// Get all supported parent chain types
     pub fn all() -> &'static [ParentChainType] {
-        &[
-            Self::BTC,
-            Self::BCH,
-            Self::LTC,
-            Self::Signet,
-            Self::Regtest,
-        ]
+        &[Self::BTC, Self::BCH, Self::LTC, Self::Signet, Self::Regtest]
     }
 }
 

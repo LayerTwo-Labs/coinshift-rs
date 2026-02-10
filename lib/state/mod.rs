@@ -1844,7 +1844,9 @@ impl State {
         rwtxn: &mut RwTxn,
         two_way_peg_data: &TwoWayPegData,
         rpc_config_getter: Option<
-            &dyn Fn(ParentChainType) -> Option<crate::parent_chain_rpc::RpcConfig>,
+            &dyn Fn(
+                ParentChainType,
+            ) -> Option<crate::parent_chain_rpc::RpcConfig>,
         >,
         wallet: Option<&crate::wallet::Wallet>,
     ) -> Result<(), Error> {
