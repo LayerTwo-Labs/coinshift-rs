@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashMap};
 use fallible_iterator::FallibleIterator;
 use sneed::{RoTxn, RwTxn, db::error::Error as DbError};
 
-use crate::bitcoin_rpc::{BitcoinRpcClient, RpcConfig};
+use crate::parent_chain_rpc::{ParentChainRpcClient, RpcConfig};
 use crate::{
     state::{
         Error, State, WITHDRAWAL_BUNDLE_FAILURE_GAP, WithdrawalBundleInfo,
@@ -546,15 +546,21 @@ fn connect_event(
 ///
 /// `block_hash` and `block_height` are the sidechain block where this
 /// validation occurs.
+///
+/// Enforces L1 transaction uniqueness: the same (parent_chain, l1_txid) must
+/// not be associated with more than one swap. Uses `get_swap_by_l1_txid` before
+/// accepting a new L1 tx.
 fn query_and_update_swap(
+    state: &State,
+    rwtxn: &mut RwTxn,
     rpc_config: &RpcConfig,
     swap: &mut Swap,
     l1_recipient: &str,
     l1_amount: bitcoin::Amount,
     block_hash: BlockHash,
     block_height: u32,
-) -> Result<bool, crate::bitcoin_rpc::Error> {
-    let client = BitcoinRpcClient::new(rpc_config.clone());
+) -> Result<bool, Error> {
+    let client = ParentChainRpcClient::new(rpc_config.clone());
     let amount_sats = l1_amount.to_sat();
 
     // Find transactions matching address and amount
@@ -571,7 +577,7 @@ fn query_and_update_swap(
 
     // Convert txid string to SwapTxId
     let txid_bytes = hex::decode(txid)
-        .map_err(|_| crate::bitcoin_rpc::Error::InvalidResponse)?;
+        .map_err(|_| crate::parent_chain_rpc::Error::InvalidResponse)?;
     let l1_txid = SwapTxId::from_bytes(&txid_bytes);
 
     // Check if this is an update or new detection
@@ -580,6 +586,21 @@ fn query_and_update_swap(
         || matches!(swap.l1_txid, SwapTxId::Hash(ref v) if v.is_empty() || v.iter().all(|&b| b == 0));
 
     if is_new {
+        // L1 transaction uniqueness: do not accept an L1 tx already used by another swap
+        if let Some(existing) =
+            state.get_swap_by_l1_txid(rwtxn, &swap.parent_chain, &l1_txid)?
+        {
+            if existing.id != swap.id {
+                tracing::info!(
+                    swap_id = %swap.id,
+                    existing_swap_id = %existing.id,
+                    l1_txid = %txid,
+                    "Rejecting L1 tx already associated with another swap"
+                );
+                return Ok(false);
+            }
+        }
+
         // New L1 transaction detected
         tracing::info!(
             swap_id = %swap.id,
@@ -743,6 +764,8 @@ fn process_coinshift_transactions(
             && let Some(rpc_config) = get_rpc_config(parent_chain_clone)
         {
             match query_and_update_swap(
+                state,
+                rwtxn,
                 &rpc_config,
                 &mut swap,
                 l1_recipient,

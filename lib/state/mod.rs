@@ -1504,6 +1504,18 @@ impl State {
             .get_swap(rwtxn, swap_id)?
             .ok_or_else(|| Error::SwapNotFound { swap_id: *swap_id })?;
 
+        // L1 transaction uniqueness: do not allow an L1 tx already used by another swap
+        if let Some(existing) =
+            self.get_swap_by_l1_txid(rwtxn, &swap.parent_chain, &l1_txid)?
+        {
+            if existing.id != *swap_id {
+                return Err(Error::L1TxidAlreadyUsed {
+                    swap_id: *swap_id,
+                    existing_swap_id: existing.id,
+                });
+            }
+        }
+
         // Save the old l1_txid BEFORE updating the swap (needed for index deletion)
         let old_l1_txid = swap.l1_txid.clone();
 
@@ -1824,7 +1836,7 @@ impl State {
         rwtxn: &mut RwTxn,
         two_way_peg_data: &TwoWayPegData,
         rpc_config_getter: Option<
-            &dyn Fn(ParentChainType) -> Option<crate::bitcoin_rpc::RpcConfig>,
+            &dyn Fn(ParentChainType) -> Option<crate::parent_chain_rpc::RpcConfig>,
         >,
         wallet: Option<&crate::wallet::Wallet>,
     ) -> Result<(), Error> {

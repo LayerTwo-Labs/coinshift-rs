@@ -104,4 +104,13 @@ pub enum Error {
     SwapNotFound { swap_id: SwapId },
     #[error("Invalid transaction: {0}")]
     InvalidTransaction(String),
+    #[error(
+        "L1 txid already used by another swap: {existing_swap_id} (requested for {swap_id})"
+    )]
+    L1TxidAlreadyUsed {
+        swap_id: SwapId,
+        existing_swap_id: SwapId,
+    },
+    #[error(transparent)]
+    ParentChainRpc(#[from] crate::parent_chain_rpc::Error),
 }

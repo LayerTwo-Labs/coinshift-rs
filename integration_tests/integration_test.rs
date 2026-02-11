@@ -6,6 +6,7 @@ use futures::{FutureExt, future::BoxFuture};
 
 use crate::{
     ibd::ibd_trial,
+    l1_txid_uniqueness::l1_txid_uniqueness_trial,
     multi_node_verification::multi_node_verification_trial,
     setup::{Init, PostSetup},
     swap_creation::{
@@ -72,6 +73,11 @@ pub fn tests(
             failure_collector.clone(),
         ),
         swap_creation_open_fill_trial(
+            bin_paths.clone(),
+            file_registry.clone(),
+            failure_collector.clone(),
+        ),
+        l1_txid_uniqueness_trial(
             bin_paths.clone(),
             file_registry.clone(),
             failure_collector.clone(),
