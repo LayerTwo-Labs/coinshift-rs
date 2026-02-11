@@ -281,7 +281,7 @@ There is **no** `merkle_proof_verified` field in the current struct.
 ## Current Limitations
 
 1. **L1 transaction uniqueness:** Enforced: `get_swap_by_l1_txid` is used before accepting an L1 tx in `query_and_update_swap` and in `update_swap_l1_txid`; the same L1 tx cannot be associated with more than one swap.
-2. **Confirmations and block inclusion:** No explicit “reject if confirmations == 0” or “must have block height” in `query_and_update_swap`.
+2. **Confirmations and block inclusion:** Enforced: `query_and_update_swap` only accepts L1 matches with `confirmations > 0` and `blockheight.is_some()`; `update_swap_l1_txid` rejects `confirmations == 0`.
 3. **BMM reports / header chain / merkle proof:** None of these exist for swap L1 verification in this repo.
 4. **RPC dependency:** Swap L1 presence and confirmation count rely on the configured RPC for the swap target chain.
 

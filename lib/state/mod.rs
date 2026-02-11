@@ -1504,6 +1504,14 @@ impl State {
             .get_swap(rwtxn, swap_id)?
             .ok_or_else(|| Error::SwapNotFound { swap_id: *swap_id })?;
 
+        // Only accept confirmed L1 transactions (consistent with query_and_update_swap)
+        if confirmations == 0 {
+            return Err(Error::InvalidTransaction(format!(
+                "Swap {}: L1 tx confirmations must be > 0 (got 0); only confirmed transactions are accepted",
+                swap_id
+            )));
+        }
+
         // L1 transaction uniqueness: do not allow an L1 tx already used by another swap
         if let Some(existing) =
             self.get_swap_by_l1_txid(rwtxn, &swap.parent_chain, &l1_txid)?

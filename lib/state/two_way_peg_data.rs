@@ -571,9 +571,22 @@ fn query_and_update_swap(
         return Ok(false);
     }
 
-    // Use the first match (most recent transaction)
+    // Only accept transactions that are confirmed and included in a block
+    let matches: Vec<_> = matches
+        .into_iter()
+        .filter(|(_, conf, _, blockheight)| *conf > 0 && blockheight.is_some())
+        .collect();
+    if matches.is_empty() {
+        tracing::debug!(
+            swap_id = %swap.id,
+            "No confirmed or block-included L1 match; rejecting unconfirmed or mempool-only tx"
+        );
+        return Ok(false);
+    }
+
+    // Use the first valid match (most recent transaction)
     // In a production system, you might want to handle multiple matches differently
-    let (txid, confirmations, sender_address) = &matches[0];
+    let (txid, confirmations, sender_address, _blockheight) = &matches[0];
 
     // Convert txid string to SwapTxId
     let txid_bytes = hex::decode(txid)

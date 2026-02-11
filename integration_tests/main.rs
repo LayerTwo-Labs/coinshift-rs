@@ -5,6 +5,7 @@ use clap::Parser;
 use std::collections::HashSet;
 use tracing_subscriber::{filter as tracing_filter, layer::SubscriberExt};
 
+mod confirmations_block_inclusion;
 mod ibd;
 mod integration_test;
 mod l1_txid_uniqueness;
