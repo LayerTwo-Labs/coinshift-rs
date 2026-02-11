@@ -283,13 +283,14 @@ There is **no** `merkle_proof_verified` field in the current struct.
 1. **L1 transaction uniqueness:** Enforced: `get_swap_by_l1_txid` is used before accepting an L1 tx in `query_and_update_swap` and in `update_swap_l1_txid`; the same L1 tx cannot be associated with more than one swap.
 2. **Confirmations and block inclusion:** Enforced: `query_and_update_swap` only accepts L1 matches with `confirmations > 0` and `blockheight.is_some()`; `update_swap_l1_txid` rejects `confirmations == 0`.
 3. **BMM reports / header chain / merkle proof:** Explicitly not used: swap L1 verification in this repo uses only the configured parent chain RPC (no BMM reports, no header chain for swaps, no merkle proof of L1 tx in block). Documented in code and tested (l1_verification_rpc_only).
-4. **RPC dependency:** Swap L1 presence and confirmation count rely on the configured RPC for the swap target chain.
+4. **RPC dependency:** Documented and tested: swap L1 presence and confirmation count rely on the configured RPC for the swap target chain (swap.parent_chain); without RPC config, process_coinshift skips L1 lookup and the swap stays Pending (see l1_rpc_dependency integration test).
 
 ---
 
 ## Summary
 
 - **Implemented:** Swap creation and claim flow, output locking, deterministic swap ID, state machine, RPC-based L1 matching and confirmation threshold, block reference tracking, expiration. Parent-chain 2WPD security: mainchain header chain, PoW, BMM merge-mining, 2WPD only from verified mainchain blocks.
-- **Not implemented (in this repo):** L1 tx uniqueness check before accept, explicit reject for confirmations == 0 or missing block height, BMM-based L1 reports, per–parent-chain header chain for swaps, merkle proof of L1 tx in block, and `merkle_proof_verified` on Swap.
+- **Implemented:** L1 tx uniqueness (get_swap_by_l1_txid before accept), reject confirmations == 0 / require block height, RPC-only L1 verification (no BMM/merkle in this repo), RPC dependency documented and tested.
+- **Not implemented (in this repo):** BMM-based L1 reports, per–parent-chain header chain for swaps, merkle proof of L1 tx in block, and `merkle_proof_verified` on Swap.
 
 This document is intended to match the current codebase and can be updated as features are added or removed.

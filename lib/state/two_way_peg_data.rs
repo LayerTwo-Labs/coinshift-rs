@@ -771,6 +771,10 @@ fn process_coinshift_transactions(
             l1_amount_str
         );
 
+        // Swap L1 presence and confirmation count rely on the configured RPC for
+        // the swap target chain (swap.parent_chain). If no RPC is configured here,
+        // we skip L1 lookup and the swap stays Pending until RPC is set or the user
+        // manually updates via update_swap_l1_txid.
         // Query L1 blockchain for matching transactions if RPC config is available
         // Clone values to avoid borrow checker issues
         let l1_recipient_clone = swap.l1_recipient_address.clone();

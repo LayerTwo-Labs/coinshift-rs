@@ -7,6 +7,7 @@ use futures::{FutureExt, future::BoxFuture};
 use crate::{
     confirmations_block_inclusion::confirmations_block_inclusion_trial,
     ibd::ibd_trial,
+    l1_rpc_dependency::l1_rpc_dependency_trial,
     l1_txid_uniqueness::l1_txid_uniqueness_trial,
     l1_verification_rpc_only::l1_verification_rpc_only_trial,
     multi_node_verification::multi_node_verification_trial,
@@ -90,6 +91,11 @@ pub fn tests(
             failure_collector.clone(),
         ),
         l1_verification_rpc_only_trial(
+            bin_paths.clone(),
+            file_registry.clone(),
+            failure_collector.clone(),
+        ),
+        l1_rpc_dependency_trial(
             bin_paths.clone(),
             file_registry.clone(),
             failure_collector.clone(),

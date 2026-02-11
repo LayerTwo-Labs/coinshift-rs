@@ -9,6 +9,7 @@ mod confirmations_block_inclusion;
 mod ibd;
 mod integration_test;
 mod l1_txid_uniqueness;
+mod l1_rpc_dependency;
 mod l1_verification_rpc_only;
 mod multi_node_verification;
 mod setup;
