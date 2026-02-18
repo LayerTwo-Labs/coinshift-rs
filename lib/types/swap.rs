@@ -278,10 +278,39 @@ impl SwapTxId {
         }
     }
 
+    /// Parse L1 txid from a hex string (e.g. from user input or RPC).
+    /// Requires exactly 64 hex characters (32 bytes) to avoid truncation or
+    /// length confusion that could corrupt the stored txid.
+    pub fn from_hex(hex_str: &str) -> Result<Self, String> {
+        let s = hex_str.trim();
+        if s.len() != 64 {
+            return Err(format!(
+                "L1 txid must be exactly 64 hex characters (32 bytes), got {}",
+                s.len()
+            ));
+        }
+        let bytes = hex::decode(s).map_err(|e| format!("Invalid hex: {e}"))?;
+        if bytes.len() != 32 {
+            return Err(format!(
+                "Decoded L1 txid must be 32 bytes, got {}",
+                bytes.len()
+            ));
+        }
+        Ok(Self::from_bytes(&bytes))
+    }
+
     pub fn to_bitcoin_txid(&self) -> Option<bitcoin::Txid> {
         match self {
             Self::Hash32(hash) => Some(bitcoin::Txid::from_byte_array(*hash)),
             Self::Hash(_) => None,
+        }
+    }
+
+    /// Hex encoding of the txid bytes (for RPC calls and display).
+    pub fn to_hex(&self) -> String {
+        match self {
+            Self::Hash32(hash) => hex::encode(hash),
+            Self::Hash(bytes) => hex::encode(bytes),
         }
     }
 }
