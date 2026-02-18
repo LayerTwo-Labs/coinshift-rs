@@ -1099,14 +1099,16 @@ impl SwapList {
             return;
         }
 
-        let l1_txid_bytes = match hex::decode(&self.l1_txid_input) {
-            Ok(bytes) => bytes,
+        let l1_txid = match SwapTxId::from_hex(&self.l1_txid_input) {
+            Ok(txid) => txid,
             Err(err) => {
-                tracing::error!("Invalid hex: {err}");
+                tracing::error!(error = %err, "Invalid L1 txid: must be exactly 64 hex characters (32 bytes)");
                 return;
             }
         };
-        let l1_txid = SwapTxId::from_bytes(&l1_txid_bytes);
+
+        // Use normalized hex (same bytes we're storing) for RPC validation
+        let l1_txid_hex = l1_txid.to_hex();
 
         // Fetch transaction from RPC to validate amount and recipient address
         let confirmations = if let Some(rpc_config) =
@@ -1114,13 +1116,13 @@ impl SwapList {
         {
             tracing::debug!(
                 swap_id = %swap.id,
-                l1_txid = %self.l1_txid_input,
+                l1_txid = %l1_txid_hex,
                 rpc_url = %rpc_config.url,
                 "Fetching transaction from RPC for validation and confirmations"
             );
 
             let client = ParentChainRpcClient::new(rpc_config);
-            match client.get_transaction(&self.l1_txid_input) {
+            match client.get_transaction(&l1_txid_hex) {
                 Ok(tx_info) => {
                     let conf = tx_info.confirmations;
 
@@ -1158,7 +1160,7 @@ impl SwapList {
                                 found_matching_output = true;
                                 tracing::info!(
                                     swap_id = %swap.id,
-                                    l1_txid = %self.l1_txid_input,
+                                    l1_txid = %l1_txid_hex,
                                     recipient = %expected_recipient,
                                     amount_sats = %expected_amount_sats,
                                     "Transaction validated: matches swap requirements"
@@ -1170,7 +1172,7 @@ impl SwapList {
                         if !found_matching_output {
                             tracing::error!(
                                 swap_id = %swap.id,
-                                l1_txid = %self.l1_txid_input,
+                                l1_txid = %l1_txid_hex,
                                 expected_recipient = %expected_recipient,
                                 expected_amount_sats = %expected_amount_sats,
                                 "Transaction validation failed: No output matches expected recipient address and amount"
@@ -1182,14 +1184,14 @@ impl SwapList {
                         // This might be an open swap or a swap without L1 details
                         tracing::warn!(
                             swap_id = %swap.id,
-                            l1_txid = %self.l1_txid_input,
+                            l1_txid = %l1_txid_hex,
                             "Cannot validate transaction: swap missing expected L1 recipient address or amount"
                         );
                     }
 
                     tracing::info!(
                         swap_id = %swap.id,
-                        l1_txid = %self.l1_txid_input,
+                        l1_txid = %l1_txid_hex,
                         confirmations = %conf,
                         "Fetched transaction and confirmations from L1 RPC"
                     );
@@ -1199,7 +1201,7 @@ impl SwapList {
                 Err(err) => {
                     tracing::error!(
                         swap_id = %swap.id,
-                        l1_txid = %self.l1_txid_input,
+                        l1_txid = %l1_txid_hex,
                         error = %err,
                         error_debug = ?err,
                         "Failed to fetch transaction from RPC"
@@ -1484,15 +1486,7 @@ impl SwapList {
             // Get RPC config for this swap's parent chain
             if let Some(rpc_config) = self.load_rpc_config(swap.parent_chain) {
                 // Convert L1 txid to hex string for RPC query
-                let l1_txid_hex = match &swap.l1_txid {
-                    SwapTxId::Hash32(hash) => {
-                        use bitcoin::hashes::Hash;
-                        let txid = bitcoin::Txid::from_slice(hash)
-                            .unwrap_or_else(|_| bitcoin::Txid::all_zeros());
-                        txid.to_string()
-                    }
-                    SwapTxId::Hash(bytes) => hex::encode(bytes),
-                };
+                let l1_txid_hex = swap.l1_txid.to_hex();
 
                 // Fetch current confirmations from RPC
                 let client = ParentChainRpcClient::new(rpc_config);
