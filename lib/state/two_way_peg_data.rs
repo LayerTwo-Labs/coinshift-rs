@@ -596,10 +596,10 @@ fn query_and_update_swap(
     // In a production system, you might want to handle multiple matches differently
     let (sender_address, tx_info) = &matches[0];
 
-    // Convert txid string to SwapTxId
-    let txid_bytes = hex::decode(&tx_info.txid)
-        .map_err(|_| crate::parent_chain_rpc::Error::InvalidResponse)?;
-    let l1_txid = SwapTxId::from_bytes(&txid_bytes);
+    // Convert txid string to SwapTxId (strict 64-char hex = 32 bytes)
+    let l1_txid = SwapTxId::from_hex(&tx_info.txid).map_err(|_| {
+        crate::parent_chain_rpc::Error::InvalidResponse
+    })?;
 
     // Check if this is an update or new detection
     let zero_hash32 = [0u8; 32];
