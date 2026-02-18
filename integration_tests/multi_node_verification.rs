@@ -320,9 +320,7 @@ async fn multi_node_verification_task(
         &mut enforcer_post_setup,
     )
     .await?;
-
     // Bob and Alice perform different operations
-
     // 1. Bob transfers to Alice
     tracing::info!("Bob transferring to Alice");
     let alice_receive_address =
