@@ -90,6 +90,7 @@ async fn confirmations_block_inclusion_task(
     sleep(std::time::Duration::from_millis(500)).await;
 
     // Reject confirmations == 0
+    // Must be exactly 64 hex chars (32 bytes) — SwapTxId::from_hex enforces this
     let fake_l1_txid_hex = "bb".repeat(32);
     let err = sidechain
         .rpc_client
