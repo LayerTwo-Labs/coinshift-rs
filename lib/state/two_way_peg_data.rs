@@ -573,8 +573,10 @@ fn query_and_update_swap(
     let amount_sats = ctx.l1_amount.to_sat();
 
     // Find transactions matching address and amount
-    let matches = client
-        .find_transactions_by_address_and_amount(ctx.l1_recipient, amount_sats)?;
+    let matches = client.find_transactions_by_address_and_amount(
+        ctx.l1_recipient,
+        amount_sats,
+    )?;
 
     if matches.is_empty() {
         return Ok(false);
@@ -794,7 +796,13 @@ fn process_coinshift_transactions(
                 block_hash,
                 block_height,
             };
-            match query_and_update_swap(state, rwtxn, &rpc_config, &mut swap, &ctx) {
+            match query_and_update_swap(
+                state,
+                rwtxn,
+                &rpc_config,
+                &mut swap,
+                &ctx,
+            ) {
                 Ok(updated) => {
                     if updated {
                         tracing::info!(
