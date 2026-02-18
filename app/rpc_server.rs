@@ -374,9 +374,8 @@ impl RpcServer for RpcServerImpl {
         l1_txid_hex: String,
         confirmations: u32,
     ) -> RpcResult<()> {
-        let l1_txid_bytes = hex::decode(l1_txid_hex)
-            .map_err(|e| custom_err_msg(format!("Invalid hex: {e}")))?;
-        let l1_txid = SwapTxId::from_bytes(&l1_txid_bytes);
+        let l1_txid = SwapTxId::from_hex(&l1_txid_hex)
+            .map_err(|e| custom_err_msg(e))?;
 
         let mut rwtxn = self.app.node.env().write_txn().map_err(custom_err)?;
 
