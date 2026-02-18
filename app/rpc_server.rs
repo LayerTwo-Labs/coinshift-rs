@@ -375,7 +375,7 @@ impl RpcServer for RpcServerImpl {
         confirmations: u32,
     ) -> RpcResult<()> {
         let l1_txid =
-            SwapTxId::from_hex(&l1_txid_hex).map_err(|e| custom_err_msg(e))?;
+            SwapTxId::from_hex(&l1_txid_hex).map_err(custom_err_msg)?;
 
         let mut rwtxn = self.app.node.env().write_txn().map_err(custom_err)?;
 
