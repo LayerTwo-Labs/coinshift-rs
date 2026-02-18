@@ -87,7 +87,10 @@ impl CreateSwap {
         });
 
         ui.horizontal(|ui| {
-            ui.label(format!("Amount you want ({})", self.parent_chain.ticker()));
+            ui.label(format!(
+                "Amount you want ({})",
+                self.parent_chain.ticker()
+            ));
             ui.add(
                 TextEdit::singleline(&mut self.l1_amount)
                     .hint_text("e.g. 0.001"),
