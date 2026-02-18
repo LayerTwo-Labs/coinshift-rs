@@ -1515,13 +1515,12 @@ impl State {
         // L1 transaction uniqueness: do not allow an L1 tx already used by another swap
         if let Some(existing) =
             self.get_swap_by_l1_txid(rwtxn, &swap.parent_chain, &l1_txid)?
+            && existing.id != *swap_id
         {
-            if existing.id != *swap_id {
-                return Err(Error::L1TxidAlreadyUsed {
-                    swap_id: *swap_id,
-                    existing_swap_id: existing.id,
-                });
-            }
+            return Err(Error::L1TxidAlreadyUsed {
+                swap_id: *swap_id,
+                existing_swap_id: existing.id,
+            });
         }
 
         // Save the old l1_txid BEFORE updating the swap (needed for index deletion)

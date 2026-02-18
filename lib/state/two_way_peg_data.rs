@@ -555,22 +555,26 @@ fn connect_event(
 /// Enforces L1 transaction uniqueness: the same (parent_chain, l1_txid) must
 /// not be associated with more than one swap. Uses `get_swap_by_l1_txid` before
 /// accepting a new L1 tx.
+struct QueryAndUpdateSwapContext<'a> {
+    l1_recipient: &'a str,
+    l1_amount: bitcoin::Amount,
+    block_hash: BlockHash,
+    block_height: u32,
+}
+
 fn query_and_update_swap(
     state: &State,
     rwtxn: &mut RwTxn,
     rpc_config: &RpcConfig,
     swap: &mut Swap,
-    l1_recipient: &str,
-    l1_amount: bitcoin::Amount,
-    block_hash: BlockHash,
-    block_height: u32,
+    ctx: &QueryAndUpdateSwapContext<'_>,
 ) -> Result<bool, Error> {
     let client = ParentChainRpcClient::new(rpc_config.clone());
-    let amount_sats = l1_amount.to_sat();
+    let amount_sats = ctx.l1_amount.to_sat();
 
     // Find transactions matching address and amount
     let matches = client
-        .find_transactions_by_address_and_amount(l1_recipient, amount_sats)?;
+        .find_transactions_by_address_and_amount(ctx.l1_recipient, amount_sats)?;
 
     if matches.is_empty() {
         return Ok(false);
@@ -607,16 +611,15 @@ fn query_and_update_swap(
         // L1 transaction uniqueness: do not accept an L1 tx already used by another swap
         if let Some(existing) =
             state.get_swap_by_l1_txid(rwtxn, &swap.parent_chain, &l1_txid)?
+            && existing.id != swap.id
         {
-            if existing.id != swap.id {
-                tracing::info!(
-                    swap_id = %swap.id,
-                    existing_swap_id = %existing.id,
-                    l1_txid = %txid,
-                    "Rejecting L1 tx already associated with another swap"
-                );
-                return Ok(false);
-            }
+            tracing::info!(
+                swap_id = %swap.id,
+                existing_swap_id = %existing.id,
+                l1_txid = %txid,
+                "Rejecting L1 tx already associated with another swap"
+            );
+            return Ok(false);
         }
 
         // New L1 transaction detected
@@ -635,7 +638,7 @@ fn query_and_update_swap(
         swap.update_l1_txid(l1_txid);
 
         // Save the sidechain block reference where this validation occurred
-        swap.set_l1_txid_validation_block(block_hash, block_height);
+        swap.set_l1_txid_validation_block(ctx.block_hash, ctx.block_height);
 
         // Update state based on confirmations
         if *confirmations >= swap.required_confirmations {
@@ -785,16 +788,13 @@ fn process_coinshift_transactions(
             && let Some(get_rpc_config) = rpc_config_getter
             && let Some(rpc_config) = get_rpc_config(parent_chain_clone)
         {
-            match query_and_update_swap(
-                state,
-                rwtxn,
-                &rpc_config,
-                &mut swap,
+            let ctx = QueryAndUpdateSwapContext {
                 l1_recipient,
                 l1_amount,
                 block_hash,
                 block_height,
-            ) {
+            };
+            match query_and_update_swap(state, rwtxn, &rpc_config, &mut swap, &ctx) {
                 Ok(updated) => {
                     if updated {
                         tracing::info!(

@@ -11,6 +11,9 @@ use thiserror::Error;
 
 use crate::types::ParentChainType;
 
+/// Result of find_transactions_by_address_and_amount: (txid, confirmations, sender_address, blockheight).
+pub type AddressAmountMatch = (String, u32, String, Option<u32>);
+
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("HTTP request error: {0}")]
@@ -295,7 +298,7 @@ impl ParentChainRpcClient {
         &self,
         address: &str,
         amount_sats: u64,
-    ) -> Result<Vec<(String, u32, String, Option<u32>)>, Error> {
+    ) -> Result<Vec<AddressAmountMatch>, Error> {
         // Get all transactions for this address
         let txids = self.list_transactions(address)?;
         let mut matches = Vec::new();
