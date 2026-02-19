@@ -373,6 +373,7 @@ impl RpcServer for RpcServerImpl {
         swap_id: SwapId,
         l1_txid_hex: String,
         confirmations: u32,
+        l2_claimer_address: Option<Address>,
     ) -> RpcResult<()> {
         let l1_txid =
             SwapTxId::from_hex(&l1_txid_hex).map_err(custom_err_msg)?;
@@ -395,8 +396,6 @@ impl RpcServer for RpcServerImpl {
             .map_err(custom_err)?
             .ok_or_else(|| custom_err_msg("No tip height found"))?;
 
-        // TODO: Extract claimer address from L1 transaction
-        // For now, pass None (will be set when L1 transaction detection is implemented)
         self.app
             .node
             .state()
@@ -405,7 +404,8 @@ impl RpcServer for RpcServerImpl {
                 &swap_id,
                 l1_txid,
                 confirmations,
-                None,
+                None, // l1_claimer_address
+                l2_claimer_address,
                 block_hash,
                 block_height,
             )
@@ -496,10 +496,13 @@ impl RpcServer for RpcServerImpl {
             )));
         }
 
-        // Determine recipient: pre-specified swap uses swap.l2_recipient, open swap uses claimer address
-        let recipient =
-            swap.l2_recipient.or(l2_claimer_address).ok_or_else(|| {
-                custom_err_msg("Open swap requires l2_claimer_address")
+        // Determine recipient: pre-specified uses swap.l2_recipient; open uses stored or provided claimer address
+        let recipient = swap
+            .l2_recipient
+            .or(swap.l2_claimer_address)
+            .or(l2_claimer_address)
+            .ok_or_else(|| {
+                custom_err_msg("Open swap requires l2_claimer_address (or set when L1 tx was submitted)")
             })?;
 
         // Add locked outputs to wallet temporarily so they can be used for signing
@@ -520,6 +523,8 @@ impl RpcServer for RpcServerImpl {
 
         let accumulator =
             self.app.node.get_tip_accumulator().map_err(custom_err)?;
+        let l2_claimer_for_tx =
+            swap.l2_recipient.is_none().then_some(recipient);
         let tx = self
             .app
             .wallet
@@ -528,7 +533,7 @@ impl RpcServer for RpcServerImpl {
                 swap_id,
                 recipient,
                 locked_outputs,
-                l2_claimer_address, // Pass claimer address for open swaps
+                l2_claimer_for_tx,
             )
             .map_err(custom_err)?;
         let txid = tx.txid();

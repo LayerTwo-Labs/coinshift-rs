@@ -1,4 +1,10 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 use coinshift::{
     miner::{self, Miner},
@@ -37,6 +43,10 @@ pub enum Error {
     ModifyMemForest(#[from] coinshift::types::ModifyMemForestError),
     #[error("node error")]
     Node(#[source] Box<node::Error>),
+    #[error(
+        "Mainchain unreachable; mining requires the parentchain (mainchain) node to be up"
+    )]
+    MainchainUnreachable(#[source] Box<coinshift::types::proto::Error>),
     #[error("No CUSF mainchain wallet client")]
     NoCusfMainchainWalletClient,
     #[error("Failed to request mainchain ancestor info for {block_hash}")]
@@ -111,6 +121,9 @@ pub struct App {
     pub transaction: Arc<RwLock<Transaction>>,
     pub runtime: Arc<tokio::runtime::Runtime>,
     pub local_pool: LocalPoolHandle,
+    /// Set by the L1 sync task: true when the mainchain (parentchain for mining) is reachable.
+    /// Mining is only allowed when this is true so we can fetch blocks from the mainchain.
+    pub mainchain_reachable: Arc<AtomicBool>,
 }
 
 impl App {
@@ -137,8 +150,12 @@ impl App {
         }))
     }
 
-    /// Periodic task to sync L1 blocks for deposit scanning
-    async fn l1_sync_task(node: Arc<Node>) -> Result<(), Error> {
+    /// Periodic task to sync L1 blocks for deposit scanning.
+    /// Updates mainchain_reachable so the GUI and mine() can require mainchain to be up.
+    async fn l1_sync_task(
+        node: Arc<Node>,
+        mainchain_reachable: Arc<AtomicBool>,
+    ) -> Result<(), Error> {
         use futures::FutureExt;
         use std::time::Duration;
         const SYNC_INTERVAL: Duration = Duration::from_secs(10);
@@ -152,7 +169,7 @@ impl App {
             tokio::time::sleep(SYNC_INTERVAL).await;
             tracing::trace!("L1 sync task: checking for new L1 blocks");
 
-            // Get current L1 chain tip
+            // Get current L1 chain tip (mainchain must be up for mining and block sync)
             let l1_tip_hash = match node
                 .with_cusf_mainchain(|client| {
                     client
@@ -166,10 +183,12 @@ impl App {
                 .await
             {
                 Ok(hash) => {
+                    mainchain_reachable.store(true, Ordering::SeqCst);
                     tracing::trace!(l1_tip = %hash, "L1 sync task: got L1 chain tip");
                     hash
                 }
                 Err(err) => {
+                    mainchain_reachable.store(false, Ordering::SeqCst);
                     tracing::debug!(
                         error = %err,
                         "L1 sync task: Failed to get L1 chain tip (this is normal if mainchain is not available)"
@@ -290,11 +309,18 @@ impl App {
         }
     }
 
-    fn spawn_l1_sync_task(node: Arc<Node>) -> JoinHandle<()> {
-        spawn(Self::l1_sync_task(node).unwrap_or_else(|err| {
-            let err = anyhow::Error::from(err);
-            tracing::error!("L1 sync task error: {err:#}")
-        }))
+    fn spawn_l1_sync_task(
+        node: Arc<Node>,
+        mainchain_reachable: Arc<AtomicBool>,
+    ) -> JoinHandle<()> {
+        spawn(
+            Self::l1_sync_task(node, mainchain_reachable).unwrap_or_else(
+                |err| {
+                    let err = anyhow::Error::from(err);
+                    tracing::error!("L1 sync task error: {err:#}")
+                },
+            ),
+        )
     }
 
     /// Periodic task to check and update swap confirmations dynamically
@@ -470,6 +496,7 @@ impl App {
                                         swap.l1_txid.clone(),
                                         new_confirmations,
                                         None, // l1_claimer_address - not needed for confirmation updates
+                                        None, // l2_claimer_address - not changed on confirmation update
                                         block_hash,
                                         block_height,
                                     )
@@ -648,15 +675,20 @@ impl App {
 
         tracing::info!("Instantiating node struct");
         let node_start = std::time::Instant::now();
-        let node = Node::new(
-            &config.datadir,
-            config.net_addr,
+        let l1_rpc_config_path = dirs::data_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("coinshift")
+            .join("l1_rpc_configs.json");
+        let node_config = node::NodeConfig {
+            datadir: config.datadir.clone(),
+            bind_addr: config.net_addr,
             cusf_mainchain,
             cusf_mainchain_wallet,
-            config.network,
-            &runtime,
-            Some(Arc::new(wallet.clone())),
-        )?;
+            network: config.network,
+            wallet: Some(Arc::new(wallet.clone())),
+            l1_rpc_config_path: Some(l1_rpc_config_path),
+        };
+        let node = Node::new(node_config, &runtime)?;
         let node_elapsed = node_start.elapsed();
         tracing::info!(
             elapsed_secs = node_elapsed.as_secs_f64(),
@@ -738,9 +770,11 @@ impl App {
             Self::spawn_task(node.clone(), utxos.clone(), wallet.clone());
         tracing::info!("Wallet update task spawned");
 
-        // Spawn L1 sync task to periodically check for new deposits
+        // Spawn L1 sync task to periodically check for new deposits and mainchain reachability
         tracing::info!("Spawning L1 sync task for deposit scanning");
-        let _l1_sync_task = Self::spawn_l1_sync_task(node.clone());
+        let mainchain_reachable = Arc::new(AtomicBool::new(false));
+        let _l1_sync_task =
+            Self::spawn_l1_sync_task(node.clone(), mainchain_reachable.clone());
         tracing::info!("L1 sync task spawned");
 
         // Spawn swap confirmation check task to periodically update swap confirmations
@@ -766,6 +800,7 @@ impl App {
             })),
             runtime: Arc::new(runtime),
             local_pool,
+            mainchain_reachable,
         })
     }
 
@@ -861,10 +896,15 @@ impl App {
         let Some(miner) = self.miner.as_ref() else {
             return Err(Error::NoCusfMainchainWalletClient);
         };
+        // Mining requires the mainchain (parentchain) to be up so we can fetch blocks.
         let prev_main_hash = {
             let mut miner_write = miner.write().await;
-            let prev_main_hash =
-                miner_write.cusf_mainchain.get_chain_tip().await?.block_hash;
+            let prev_main_hash = miner_write
+                .cusf_mainchain
+                .get_chain_tip()
+                .await
+                .map_err(|e| Error::MainchainUnreachable(Box::new(e)))?
+                .block_hash;
             drop(miner_write);
             prev_main_hash
         };

@@ -245,13 +245,24 @@ pub fn validate_swap_claim(
     let expected_recipient = if let Some(recipient) = swap.l2_recipient {
         // Pre-specified swap: must go to specified recipient
         recipient
-    } else if let Some(claimer_addr) = l2_claimer_address {
-        // Open swap: must go to claimer's L2 address
-        *claimer_addr
     } else {
-        return Err(Error::InvalidTransaction(
-            "Open swap claim requires l2_claimer_address".to_string(),
-        ));
+        // Open swap
+        if let Some(stored_l2) = swap.l2_claimer_address {
+            // Claim only valid for the L2 address the filler declared when providing L1 tx details
+            if l2_claimer_address.as_ref() != Some(&stored_l2) {
+                return Err(Error::InvalidTransaction(
+                    "Open swap claim must use the L2 address declared when the L1 transaction was submitted".to_string(),
+                ));
+            }
+            stored_l2
+        } else if let Some(claimer_addr) = l2_claimer_address {
+            // No stored L2 (e.g. auto-detected L1 tx): accept claimer address from tx
+            *claimer_addr
+        } else {
+            return Err(Error::InvalidTransaction(
+                "Open swap claim requires l2_claimer_address".to_string(),
+            ));
+        }
     };
 
     let recipient_receives = transaction

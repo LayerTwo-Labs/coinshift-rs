@@ -114,7 +114,7 @@ async fn l1_txid_uniqueness_task(
     let fake_l1_txid_hex = "aa".repeat(32);
     sidechain
         .rpc_client
-        .update_swap_l1_txid(swap_id_a, fake_l1_txid_hex.clone(), 1)
+        .update_swap_l1_txid(swap_id_a, fake_l1_txid_hex.clone(), 1, None)
         .await?;
     sleep(std::time::Duration::from_millis(300)).await;
 
@@ -132,7 +132,7 @@ async fn l1_txid_uniqueness_task(
     // Assign the SAME L1 txid to the second swap — must fail (L1 txid already used)
     let err = sidechain
         .rpc_client
-        .update_swap_l1_txid(swap_id_b, fake_l1_txid_hex, 1)
+        .update_swap_l1_txid(swap_id_b, fake_l1_txid_hex, 1, None)
         .await
         .expect_err("update_swap_l1_txid for second swap should fail");
     let err_str = format!("{err:#}");

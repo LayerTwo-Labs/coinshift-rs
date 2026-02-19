@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::time::Duration;
+use std::{path::Path, time::Duration};
 use thiserror::Error;
 
 use crate::types::ParentChainType;
@@ -388,10 +388,81 @@ impl ParentChainRpcClient {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LocalRpcConfigFile {
+    url: String,
+    user: String,
+    password: String,
+}
+
+/// Load RPC config for a parent chain from a JSON file.
+///
+/// The file format is `{ "<ParentChainType>": { "url": "...", "user": "...", "password": "..." }, ... }`
+/// (e.g. the same format written by the GUI to `l1_rpc_configs.json`).
+pub fn load_rpc_config_from_path(
+    path: &Path,
+    parent_chain: ParentChainType,
+) -> Option<RpcConfig> {
+    let file_content = std::fs::read_to_string(path).ok()?;
+    let configs: std::collections::HashMap<
+        ParentChainType,
+        LocalRpcConfigFile,
+    > = serde_json::from_str(&file_content).ok()?;
+    let local = configs.get(&parent_chain)?;
+    Some(RpcConfig {
+        url: local.url.clone(),
+        user: local.user.clone(),
+        password: local.password.clone(),
+    })
+}
+
 /// Get RPC config for a parent chain
 /// This is a placeholder - in practice, this should access the GUI's stored config
 pub fn get_rpc_config(_parent_chain: ParentChainType) -> Option<RpcConfig> {
     // TODO: Access stored RPC config from GUI/app state
     // For now, return None to indicate no config available
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn load_rpc_config_from_path_missing_file_returns_none() {
+        let path = Path::new("/nonexistent/l1_rpc_configs.json");
+        assert!(
+            load_rpc_config_from_path(path, ParentChainType::Regtest).is_none()
+        );
+    }
+
+    #[test]
+    fn load_rpc_config_from_path_valid_file_returns_config() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("coinshift_l1_rpc_test.json");
+        let configs = serde_json::json!({
+            "Regtest": { "url": "http://127.0.0.1:18443", "user": "u", "password": "p" }
+        });
+        std::fs::write(&path, configs.to_string()).unwrap();
+        let cfg = load_rpc_config_from_path(&path, ParentChainType::Regtest);
+        drop(std::fs::remove_file(&path)); // best-effort cleanup
+        assert!(cfg.is_some());
+        let cfg = cfg.unwrap();
+        assert_eq!(cfg.url, "http://127.0.0.1:18443");
+        assert_eq!(cfg.user, "u");
+        assert_eq!(cfg.password, "p");
+    }
+
+    #[test]
+    fn load_rpc_config_from_path_wrong_chain_returns_none() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("coinshift_l1_rpc_test2.json");
+        let configs = serde_json::json!({
+            "Signet": { "url": "http://127.0.0.1:38332", "user": "u", "password": "p" }
+        });
+        std::fs::write(&path, configs.to_string()).unwrap();
+        let cfg = load_rpc_config_from_path(&path, ParentChainType::Regtest);
+        drop(std::fs::remove_file(&path)); // best-effort cleanup
+        assert!(cfg.is_none());
+    }
 }

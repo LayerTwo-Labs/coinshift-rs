@@ -220,13 +220,15 @@ pub trait Rpc {
     #[method(name = "reconstruct_swaps")]
     async fn reconstruct_swaps(&self) -> RpcResult<u32>;
 
-    /// Update swap L1 transaction ID (called when L1 transaction is detected)
+    /// Update swap L1 transaction ID (called when L1 transaction is detected).
+    /// For open swaps, pass l2_claimer_address so the claim is only valid for that address.
     #[method(name = "update_swap_l1_txid")]
     async fn update_swap_l1_txid(
         &self,
         swap_id: SwapId,
         l1_txid_hex: String,
         confirmations: u32,
+        l2_claimer_address: Option<Address>,
     ) -> RpcResult<()>;
 
     /// Get swap status

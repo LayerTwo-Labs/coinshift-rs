@@ -4,6 +4,7 @@ use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet},
     net::SocketAddr,
+    path::PathBuf,
     sync::Arc,
     time::Duration,
 };
@@ -32,9 +33,10 @@ use crate::{
         PeerConnectionMailboxError, PeerConnectionMessage, PeerInfoRx,
         PeerRequest, PeerResponse, PeerStateId, peer_message,
     },
+    parent_chain_rpc::RpcConfig,
     state::{self, State},
     types::{
-        BmmResult, Body, Header, MerkleRoot, Tip,
+        BmmResult, Body, Header, MerkleRoot, ParentChainType, Tip,
         proto::{self, mainchain},
     },
     util::join_set,
@@ -92,6 +94,7 @@ fn connect_tip_(
     header: &Header,
     body: &Body,
     two_way_peg_data: &mainchain::TwoWayPegData,
+    rpc_config_getter: Option<&dyn Fn(ParentChainType) -> Option<RpcConfig>>,
     wallet: Option<&crate::wallet::Wallet>,
 ) -> Result<(), Error> {
     let block_hash = header.hash();
@@ -116,7 +119,7 @@ fn connect_tip_(
     let () = state.connect_two_way_peg_data(
         rwtxn,
         two_way_peg_data,
-        None,
+        rpc_config_getter,
         wallet,
     )?;
     let accumulator = state.get_accumulator(rwtxn)?;
@@ -275,6 +278,7 @@ fn reorg_to_tip(
     mempool: &MemPool,
     state: &State,
     new_tip: Tip,
+    rpc_config_path: Option<&PathBuf>,
     wallet: Option<&crate::wallet::Wallet>,
 ) -> Result<bool, Error> {
     let mut rwtxn = env.write_txn().map_err(EnvError::from)?;
@@ -411,6 +415,17 @@ fn reorg_to_tip(
             }
             two_way_peg_data
         };
+        let rpc_config_getter: Option<
+            Box<dyn Fn(ParentChainType) -> Option<RpcConfig>>,
+        > = rpc_config_path.map(|path| {
+            let p = path.clone();
+            Box::new(move |chain: ParentChainType| {
+                crate::parent_chain_rpc::load_rpc_config_from_path(&p, chain)
+            }) as Box<dyn Fn(ParentChainType) -> Option<RpcConfig>>
+        });
+        let rpc_config_getter: Option<
+            &dyn Fn(ParentChainType) -> Option<RpcConfig>,
+        > = rpc_config_getter.as_ref().map(|b| b.as_ref());
         let () = connect_tip_(
             &mut rwtxn,
             archive,
@@ -419,6 +434,7 @@ fn reorg_to_tip(
             &header,
             &body,
             &two_way_peg_data,
+            rpc_config_getter,
             wallet,
         )?;
         let new_tip_hash = state.try_get_tip(&rwtxn)?.unwrap();
@@ -453,6 +469,9 @@ struct NetTaskContext {
     net: Net,
     state: State,
     wallet: Option<Arc<crate::wallet::Wallet>>,
+    /// Path to L1 RPC config JSON (e.g. l1_rpc_configs.json). When set, Coinshift
+    /// will query the swap target chain on each block connect to update swap state.
+    rpc_config_path: Option<PathBuf>,
 }
 
 /// Message indicating a tip that is ready to reorg to, with the address of the
@@ -1082,6 +1101,7 @@ impl NetTask {
                             &self.ctxt.mempool,
                             &self.ctxt.state,
                             new_tip,
+                            self.ctxt.rpc_config_path.as_ref(),
                             self.ctxt.wallet.as_deref(),
                         )
                     });
@@ -1307,6 +1327,7 @@ impl NetTaskHandle {
         peer_info_rx: PeerInfoRx,
         state: State,
         wallet: Option<Arc<crate::wallet::Wallet>>,
+        rpc_config_path: Option<PathBuf>,
     ) -> Self {
         let ctxt = NetTaskContext {
             env,
@@ -1316,6 +1337,7 @@ impl NetTaskHandle {
             net,
             state,
             wallet,
+            rpc_config_path,
         };
         let (
             forward_mainchain_task_request_tx,
