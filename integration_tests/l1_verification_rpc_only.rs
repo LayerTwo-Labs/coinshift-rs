@@ -93,7 +93,7 @@ async fn l1_verification_rpc_only_task(
     let fake_l1_txid_hex = "cc".repeat(32);
     sidechain
         .rpc_client
-        .update_swap_l1_txid(swap_id, fake_l1_txid_hex.clone(), 1)
+        .update_swap_l1_txid(swap_id, fake_l1_txid_hex.clone(), 1, None)
         .await?;
     sleep(std::time::Duration::from_millis(300)).await;
 

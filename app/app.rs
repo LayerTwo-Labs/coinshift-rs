@@ -1,8 +1,8 @@
 use std::{
     collections::HashMap,
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
 };
 
@@ -43,7 +43,9 @@ pub enum Error {
     ModifyMemForest(#[from] coinshift::types::ModifyMemForestError),
     #[error("node error")]
     Node(#[source] Box<node::Error>),
-    #[error("Mainchain unreachable; mining requires the parentchain (mainchain) node to be up")]
+    #[error(
+        "Mainchain unreachable; mining requires the parentchain (mainchain) node to be up"
+    )]
     MainchainUnreachable(#[source] Box<coinshift::types::proto::Error>),
     #[error("No CUSF mainchain wallet client")]
     NoCusfMainchainWalletClient,
@@ -311,10 +313,14 @@ impl App {
         node: Arc<Node>,
         mainchain_reachable: Arc<AtomicBool>,
     ) -> JoinHandle<()> {
-        spawn(Self::l1_sync_task(node, mainchain_reachable).unwrap_or_else(|err| {
-            let err = anyhow::Error::from(err);
-            tracing::error!("L1 sync task error: {err:#}")
-        }))
+        spawn(
+            Self::l1_sync_task(node, mainchain_reachable).unwrap_or_else(
+                |err| {
+                    let err = anyhow::Error::from(err);
+                    tracing::error!("L1 sync task error: {err:#}")
+                },
+            ),
+        )
     }
 
     /// Periodic task to check and update swap confirmations dynamically
@@ -490,6 +496,7 @@ impl App {
                                         swap.l1_txid.clone(),
                                         new_confirmations,
                                         None, // l1_claimer_address - not needed for confirmation updates
+                                        None, // l2_claimer_address - not changed on confirmation update
                                         block_hash,
                                         block_height,
                                     )

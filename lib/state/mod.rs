@@ -1487,7 +1487,8 @@ impl State {
 
     /// Update swap L1 transaction ID and state
     /// Called when a coinshift transaction is detected on L1
-    /// For open swaps, l1_claimer_address should be the address of the person who sent the L1 transaction
+    /// For open swaps, l1_claimer_address should be the address of the person who sent the L1 transaction;
+    /// l2_claimer_address is the L2 address the filler declared (claim only valid for this address).
     /// block_hash and block_height are the sidechain block where this update occurs
     #[allow(clippy::too_many_arguments)]
     pub fn update_swap_l1_txid(
@@ -1497,6 +1498,7 @@ impl State {
         l1_txid: SwapTxId,
         confirmations: u32,
         l1_claimer_address: Option<String>, // For open swaps
+        l2_claimer_address: Option<Address>, // For open swaps: claim only valid for this L2 address
         block_hash: BlockHash,
         block_height: u32,
     ) -> Result<(), Error> {
@@ -1531,6 +1533,11 @@ impl State {
             swap.update_l1_transaction(l1_txid.clone(), claimer_addr);
         } else {
             swap.update_l1_txid(l1_txid.clone());
+        }
+
+        // Store L2 claimer address when provided (open swaps: claim only valid for this address)
+        if let Some(l2_addr) = l2_claimer_address {
+            swap.set_l2_claimer_address(l2_addr);
         }
 
         // Save the sidechain block reference where this validation occurred

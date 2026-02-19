@@ -490,11 +490,12 @@ async fn swap_creation_open_fill_task(
     wait_for_locked_utxos(&sidechain.rpc_client, swap_id, SWAP_L2_AMOUNT)
         .await?;
 
-    // Simulate detecting the L1 tx: mark as confirmed so swap moves to ReadyToClaim
+    // Simulate Bob filling the swap: provide L1 txid and his L2 address (claim only valid for this address)
+    let claimer_address = sidechain.rpc_client.get_new_address().await?;
     let fake_l1_txid_hex = "11".repeat(32);
     sidechain
         .rpc_client
-        .update_swap_l1_txid(swap_id, fake_l1_txid_hex.clone(), 1)
+        .update_swap_l1_txid(swap_id, fake_l1_txid_hex.clone(), 1, Some(claimer_address))
         .await?;
     // Allow wallet/state tasks to catch up
     sleep(std::time::Duration::from_millis(500)).await;
@@ -502,9 +503,9 @@ async fn swap_creation_open_fill_task(
         .await?;
 
     tracing::info!(
-        "Open swap state updated to ReadyToClaim after L1 TXID update. swap_id={}, fake_l1_txid={}",
+        "Open swap state updated to ReadyToClaim with L2 claimer address. swap_id={}, claimer={}",
         swap_id,
-        fake_l1_txid_hex
+        claimer_address
     );
     let status_ready = sidechain
         .rpc_client
@@ -516,12 +517,16 @@ async fn swap_creation_open_fill_task(
         "Swap not ReadyToClaim after L1 update: {:?}",
         status_ready.state
     );
+    anyhow::ensure!(
+        status_ready.l2_claimer_address == Some(claimer_address),
+        "Stored l2_claimer_address should match: {:?}",
+        status_ready.l2_claimer_address
+    );
 
-    // Claim the swap as a specific L2 address
-    let claimer_address = sidechain.rpc_client.get_new_address().await?;
+    // Claim the swap: recipient is taken from stored l2_claimer_address (can pass None)
     let claim_txid = sidechain
         .rpc_client
-        .claim_swap(swap_id, Some(claimer_address))
+        .claim_swap(swap_id, None)
         .await?;
     tracing::info!(swap_id = %swap_id, claim_txid = %claim_txid, "Claimed swap");
 

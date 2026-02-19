@@ -94,7 +94,7 @@ async fn confirmations_block_inclusion_task(
     let fake_l1_txid_hex = "bb".repeat(32);
     let err = sidechain
         .rpc_client
-        .update_swap_l1_txid(swap_id, fake_l1_txid_hex.clone(), 0)
+        .update_swap_l1_txid(swap_id, fake_l1_txid_hex.clone(), 0, None)
         .await
         .expect_err("update_swap_l1_txid with confirmations=0 should fail");
     let err_str = format!("{err:#}");
@@ -119,7 +119,7 @@ async fn confirmations_block_inclusion_task(
     // Accept confirmations >= 1
     sidechain
         .rpc_client
-        .update_swap_l1_txid(swap_id, fake_l1_txid_hex, 1)
+        .update_swap_l1_txid(swap_id, fake_l1_txid_hex, 1, None)
         .await?;
     sleep(std::time::Duration::from_millis(300)).await;
     let status_ready = sidechain

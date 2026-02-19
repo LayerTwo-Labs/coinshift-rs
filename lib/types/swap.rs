@@ -393,6 +393,10 @@ pub struct Swap {
     /// Address of the person who sent the L1 transaction (the claimer)
     /// Set when L1 transaction is detected
     pub l1_claimer_address: Option<String>,
+    /// L2 address that the filler (Bob) declared when providing L1 tx details.
+    /// For open swaps, the claim is only valid if it pays this address.
+    #[serde(default)]
+    pub l2_claimer_address: Option<Address>,
     pub created_at_height: u32,
     pub expires_at_height: Option<u32>,
     /// Sidechain block hash where L1 txid was validated via parent chain RPC
@@ -424,6 +428,7 @@ impl BorshSerialize for Swap {
             writer,
         )?;
         BorshSerialize::serialize(&self.l1_claimer_address, writer)?;
+        BorshSerialize::serialize(&self.l2_claimer_address, writer)?;
         BorshSerialize::serialize(&self.created_at_height, writer)?;
         BorshSerialize::serialize(&self.expires_at_height, writer)?;
         BorshSerialize::serialize(
@@ -458,6 +463,7 @@ impl BorshDeserialize for Swap {
             l1_amount: Option::<u64>::deserialize_reader(reader)?
                 .map(bitcoin::Amount::from_sat),
             l1_claimer_address: BorshDeserialize::deserialize_reader(reader)?,
+            l2_claimer_address: BorshDeserialize::deserialize_reader(reader)?,
             created_at_height: BorshDeserialize::deserialize_reader(reader)?,
             expires_at_height: BorshDeserialize::deserialize_reader(reader)?,
             l1_txid_validated_at_block_hash:
@@ -498,6 +504,7 @@ impl Swap {
             l1_recipient_address,
             l1_amount,
             l1_claimer_address: None,
+            l2_claimer_address: None,
             created_at_height,
             expires_at_height,
             l1_txid_validated_at_block_hash: None,
@@ -513,7 +520,7 @@ impl Swap {
         self.l1_txid = l1_txid;
     }
 
-    /// Update swap with L1 transaction and claimer address
+    /// Update swap with L1 transaction and claimer address (L1 address)
     pub fn update_l1_transaction(
         &mut self,
         l1_txid: SwapTxId,
@@ -521,6 +528,12 @@ impl Swap {
     ) {
         self.l1_txid = l1_txid;
         self.l1_claimer_address = Some(l1_claimer_address);
+    }
+
+    /// Set the L2 address that the claimer declared when filling L1 tx details.
+    /// The claim will only be valid if it pays this address.
+    pub fn set_l2_claimer_address(&mut self, l2_address: Address) {
+        self.l2_claimer_address = Some(l2_address);
     }
 
     /// Set the sidechain block reference where L1 txid was validated
