@@ -56,6 +56,8 @@ pub enum Command {
     ListPeers,
     /// List all UTXOs
     ListUtxos,
+    /// Recover wallet from mnemonic phrase (sets seed, then shows addresses and balance)
+    RecoverFromMnemonic { mnemonic: String },
     /// Reconstruct all swaps from the blockchain
     ReconstructSwaps,
     /// Attempt to mine a sidechain block
@@ -196,6 +198,18 @@ where
         Command::ListUtxos => {
             let utxos = rpc_client.list_utxos().await?;
             serde_json::to_string_pretty(&utxos)?
+        }
+        Command::RecoverFromMnemonic { mnemonic } => {
+            rpc_client.set_seed_from_mnemonic(mnemonic).await?;
+            let addresses = rpc_client.get_wallet_addresses().await?;
+            let balance = rpc_client.balance().await?;
+            let addrs_json = serde_json::to_string_pretty(&addresses)?;
+            format!(
+                "Recovery complete.\nAddresses:\n{}\nBalance: total {} sats, available {} sats",
+                addrs_json,
+                balance.total.to_sat(),
+                balance.available.to_sat()
+            )
         }
         Command::ReconstructSwaps => {
             let count = rpc_client.reconstruct_swaps().await?;
