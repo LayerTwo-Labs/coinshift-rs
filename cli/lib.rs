@@ -4,9 +4,17 @@ use clap::{Parser, Subcommand};
 use http::HeaderMap;
 use jsonrpsee::{core::client::ClientT, http_client::HttpClientBuilder};
 
-use coinshift::types::{Address, ParentChainType, Txid};
+use coinshift::types::{Address, ParentChainType, SwapId, Txid};
 use coinshift_app_rpc_api::RpcClient;
 use tracing_subscriber::{filter::Targets, layer::SubscriberExt as _};
+
+fn parse_swap_id(s: &str) -> anyhow::Result<SwapId> {
+    let bytes = hex::decode(s).map_err(|e| anyhow::anyhow!("invalid swap_id hex: {}", e))?;
+    let arr: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("swap_id must be 32 bytes (64 hex chars)"))?;
+    Ok(SwapId(arr))
+}
 
 fn parse_parent_chain(s: &str) -> anyhow::Result<ParentChainType> {
     match s.to_lowercase().as_str() {
@@ -78,6 +86,13 @@ pub enum Command {
     GetWalletUtxos,
     /// Get the current block count
     GetBlockcount,
+    /// Claim a swap (after L1 has required confirmations). For open swaps, pass l2_claimer_address.
+    ClaimSwap {
+        #[arg(long, value_parser = parse_swap_id)]
+        swap_id: SwapId,
+        #[arg(long)]
+        l2_claimer_address: Option<Address>,
+    },
     /// Get the height of the latest failed withdrawal bundle
     LatestFailedWithdrawalBundleHeight,
     /// List peers
@@ -113,6 +128,17 @@ pub enum Command {
         value_sats: u64,
         #[arg(long)]
         fee_sats: u64,
+    },
+    /// Update swap with L1 txid and confirmation count (for open swaps, pass l2_claimer_address).
+    UpdateSwapL1Txid {
+        #[arg(long, value_parser = parse_swap_id)]
+        swap_id: SwapId,
+        #[arg(long)]
+        l1_txid_hex: String,
+        #[arg(long)]
+        confirmations: u32,
+        #[arg(long)]
+        l2_claimer_address: Option<Address>,
     },
     /// Initiate a withdrawal to the specified mainchain address
     Withdraw {
@@ -184,6 +210,13 @@ where
                 )
                 .await?;
             format!("Swap created: id={} txid={}", swap_id, txid)
+        }
+        Command::ClaimSwap {
+            swap_id,
+            l2_claimer_address,
+        } => {
+            let txid = rpc_client.claim_swap(swap_id, l2_claimer_address).await?;
+            format!("Swap claimed: txid={}", txid)
         }
         Command::CreateDeposit {
             address,
@@ -302,6 +335,22 @@ where
         } => {
             let txid = rpc_client.transfer(dest, value_sats, fee_sats).await?;
             format!("{txid}")
+        }
+        Command::UpdateSwapL1Txid {
+            swap_id,
+            l1_txid_hex,
+            confirmations,
+            l2_claimer_address,
+        } => {
+            rpc_client
+                .update_swap_l1_txid(
+                    swap_id,
+                    l1_txid_hex,
+                    confirmations,
+                    l2_claimer_address,
+                )
+                .await?;
+            format!("Swap {} updated with L1 txid and confirmations", swap_id)
         }
         Command::Withdraw {
             mainchain_address,
