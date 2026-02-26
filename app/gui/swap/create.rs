@@ -19,7 +19,10 @@ pub struct CreateSwap {
 impl Default for CreateSwap {
     fn default() -> Self {
         let supported = parent_chain_rpc::supported_l1_parent_chain_types();
-        let first = supported.first().copied().unwrap_or(ParentChainType::Signet);
+        let first = supported
+            .first()
+            .copied()
+            .unwrap_or(ParentChainType::Signet);
         Self {
             parent_chain: first,
             l1_recipient_address: String::new(),
@@ -62,7 +65,9 @@ impl CreateSwap {
                     for chain in supported {
                         let option_label = match chain {
                             ParentChainType::Signet => "Bitcoin Signet (sBTC)",
-                            ParentChainType::BCH => "Bitcoin Cash Testnet 4 (BCH)",
+                            ParentChainType::BCH => {
+                                "Bitcoin Cash Testnet 4 (BCH)"
+                            }
                             _ => continue,
                         };
                         ui.selectable_value(

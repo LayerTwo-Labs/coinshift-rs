@@ -39,7 +39,10 @@ pub struct L1Config {
 impl Default for L1Config {
     fn default() -> Self {
         let supported = parent_chain_rpc::supported_l1_parent_chain_types();
-        let first = supported.first().copied().unwrap_or(ParentChainType::Signet);
+        let first = supported
+            .first()
+            .copied()
+            .unwrap_or(ParentChainType::Signet);
         Self {
             selected_parent_chain: first,
             rpc_url: String::new(),
@@ -117,9 +120,10 @@ impl L1Config {
 
     fn save(&mut self, _ctx: &egui::Context) {
         // Only save predefined config for the selected chain
-        let config = if let Some((_, rpc)) = parent_chain_rpc::supported_l1_configs()
-            .into_iter()
-            .find(|(c, _)| *c == self.selected_parent_chain)
+        let config = if let Some((_, rpc)) =
+            parent_chain_rpc::supported_l1_configs()
+                .into_iter()
+                .find(|(c, _)| *c == self.selected_parent_chain)
         {
             RpcConfig {
                 url: rpc.url,
@@ -273,7 +277,9 @@ impl L1Config {
                     for chain in supported {
                         let option_label = match chain {
                             ParentChainType::Signet => "Bitcoin Signet (sBTC)",
-                            ParentChainType::BCH => "Bitcoin Cash Testnet 4 (BCH)",
+                            ParentChainType::BCH => {
+                                "Bitcoin Cash Testnet 4 (BCH)"
+                            }
                             _ => continue,
                         };
                         ui.selectable_value(

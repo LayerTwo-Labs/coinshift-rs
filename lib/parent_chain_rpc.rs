@@ -24,7 +24,9 @@ pub enum Error {
     #[error("Transaction not found")]
     TransactionNotFound,
     /// Node's chain type does not match expected (e.g. expected Signet, got main)
-    #[error("Node chain mismatch: expected {expected:?}, node reported chain \"{chain}\"")]
+    #[error(
+        "Node chain mismatch: expected {expected:?}, node reported chain \"{chain}\""
+    )]
     ChainMismatch {
         expected: ParentChainType,
         chain: String,
@@ -462,7 +464,7 @@ pub fn detect_chain_type(
             return Err(Error::ChainMismatch {
                 expected: ParentChainType::Signet, // arbitrary for this error
                 chain: chain.clone(),
-            })
+            });
         }
     };
     Ok((detected, chain))
@@ -474,14 +476,12 @@ pub fn is_supported_l1_config(
     parent_chain: ParentChainType,
     config: &RpcConfig,
 ) -> bool {
-    supported_l1_configs()
-        .into_iter()
-        .any(|(c, rpc)| {
-            c == parent_chain
-                && rpc.url == config.url
-                && rpc.user == config.user
-                && rpc.password == config.password
-        })
+    supported_l1_configs().into_iter().any(|(c, rpc)| {
+        c == parent_chain
+            && rpc.url == config.url
+            && rpc.user == config.user
+            && rpc.password == config.password
+    })
 }
 
 /// Write or merge L1 config file with predefined configs for the given chains.
@@ -538,11 +538,13 @@ pub fn validate_l1_config_file(path: &Path) -> Result<(), Error> {
         Ok(c) => c,
         Err(_) => return Ok(()), // no file or unreadable: no config to validate
     };
-    let configs: std::collections::HashMap<ParentChainType, LocalRpcConfigFile> =
-        match serde_json::from_str(&file_content) {
-            Ok(c) => c,
-            Err(_) => return Ok(()), // invalid JSON: will be overwritten when user saves
-        };
+    let configs: std::collections::HashMap<
+        ParentChainType,
+        LocalRpcConfigFile,
+    > = match serde_json::from_str(&file_content) {
+        Ok(c) => c,
+        Err(_) => return Ok(()), // invalid JSON: will be overwritten when user saves
+    };
     for (parent_chain, local) in configs {
         let rpc = RpcConfig {
             url: local.url,
@@ -681,9 +683,6 @@ mod tests {
         std::fs::write(&path, configs.to_string()).unwrap();
         let result = validate_l1_config_file(&path);
         drop(std::fs::remove_file(&path)); // best-effort cleanup
-        assert!(matches!(
-            result,
-            Err(Error::UnsupportedL1Config)
-        ));
+        assert!(matches!(result, Err(Error::UnsupportedL1Config)));
     }
 }

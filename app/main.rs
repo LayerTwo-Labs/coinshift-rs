@@ -206,7 +206,10 @@ fn l1_config_path() -> PathBuf {
         .join("l1_rpc_configs.json")
 }
 
-fn write_l1_config_from_flags(l1_signet: bool, l1_bch_testnet4: bool) -> anyhow::Result<()> {
+fn write_l1_config_from_flags(
+    l1_signet: bool,
+    l1_bch_testnet4: bool,
+) -> anyhow::Result<()> {
     let path = l1_config_path();
     let mut chains = Vec::new();
     if l1_signet {
