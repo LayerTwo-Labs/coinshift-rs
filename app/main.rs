@@ -1,6 +1,8 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use clap::Parser as _;
+use coinshift::parent_chain_rpc;
+use coinshift::types::ParentChainType;
 use mimalloc::MiMalloc;
 use tokio::{signal::ctrl_c, sync::oneshot};
 use tracing_subscriber::{
@@ -175,9 +177,9 @@ fn set_tracing_subscriber(
 }
 
 fn run_egui_app(
-    config: &crate::cli::Config,
+    config: crate::cli::Config,
     line_buffer: LineBuffer,
-    app: Result<crate::app::App, crate::app::Error>,
+    app_result: Result<crate::app::App, crate::app::Error>,
 ) -> Result<(), eframe::Error> {
     let native_options = eframe::NativeOptions::default();
     let rpc_addr = url::Url::parse(&format!("http://{}", config.rpc_addr))
@@ -187,7 +189,8 @@ fn run_egui_app(
         native_options,
         Box::new(move |cc| {
             Ok(Box::new(gui::EguiApp::new(
-                app.ok(),
+                app_result,
+                config,
                 cc,
                 line_buffer,
                 rpc_addr,
@@ -196,11 +199,67 @@ fn run_egui_app(
     )
 }
 
+fn l1_config_path() -> PathBuf {
+    dirs::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("coinshift")
+        .join("l1_rpc_configs.json")
+}
+
+fn write_l1_config_from_flags(
+    l1_signet: bool,
+    l1_bch_testnet4: bool,
+) -> anyhow::Result<()> {
+    let path = l1_config_path();
+    let mut chains = Vec::new();
+    if l1_signet {
+        chains.push(ParentChainType::Signet);
+    }
+    if l1_bch_testnet4 {
+        chains.push(ParentChainType::BCH);
+    }
+    parent_chain_rpc::write_l1_config_file(&path, &chains)?;
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
     // Configure the allocator before Tokio spins up worker threads.
     configure_mimalloc();
     let cli = cli::Cli::parse();
-    let config = cli.get_config()?;
+
+    // Handle init subcommand: write L1 config and exit
+    if let Some(cli::AppSubcommand::Init {
+        l1_signet,
+        l1_bch_testnet4,
+    }) = &cli.command
+    {
+        let path = l1_config_path();
+        let mut chains = Vec::new();
+        if *l1_signet {
+            chains.push(ParentChainType::Signet);
+        }
+        if *l1_bch_testnet4 {
+            chains.push(ParentChainType::BCH);
+        }
+        parent_chain_rpc::write_l1_config_file(&path, &chains)?;
+        tracing_subscriber::fmt()
+            .with_writer(std::io::stdout)
+            .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
+            .with_target(false)
+            .init();
+        tracing::info!(
+            "L1 config written to {} (Signet: {}, BCH Testnet4: {})",
+            path.display(),
+            l1_signet,
+            l1_bch_testnet4
+        );
+        return Ok(());
+    }
+
+    if cli.run.l1_signet || cli.run.l1_bch_testnet4 {
+        write_l1_config_from_flags(cli.run.l1_signet, cli.run.l1_bch_testnet4)?;
+    }
+    let config = cli.run.get_config()?;
     let (line_buffer, _rolling_log_guard) = set_tracing_subscriber(
         config.log_dir.as_deref(),
         config.log_level,
@@ -226,7 +285,8 @@ fn main() -> anyhow::Result<()> {
 
     if !config.headless {
         // For GUI mode we want the GUI to start, even if the app fails to start.
-        return run_egui_app(&config, line_buffer, app)
+        // User can update L1 config in the L1 Config pane and retry startup.
+        return run_egui_app(config, line_buffer, app)
             .map_err(|e| anyhow::anyhow!("failed to run egui app: {e:#}"));
     }
 

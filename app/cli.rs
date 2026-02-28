@@ -5,7 +5,7 @@ use std::{
     sync::LazyLock,
 };
 
-use clap::{Arg, Parser};
+use clap::{Arg, Parser, Subcommand};
 use coinshift::types::{Network, THIS_SIDECHAIN};
 
 use crate::util::saturating_pred_level;
@@ -95,9 +95,32 @@ impl clap::Args for DatadirArg {
     }
 }
 
+/// Optional subcommand: init writes L1 config and exits.
+#[derive(Clone, Debug, Subcommand)]
+pub(super) enum AppSubcommand {
+    /// Write L1 RPC config (Bitcoin Signet and/or Bitcoin Cash Testnet4) and exit.
+    /// Does not start the app. Use before first run or to update L1 config from CLI.
+    Init {
+        /// Enable Bitcoin Signet (predefined: localhost:38332)
+        #[arg(long)]
+        l1_signet: bool,
+        /// Enable Bitcoin Cash Testnet4 (predefined: 173.230.135.236:28332)
+        #[arg(long)]
+        l1_bch_testnet4: bool,
+    },
+}
+
 #[derive(Clone, Debug, Parser)]
 #[command(author, version, about, long_about = None)]
 pub(super) struct Cli {
+    #[command(flatten)]
+    pub(super) run: RunArgs,
+    #[command(subcommand)]
+    pub(super) command: Option<AppSubcommand>,
+}
+
+#[derive(Clone, Debug, Parser)]
+pub(super) struct RunArgs {
     /// Data directory for storing blockchain and wallet data
     #[command(flatten)]
     datadir: DatadirArg,
@@ -136,6 +159,13 @@ pub(super) struct Cli {
     /// Socket address to host the RPC server
     #[arg(default_value_t = DEFAULT_RPC_ADDR, long, short)]
     rpc_addr: SocketAddr,
+
+    /// Enable Bitcoin Signet in L1 config before start (predefined: localhost:38332)
+    #[arg(long)]
+    pub(super) l1_signet: bool,
+    /// Enable Bitcoin Cash Testnet4 in L1 config before start (predefined: 173.230.135.236:28332)
+    #[arg(long)]
+    pub(super) l1_bch_testnet4: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -153,7 +183,7 @@ pub struct Config {
     pub rpc_addr: SocketAddr,
 }
 
-impl Cli {
+impl RunArgs {
     pub fn get_config(self) -> anyhow::Result<Config> {
         let log_dir = match self.log_dir {
             None => {

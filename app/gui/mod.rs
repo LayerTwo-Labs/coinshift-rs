@@ -5,7 +5,13 @@ use eframe::egui::{self, RichText};
 use strum::{EnumIter, IntoEnumIterator};
 use util::{BITCOIN_LOGO_FA, BITCOIN_ORANGE, show_btc_amount};
 
-use crate::{app::App, line_buffer::LineBuffer, util::PromiseStream};
+use crate::{
+    app::{self, App},
+    cli::Config,
+    line_buffer::LineBuffer,
+    rpc_server,
+    util::PromiseStream,
+};
 
 mod block_explorer;
 mod coins;
@@ -39,6 +45,7 @@ pub struct EguiApp {
     block_explorer: BlockExplorer,
     bottom_panel: BottomPanel,
     coins: Coins,
+    config: Config,
     console_logs: ConsoleLogs,
     l1_config: L1Config,
     mempool_explorer: MemPoolExplorer,
@@ -47,6 +54,8 @@ pub struct EguiApp {
     set_seed: SetSeed,
     swap: Swap,
     tab: Tab,
+    /// When app failed to start, the error to show and allow retry after fixing L1 config.
+    startup_error: Option<String>,
     withdrawals: Withdrawals,
 }
 
@@ -109,6 +118,15 @@ impl BottomPanel {
         Self {
             initialized,
             balance: None,
+        }
+    }
+
+    /// Replace the app (e.g. after retry startup). MUST be run from within a tokio runtime.
+    fn set_app(&mut self, app: Option<App>) {
+        self.initialized = app.map(BottomPanelInitialized::new);
+        self.balance = None;
+        if self.initialized.is_some() {
+            tracing::info!("Initializing balance loading (after retry)");
         }
     }
 
@@ -222,15 +240,22 @@ impl BottomPanel {
 
 impl EguiApp {
     pub fn new(
-        app: Option<App>,
+        app_result: Result<App, app::Error>,
+        config: Config,
         cc: &eframe::CreationContext<'_>,
         logs_capture: LineBuffer,
         rpc_addr: url::Url,
     ) -> Self {
+        let (app, startup_error) = match app_result {
+            Ok(a) => (Some(a), None),
+            Err(e) => (None, Some(e.to_string())),
+        };
+        let tab = if app.is_none() {
+            Tab::L1Config
+        } else {
+            Tab::default()
+        };
         // Customize egui here with cc.egui_ctx.set_fonts and cc.egui_ctx.set_visuals.
-        // Restore app state using cc.storage (requires the "persistence" feature).
-        // Use the cc.gl (a glow::Context) to create graphics shaders and buffers that you can use
-        // for e.g. egui::PaintCallback.
         cc.egui_ctx.set_fonts(FONT_DEFINITIONS.clone());
         let bottom_panel = BottomPanel::new(app.clone());
         let coins = Coins::new(app.as_ref());
@@ -247,6 +272,7 @@ impl EguiApp {
             block_explorer: BlockExplorer::new(height),
             bottom_panel,
             coins,
+            config,
             console_logs,
             l1_config,
             mempool_explorer: MemPoolExplorer::default(),
@@ -254,7 +280,8 @@ impl EguiApp {
             parent_chain,
             set_seed: SetSeed::default(),
             swap,
-            tab: Tab::default(),
+            tab,
+            startup_error,
             withdrawals: Withdrawals::default(),
         }
     }
@@ -286,30 +313,81 @@ impl eframe::App for EguiApp {
             });
             egui::TopBottomPanel::bottom("bottom_panel")
                 .show(ctx, |ui| self.bottom_panel.show(&mut self.miner, ui));
-            egui::CentralPanel::default().show(ctx, |ui| match self.tab {
-                Tab::ParentChain => {
-                    self.parent_chain.show(self.app.as_ref(), ui)
+            egui::CentralPanel::default().show(ctx, |ui| {
+                // When startup failed, show error banner and retry when on L1 Config
+                let startup_error_msg = self.startup_error.clone();
+                if let Some(ref err) = startup_error_msg {
+                    ui.horizontal(|ui| {
+                        ui.colored_label(
+                            egui::Color32::RED,
+                            "Startup failed. Update L1 Config below, then retry.",
+                        );
+                        if ui.button("Retry startup").clicked() {
+                            match App::new(&self.config) {
+                                Ok(app) => {
+                                    let app_for_rpc = app.clone();
+                                    let rpc_addr = self.config.rpc_addr;
+                                    app.runtime.spawn(async move {
+                                        tracing::info!(
+                                            "starting RPC server at `{}`",
+                                            rpc_addr
+                                        );
+                                        if let Err(err) =
+                                            rpc_server::run_server(
+                                                app_for_rpc,
+                                                rpc_addr,
+                                            )
+                                            .await
+                                        {
+                                            tracing::error!(
+                                                "RPC server error: {err:#}"
+                                            );
+                                        }
+                                    });
+                                    self.app = Some(app.clone());
+                                    self.bottom_panel.set_app(Some(app));
+                                    self.startup_error = None;
+                                    self.tab = Tab::default();
+                                }
+                                Err(e) => {
+                                    self.startup_error =
+                                        Some(e.to_string());
+                                }
+                            }
+                        }
+                    });
+                    ui.add_space(4.0);
+                    ui.colored_label(
+                        egui::Color32::DARK_RED,
+                        format!("Error: {err}"),
+                    );
+                    ui.add_space(8.0);
                 }
-                Tab::Coins => {
-                    self.coins.show(self.app.as_ref(), ui);
-                }
-                Tab::Swaps => {
-                    self.swap.show(self.app.as_ref(), ui);
-                }
-                Tab::MemPoolExplorer => {
-                    self.mempool_explorer.show(self.app.as_ref(), ui);
-                }
-                Tab::BlockExplorer => {
-                    self.block_explorer.show(self.app.as_ref(), ui);
-                }
-                Tab::Withdrawals => {
-                    self.withdrawals.show(self.app.as_ref(), ui);
-                }
-                Tab::L1Config => {
-                    self.l1_config.show(ctx, ui);
-                }
-                Tab::ConsoleLogs => {
-                    self.console_logs.show(self.app.as_ref(), ui);
+                match self.tab {
+                    Tab::ParentChain => {
+                        self.parent_chain.show(self.app.as_ref(), ui)
+                    }
+                    Tab::Coins => {
+                        self.coins.show(self.app.as_ref(), ui);
+                    }
+                    Tab::Swaps => {
+                        self.swap.show(self.app.as_ref(), ui);
+                    }
+                    Tab::MemPoolExplorer => {
+                        self.mempool_explorer.show(self.app.as_ref(), ui);
+                    }
+                    Tab::BlockExplorer => {
+                        self.block_explorer.show(self.app.as_ref(), ui);
+                    }
+                    Tab::Withdrawals => {
+                        self.withdrawals.show(self.app.as_ref(), ui);
+                    }
+                    Tab::L1Config => {
+                        self.l1_config.show(ctx, ui);
+                    }
+                    Tab::ConsoleLogs => {
+                        self.console_logs.show(self.app.as_ref(), ui);
+                    }
                 }
             });
         }

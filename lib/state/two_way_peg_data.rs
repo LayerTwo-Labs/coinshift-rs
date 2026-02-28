@@ -776,8 +776,10 @@ fn process_coinshift_transactions(
         // the swap target chain (swap.parent_chain). If no RPC is configured here,
         // we skip L1 lookup and the swap stays Pending until RPC is set or the user
         // manually updates via update_swap_l1_txid.
-        // Query L1 blockchain for matching transactions if RPC config is available
-        // Clone values to avoid borrow checker issues
+        // Query L1 blockchain for matching transactions if RPC config is available.
+        // URL is chosen by swap.parent_chain: we look up that chain in l1_rpc_configs.json.
+        // If no RPC config exists for this chain, we skip L1 lookup and the swap stays
+        // Pending until config is set or the user updates via update_swap_l1_txid.
         let l1_recipient_clone = swap.l1_recipient_address.clone();
         let l1_amount_clone = swap.l1_amount;
         let parent_chain_clone = swap.parent_chain;
@@ -786,6 +788,14 @@ fn process_coinshift_transactions(
             && let Some(get_rpc_config) = rpc_config_getter
             && let Some(rpc_config) = get_rpc_config(parent_chain_clone)
         {
+            tracing::info!(
+                swap_id = %swap.id,
+                parent_chain = ?parent_chain_clone,
+                l1_recipient = %l1_recipient,
+                l1_amount_sats = %l1_amount.to_sat(),
+                url = %rpc_config.url,
+                "Querying L1 for swap"
+            );
             match query_and_update_swap(
                 state,
                 rwtxn,
@@ -808,13 +818,22 @@ fn process_coinshift_transactions(
                     }
                 }
                 Err(e) => {
-                    tracing::debug!(
+                    tracing::warn!(
                         swap_id = %swap.id,
+                        parent_chain = ?parent_chain_clone,
+                        l1_recipient = %l1_recipient,
+                        url = %rpc_config.url,
                         error = %e,
-                        "Failed to query L1 blockchain for swap (this is normal if RPC is not configured)"
+                        "Failed to query L1 for swap; swap will stay pending until RPC succeeds or l1_txid is set manually"
                     );
                 }
             }
+        } else if l1_recipient_clone.is_some() && l1_amount_clone.is_some() {
+            tracing::debug!(
+                swap_id = %swap.id,
+                parent_chain = ?parent_chain_clone,
+                "Skipping L1 lookup: no RPC config for this parent chain (swap stays Pending until config is set or l1_txid is set manually)"
+            );
         }
 
         scanned_swaps_count += 1;
