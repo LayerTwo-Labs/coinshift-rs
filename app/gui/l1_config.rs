@@ -134,6 +134,13 @@ impl L1Config {
             return;
         };
 
+        tracing::info!(
+            chain = ?self.selected_parent_chain,
+            url = %config.url,
+            user = %config.user,
+            "L1 Config: saving configuration"
+        );
+
         self.configs
             .insert(self.selected_parent_chain, config.clone());
 
@@ -145,6 +152,10 @@ impl L1Config {
         if let Ok(json) = serde_json::to_string_pretty(&self.configs) {
             drop(std::fs::write(&config_path, json));
         }
+        tracing::info!(
+            path = %config_path.display(),
+            "L1 Config: configuration persisted to file"
+        );
 
         // Auto-check connection when saving
         if !config.url.is_empty() {
@@ -163,6 +174,12 @@ impl L1Config {
         if url.is_empty() {
             return;
         }
+
+        tracing::info!(
+            url = %url,
+            has_auth = !user.is_empty(),
+            "L1 Config: testing connection"
+        );
 
         let url = url.to_string();
         let user = user.to_string();
@@ -185,10 +202,6 @@ impl L1Config {
     ) -> anyhow::Result<u64> {
         use std::time::Duration;
 
-        let client = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(10))
-            .build()?;
-
         // Use jsonrpc "1.0" to match nodes that accept curl-style requests (e.g. BCH test4)
         let request = json!({
             "jsonrpc": "1.0",
@@ -196,6 +209,16 @@ impl L1Config {
             "method": "getblockchaininfo",
             "params": []
         });
+
+        tracing::info!(
+            url = %url,
+            request = %serde_json::to_string(&request).unwrap_or_default(),
+            "L1 Config: connection test request"
+        );
+
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()?;
 
         let mut request_builder = client.post(url).json(&request);
 
@@ -205,11 +228,19 @@ impl L1Config {
         }
 
         let response = request_builder.send()?;
-
+        let status = response.status();
         let json: serde_json::Value = response.json()?;
 
+        tracing::info!(
+            status = %status,
+            response = %serde_json::to_string_pretty(&json).unwrap_or_else(|_| json.to_string()),
+            "L1 Config: connection test response"
+        );
+
         if let Some(error) = json.get("error") {
-            anyhow::bail!("RPC error: {}", error);
+            if !error.is_null() {
+                anyhow::bail!("RPC error: {}", error);
+            }
         }
 
         let result = json
@@ -221,6 +252,7 @@ impl L1Config {
             .and_then(|v| v.as_u64())
             .ok_or_else(|| anyhow::anyhow!("No blocks field in response"))?;
 
+        tracing::info!(block_height = blocks, "L1 Config: connection test OK");
         Ok(blocks)
     }
 
@@ -230,12 +262,14 @@ impl L1Config {
         {
             match result {
                 Ok(block_height) => {
+                    tracing::info!(block_height = block_height, "L1 Config: connection test succeeded");
                     *self.connection_status.lock().unwrap() =
                         ConnectionStatus::Connected {
                             block_height: *block_height,
                         };
                 }
                 Err(err) => {
+                    tracing::info!(error = %err, "L1 Config: connection test failed");
                     *self.connection_status.lock().unwrap() =
                         ConnectionStatus::Disconnected {
                             error: format!("{err:#}"),
@@ -292,6 +326,11 @@ impl L1Config {
 
             // Load config when parent chain changes
             if previous_chain != self.selected_parent_chain {
+                tracing::info!(
+                    from = ?previous_chain,
+                    to = ?self.selected_parent_chain,
+                    "L1 Config: parent chain changed"
+                );
                 self.load_selected_chain_config();
             }
         });
@@ -476,6 +515,10 @@ impl L1Config {
             }
 
             if ui.button("Clear").clicked() {
+                tracing::info!(
+                    chain = ?self.selected_parent_chain,
+                    "L1 Config: clearing configuration"
+                );
                 self.rpc_url.clear();
                 self.rpc_user.clear();
                 self.rpc_password.clear();
