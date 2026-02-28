@@ -262,7 +262,10 @@ impl L1Config {
         {
             match result {
                 Ok(block_height) => {
-                    tracing::info!(block_height = block_height, "L1 Config: connection test succeeded");
+                    tracing::info!(
+                        block_height = block_height,
+                        "L1 Config: connection test succeeded"
+                    );
                     *self.connection_status.lock().unwrap() =
                         ConnectionStatus::Connected {
                             block_height: *block_height,
