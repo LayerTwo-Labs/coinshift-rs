@@ -336,7 +336,9 @@ impl SwapTxId {
 
     pub fn to_bitcoin_txid(&self) -> Option<bitcoin::Txid> {
         match self {
-            Self::Hash32(hash) => Some(bitcoin::Txid::from_byte_array(reversed_32(hash))),
+            Self::Hash32(hash) => {
+                Some(bitcoin::Txid::from_byte_array(reversed_32(hash)))
+            }
             Self::Hash(_) => None,
         }
     }

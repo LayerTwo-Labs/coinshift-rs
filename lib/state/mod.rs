@@ -853,7 +853,8 @@ impl State {
         // Use get_swap which handles deserialization errors gracefully
         if let Some(swap) = self.get_swap(rwtxn, swap_id)? {
             // Only Pending or Cancelled swaps can be deleted (not WaitingConfirmations, ReadyToClaim, Completed)
-            if !matches!(swap.state, SwapState::Pending | SwapState::Cancelled) {
+            if !matches!(swap.state, SwapState::Pending | SwapState::Cancelled)
+            {
                 return Err(Error::InvalidTransaction(format!(
                     "Swap {} cannot be deleted (state: {:?}). Only Pending or Cancelled swaps can be deleted.",
                     swap_id, swap.state
@@ -1582,6 +1583,46 @@ impl State {
         // Save updated swap
         self.save_swap(rwtxn, &swap)?;
 
+        Ok(())
+    }
+
+    /// Update confirmation count for a swap already in WaitingConfirmations.
+    /// Only allowed when state is WaitingConfirmations; transitions to ReadyToClaim when confirmations >= required.
+    pub fn update_swap_confirmations(
+        &self,
+        rwtxn: &mut RwTxn,
+        swap_id: &SwapId,
+        new_confirmations: u32,
+        block_hash: BlockHash,
+        block_height: u32,
+    ) -> Result<(), Error> {
+        let mut swap = self
+            .get_swap(rwtxn, swap_id)?
+            .ok_or_else(|| Error::SwapNotFound { swap_id: *swap_id })?;
+
+        let (current, required) = match swap.state {
+            SwapState::WaitingConfirmations(c, r) => (c, r),
+            _ => {
+                return Err(Error::InvalidTransaction(format!(
+                    "Swap {} is not in WaitingConfirmations (state: {:?}). Only confirmation count can be updated for waiting swaps.",
+                    swap_id, swap.state
+                )));
+            }
+        };
+
+        if new_confirmations <= current {
+            return Ok(());
+        }
+
+        swap.set_l1_txid_validation_block(block_hash, block_height);
+        if new_confirmations >= required {
+            swap.state = SwapState::ReadyToClaim;
+        } else {
+            swap.state =
+                SwapState::WaitingConfirmations(new_confirmations, required);
+        }
+
+        self.save_swap(rwtxn, &swap)?;
         Ok(())
     }
 

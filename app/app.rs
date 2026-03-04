@@ -432,8 +432,8 @@ impl App {
             for swap in swaps_to_check {
                 // Get RPC config for this swap's parent chain
                 if let Some(rpc_config) = load_rpc_config(swap.parent_chain) {
-                    // L1 txid in RPC order for Bitcoin Core getrawtransaction
-                    let l1_txid_hex = swap.l1_txid.to_hex_rpc();
+                    // L1 txid in canonical order for parent chain getrawtransaction
+                    let l1_txid_hex = swap.l1_txid.to_hex();
 
                     // Fetch current confirmations from RPC
                     let client = ParentChainRpcClient::new(rpc_config);
