@@ -432,16 +432,8 @@ impl App {
             for swap in swaps_to_check {
                 // Get RPC config for this swap's parent chain
                 if let Some(rpc_config) = load_rpc_config(swap.parent_chain) {
-                    // Convert L1 txid to hex string for RPC query
-                    let l1_txid_hex = match &swap.l1_txid {
-                        SwapTxId::Hash32(hash) => {
-                            use bitcoin::hashes::Hash;
-                            let txid = bitcoin::Txid::from_slice(hash)
-                                .unwrap_or_else(|_| bitcoin::Txid::all_zeros());
-                            txid.to_string()
-                        }
-                        SwapTxId::Hash(bytes) => hex::encode(bytes),
-                    };
+                    // L1 txid in RPC order for Bitcoin Core getrawtransaction
+                    let l1_txid_hex = swap.l1_txid.to_hex_rpc();
 
                     // Fetch current confirmations from RPC
                     let client = ParentChainRpcClient::new(rpc_config);
