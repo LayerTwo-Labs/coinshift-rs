@@ -322,14 +322,12 @@ impl SwapList {
         }
 
         ScrollArea::vertical().show(ui, |ui| {
-            egui::Grid::new("swaps_grid")
-                .num_columns(2)
-                .striped(true)
-                .show(ui, |ui| {
-                    for swap in &filtered_swaps {
-                        self.show_swap_row(swap, app, ui);
-                    }
-                });
+            for (i, swap) in filtered_swaps.iter().enumerate() {
+                if i > 0 {
+                    ui.separator();
+                }
+                self.show_swap_row(swap, app, ui);
+            }
         });
     }
 
@@ -346,22 +344,32 @@ impl SwapList {
             .map(|id| id == &swap_id_str)
             .unwrap_or(false);
 
-        // Swap ID
-        ui.horizontal(|ui| {
-            if ui
-                .selectable_label(is_selected, &swap_id_str[..16])
-                .clicked()
-            {
-                if is_selected {
-                    self.selected_swap_id = None;
-                } else {
-                    self.selected_swap_id = Some(swap_id_str.clone());
-                }
-            }
-        });
-
-        // Swap details
+        // Single column: Swap ID (full, copyable) first, then details
         ui.vertical(|ui| {
+            // Full swap ID on one line for easy copy-paste
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(&swap_id_str)
+                        .monospace()
+                        .size(12.0),
+                );
+                if ui.button("📋 Copy").clicked() {
+                    ui.ctx().copy_text(swap_id_str.clone());
+                }
+                if ui
+                    .selectable_label(is_selected, "Select")
+                    .on_hover_text("Select this swap")
+                    .clicked()
+                {
+                    if is_selected {
+                        self.selected_swap_id = None;
+                    } else {
+                        self.selected_swap_id = Some(swap_id_str.clone());
+                    }
+                }
+            });
+
+            // Swap details (same column)
             // Show if swap is pending (not yet in a block)
             if swap.created_at_height == 0 {
                 ui.label(egui::RichText::new("⚠️ PENDING (in mempool, not yet in block)").color(egui::Color32::RED));
@@ -424,8 +432,8 @@ impl SwapList {
             match &swap.state {
                 SwapState::Pending => {
                     ui.separator();
-                    ui.label(egui::RichText::new("⚠️ IMPORTANT: For users filling this swap").heading().color(egui::Color32::YELLOW));
-                    ui.label(egui::RichText::new(format!("Only send the L1 transaction to fill this swap after the swap has {} confirmations from the L2 sidechain.", swap.required_confirmations)).color(egui::Color32::YELLOW));
+                    ui.label(egui::RichText::new("⚠️ IMPORTANT: For users filling this swap").heading().color(egui::Color32::RED));
+                    ui.label(egui::RichText::new(format!("Only send the L1 transaction to fill this swap after the swap has {} confirmations from the L2 sidechain.", swap.required_confirmations)).color(egui::Color32::RED));
                     ui.label(egui::RichText::new("This ensures the swap is fully confirmed before you commit your L1 funds.").small().color(egui::Color32::GRAY));
                     ui.separator();
                     ui.label(egui::RichText::new("L1 Transaction Detection").heading());
@@ -538,8 +546,6 @@ impl SwapList {
                 _ => {}
             }
         });
-
-        ui.end_row();
     }
 
     fn claim_swap(

@@ -66,6 +66,10 @@ pub enum Error {
     DbWrite(#[from] RwTxnError),
     #[error("io error")]
     Io(#[from] std::io::Error),
+    #[error(
+        "address {address} not derivable from seed in first {max_index} indices"
+    )]
+    AddressNotRecoverable { address: Address, max_index: u32 },
     #[error("no index for address {address}")]
     NoIndex { address: Address },
     #[error(
@@ -735,30 +739,40 @@ impl Wallet {
         &self,
         transaction: Transaction,
     ) -> Result<AuthorizedTransaction, Error> {
-        let txn = self.env.read_txn().map_err(EnvError::from)?;
         let mut authorizations = Vec::with_capacity(transaction.inputs.len());
         for (outpoint, _) in &transaction.inputs {
             let key = OutPointKey::from(outpoint);
-            let spent_utxo = self
-                .utxos
-                .try_get(&txn, &key)
-                .map_err(DbError::from)?
-                .ok_or(Error::NoUtxo)?;
-            let index = self
-                .address_to_index
-                .try_get(&txn, &spent_utxo.address)
-                .map_err(DbError::from)?
-                .ok_or(Error::NoIndex {
-                    address: spent_utxo.address,
-                })?;
-            let index = BigEndian::read_u32(&index);
-            let signing_key = self.get_signing_key(&txn, index)?;
-            let signature =
-                crate::authorization::sign(&signing_key, &transaction)?;
-            authorizations.push(Authorization {
-                verifying_key: signing_key.verifying_key(),
-                signature,
-            });
+            loop {
+                let (spent_utxo, index) = {
+                    let txn = self.env.read_txn().map_err(EnvError::from)?;
+                    let spent_utxo = self
+                        .utxos
+                        .try_get(&txn, &key)
+                        .map_err(DbError::from)?
+                        .ok_or(Error::NoUtxo)?;
+                    let index = self
+                        .address_to_index
+                        .try_get(&txn, &spent_utxo.address)
+                        .map_err(DbError::from)?;
+                    (spent_utxo, index)
+                };
+                let index = match index {
+                    Some(idx) => BigEndian::read_u32(&idx),
+                    None => {
+                        self.ensure_address_indexed(&spent_utxo.address)?;
+                        continue;
+                    }
+                };
+                let txn = self.env.read_txn().map_err(EnvError::from)?;
+                let signing_key = self.get_signing_key(&txn, index)?;
+                let signature =
+                    crate::authorization::sign(&signing_key, &transaction)?;
+                authorizations.push(Authorization {
+                    verifying_key: signing_key.verifying_key(),
+                    signature,
+                });
+                break;
+            }
         }
         Ok(AuthorizedTransaction {
             authorizations,
@@ -797,6 +811,75 @@ impl Wallet {
             .unwrap_or(([0; 4], [0; 20].into()));
         let last_index = BigEndian::read_u32(&last_index);
         Ok(last_index)
+    }
+
+    /// Maximum address index to scan when recovering an address from seed
+    /// (e.g. after restoring wallet from seed with empty address index).
+    const MAX_RECOVERY_INDEX: u32 = 100_000;
+
+    /// Derive the receive address for a given index from a seed (same path as
+    /// get_signing_key: m/1'/0'/0'/index).
+    fn derive_address_for_index(
+        seed: &[u8],
+        index: u32,
+    ) -> Result<Address, Error> {
+        let xpriv = ExtendedSigningKey::from_seed(seed)?;
+        let derivation_path = DerivationPath::new([
+            ChildIndex::Hardened(1),
+            ChildIndex::Hardened(0),
+            ChildIndex::Hardened(0),
+            ChildIndex::Hardened(index),
+        ]);
+        let xsigning_key = xpriv.derive(&derivation_path)?;
+        Ok(get_address(&xsigning_key.signing_key.verifying_key()))
+    }
+
+    /// If the address is not in the wallet's address index, try to recover it
+    /// by deriving addresses from the seed until we find a match, then add it
+    /// to the index. Used when restoring from seed so that UTXOs belonging to
+    /// previously used addresses can be spent.
+    pub fn ensure_address_indexed(
+        &self,
+        address: &Address,
+    ) -> Result<(), Error> {
+        {
+            let txn = self.env.read_txn().map_err(EnvError::from)?;
+            if self
+                .address_to_index
+                .try_get(&txn, address)
+                .map_err(DbError::from)?
+                .is_some()
+            {
+                return Ok(());
+            }
+        }
+        let seed: Vec<u8> = {
+            let txn = self.env.read_txn().map_err(EnvError::from)?;
+            self.seed
+                .try_get(&txn, &0)
+                .map_err(DbError::from)?
+                .ok_or(Error::NoSeed)?
+                .to_vec()
+        };
+        let index = (0..Self::MAX_RECOVERY_INDEX)
+            .find_map(|i| {
+                (Self::derive_address_for_index(&seed, i).ok()? == *address)
+                    .then_some(i)
+            })
+            .ok_or(Error::AddressNotRecoverable {
+                address: *address,
+                max_index: Self::MAX_RECOVERY_INDEX,
+            })?;
+        let mut txn = self.env.write_txn().map_err(EnvError::from)?;
+        let index_bytes = index.to_be_bytes();
+        self.index_to_address
+            .put(&mut txn, &index_bytes, address)
+            .map_err(DbError::from)?;
+        self.address_to_index
+            .put(&mut txn, address, &index_bytes)
+            .map_err(DbError::from)?;
+        txn.commit().map_err(RwTxnError::from)?;
+        Ok(())
     }
 
     fn get_signing_key(

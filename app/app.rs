@@ -1068,6 +1068,7 @@ impl App {
             .attempt_bmm(bribe.to_sat(), 0, header, body)
             .await?;
 
+        tracing::info!(%bmm_txid, "mine: BMM transaction sent, waiting for confirmation");
         tracing::debug!(%bmm_txid, "mine: confirming BMM...");
         if let Some((main_hash, header, body)) =
             miner_write.confirm_bmm().await.inspect_err(|err| {
