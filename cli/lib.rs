@@ -1,9 +1,12 @@
-use std::{net::SocketAddr, time::Duration};
+use std::{
+    collections::HashMap, net::SocketAddr, path::PathBuf, time::Duration,
+};
 
 use clap::{Parser, Subcommand};
 use http::HeaderMap;
 use jsonrpsee::{core::client::ClientT, http_client::HttpClientBuilder};
 
+use coinshift::parent_chain_rpc::RpcConfig;
 use coinshift::types::{Address, ParentChainType, SwapId, Txid};
 use coinshift_app_rpc_api::RpcClient;
 use tracing_subscriber::{filter::Targets, layer::SubscriberExt as _};
@@ -15,12 +18,25 @@ fn parse_swap_id(s: &str) -> anyhow::Result<SwapId> {
             "swap_id must be 64 hex chars (32 bytes), got {} bytes",
             v.len()
         )
+fn l1_config_path() -> PathBuf {
+    dirs::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("coinshift")
+        .join("l1_rpc_configs.json")
+}
+
+fn parse_swap_id(s: &str) -> anyhow::Result<SwapId> {
+    let bytes = hex::decode(s)
+        .map_err(|e| anyhow::anyhow!("invalid swap_id hex: {}", e))?;
+    let arr: [u8; 32] = bytes.try_into().map_err(|_| {
+        anyhow::anyhow!("swap_id must be 32 bytes (64 hex chars)")
     })?;
     Ok(SwapId(arr))
 }
 
 fn parse_parent_chain(s: &str) -> anyhow::Result<ParentChainType> {
     match s.to_ascii_lowercase().as_str() {
+    match s.to_lowercase().as_str() {
         "btc" => Ok(ParentChainType::BTC),
         "bch" => Ok(ParentChainType::BCH),
         "ltc" => Ok(ParentChainType::LTC),
@@ -30,6 +46,10 @@ fn parse_parent_chain(s: &str) -> anyhow::Result<ParentChainType> {
             "unknown parent_chain '{}', use: btc, bch, ltc, signet, regtest",
             s
         )),
+        _ => anyhow::bail!(
+            "unknown parent chain: {} (use btc, bch, ltc, signet, regtest)",
+            s
+        ),
     }
 }
 
@@ -40,6 +60,23 @@ pub enum Command {
     Balance,
     /// Connect to a peer
     ConnectPeer { addr: SocketAddr },
+    /// Create a swap (L2 → L1). Optional l2_recipient = open swap.
+    CreateSwap {
+        #[arg(long, value_parser = parse_parent_chain)]
+        parent_chain: ParentChainType,
+        #[arg(long)]
+        l1_recipient_address: String,
+        #[arg(long)]
+        l1_amount_sats: u64,
+        #[arg(long)]
+        l2_recipient: Option<Address>,
+        #[arg(long)]
+        l2_amount_sats: u64,
+        #[arg(long)]
+        required_confirmations: Option<u32>,
+        #[arg(long)]
+        fee_sats: u64,
+    },
     /// Deposit to address
     CreateDeposit {
         address: Address,
@@ -55,6 +92,11 @@ pub enum Command {
     ForgetPeer { addr: SocketAddr },
     /// Generate a mnemonic seed phrase
     GenerateMnemonic,
+    /// Show L1 RPC config (all chains or one if --chain is set)
+    GetL1Config {
+        #[arg(long, value_parser = parse_parent_chain)]
+        chain: Option<ParentChainType>,
+    },
     /// Get the best mainchain block hash
     GetBestMainchainBlockHash,
     /// Get the best sidechain block hash
@@ -75,12 +117,30 @@ pub enum Command {
     GetWalletUtxos,
     /// Get the current block count
     GetBlockcount,
+    /// Claim a swap (after L1 has required confirmations). For open swaps, pass l2_claimer_address.
+    ClaimSwap {
+        #[arg(long, value_parser = parse_swap_id)]
+        swap_id: SwapId,
+        #[arg(long)]
+        l2_claimer_address: Option<Address>,
+    },
+    /// Get status of a swap by ID
+    GetSwapStatus {
+        #[arg(long, value_parser = parse_swap_id)]
+        swap_id: SwapId,
+    },
     /// Get the height of the latest failed withdrawal bundle
     LatestFailedWithdrawalBundleHeight,
     /// List peers
     ListPeers,
     /// List all UTXOs
     ListUtxos,
+    /// List all swaps
+    ListSwaps,
+    /// List swaps for a specific recipient address
+    ListSwapsByRecipient { recipient: Address },
+    /// Recover wallet from mnemonic phrase (sets seed, then shows addresses and balance)
+    RecoverFromMnemonic { mnemonic: String },
     /// Reconstruct all swaps from the blockchain
     ReconstructSwaps,
     /// Create a swap (L2 → L1). Omit l2_recipient for an open swap.
@@ -153,6 +213,17 @@ pub enum Command {
     RemoveFromMempool { txid: Txid },
     /// Set the wallet seed from a mnemonic seed phrase
     SetSeedFromMnemonic { mnemonic: String },
+    /// Set L1 RPC config for a parent chain (url required; user/password optional)
+    SetL1Config {
+        #[arg(long, value_parser = parse_parent_chain)]
+        parent_chain: ParentChainType,
+        #[arg(long)]
+        url: String,
+        #[arg(long, default_value = "")]
+        user: String,
+        #[arg(long, default_value = "")]
+        password: String,
+    },
     /// Get total sidechain wealth
     SidechainWealth,
     /// Stop the node
@@ -164,6 +235,17 @@ pub enum Command {
         value_sats: u64,
         #[arg(long)]
         fee_sats: u64,
+    },
+    /// Update swap with L1 txid and confirmation count (for open swaps, pass l2_claimer_address).
+    UpdateSwapL1Txid {
+        #[arg(long, value_parser = parse_swap_id)]
+        swap_id: SwapId,
+        #[arg(long)]
+        l1_txid_hex: String,
+        #[arg(long)]
+        confirmations: u32,
+        #[arg(long)]
+        l2_claimer_address: Option<Address>,
     },
     /// Initiate a withdrawal to the specified mainchain address
     Withdraw {
@@ -214,6 +296,36 @@ where
             let () = rpc_client.connect_peer(addr).await?;
             String::default()
         }
+        Command::CreateSwap {
+            parent_chain,
+            l1_recipient_address,
+            l1_amount_sats,
+            l2_recipient,
+            l2_amount_sats,
+            required_confirmations,
+            fee_sats,
+        } => {
+            let (swap_id, txid) = rpc_client
+                .create_swap(
+                    parent_chain,
+                    l1_recipient_address,
+                    l1_amount_sats,
+                    l2_recipient,
+                    l2_amount_sats,
+                    required_confirmations,
+                    fee_sats,
+                )
+                .await?;
+            format!("Swap created: id={} txid={}", swap_id, txid)
+        }
+        Command::ClaimSwap {
+            swap_id,
+            l2_claimer_address,
+        } => {
+            let txid =
+                rpc_client.claim_swap(swap_id, l2_claimer_address).await?;
+            format!("Swap claimed: txid={}", txid)
+        }
         Command::CreateDeposit {
             address,
             value_sats,
@@ -249,6 +361,25 @@ where
             serde_json::to_string_pretty(&bmm_inclusions)?
         }
         Command::GenerateMnemonic => rpc_client.generate_mnemonic().await?,
+        Command::GetL1Config { chain } => {
+            let path = l1_config_path();
+            let configs: HashMap<ParentChainType, RpcConfig> = if path.exists()
+            {
+                let s = std::fs::read_to_string(&path).map_err(|e| {
+                    anyhow::anyhow!("read config: {}: {}", path.display(), e)
+                })?;
+                serde_json::from_str(&s).unwrap_or_default()
+            } else {
+                HashMap::new()
+            };
+            let out: HashMap<ParentChainType, RpcConfig> = match chain {
+                Some(c) => {
+                    configs.into_iter().filter(|(k, _)| *k == c).collect()
+                }
+                None => configs,
+            };
+            serde_json::to_string_pretty(&out)?
+        }
         Command::GetNewAddress => {
             let address = rpc_client.get_new_address().await?;
             format!("{address}")
@@ -265,6 +396,10 @@ where
             let blockcount = rpc_client.getblockcount().await?;
             format!("{blockcount}")
         }
+        Command::GetSwapStatus { swap_id } => {
+            let status = rpc_client.get_swap_status(swap_id).await?;
+            serde_json::to_string_pretty(&status)?
+        }
         Command::LatestFailedWithdrawalBundleHeight => {
             let height =
                 rpc_client.latest_failed_withdrawal_bundle_height().await?;
@@ -277,6 +412,26 @@ where
         Command::ListUtxos => {
             let utxos = rpc_client.list_utxos().await?;
             serde_json::to_string_pretty(&utxos)?
+        }
+        Command::ListSwaps => {
+            let swaps = rpc_client.list_swaps().await?;
+            serde_json::to_string_pretty(&swaps)?
+        }
+        Command::ListSwapsByRecipient { recipient } => {
+            let swaps = rpc_client.list_swaps_by_recipient(recipient).await?;
+            serde_json::to_string_pretty(&swaps)?
+        }
+        Command::RecoverFromMnemonic { mnemonic } => {
+            rpc_client.set_seed_from_mnemonic(mnemonic).await?;
+            let addresses = rpc_client.get_wallet_addresses().await?;
+            let balance = rpc_client.balance().await?;
+            let addrs_json = serde_json::to_string_pretty(&addresses)?;
+            format!(
+                "Recovery complete.\nAddresses:\n{}\nBalance: total {} sats, available {} sats",
+                addrs_json,
+                balance.total.to_sat(),
+                balance.available.to_sat()
+            )
         }
         Command::ReconstructSwaps => {
             let count = rpc_client.reconstruct_swaps().await?;
@@ -373,6 +528,44 @@ where
             let () = rpc_client.set_seed_from_mnemonic(mnemonic).await?;
             String::default()
         }
+        Command::SetL1Config {
+            parent_chain,
+            url,
+            user,
+            password,
+        } => {
+            let path = l1_config_path();
+            let mut configs: HashMap<ParentChainType, RpcConfig> = if path
+                .exists()
+            {
+                let s = std::fs::read_to_string(&path).map_err(|e| {
+                    anyhow::anyhow!("read config: {}: {}", path.display(), e)
+                })?;
+                serde_json::from_str(&s).unwrap_or_default()
+            } else {
+                HashMap::new()
+            };
+            configs.insert(
+                parent_chain,
+                RpcConfig {
+                    url: url.clone(),
+                    user: user.clone(),
+                    password: password.clone(),
+                },
+            );
+            if let Some(parent) = path.parent() {
+                drop(std::fs::create_dir_all(parent));
+            }
+            std::fs::write(&path, serde_json::to_string_pretty(&configs)?)
+                .map_err(|e| {
+                    anyhow::anyhow!("write config: {}: {}", path.display(), e)
+                })?;
+            format!(
+                "L1 RPC config saved for {} at {}",
+                parent_chain.coin_name(),
+                path.display()
+            )
+        }
         Command::SidechainWealth => {
             let sidechain_wealth = rpc_client.sidechain_wealth_sats().await?;
             format!("{sidechain_wealth}")
@@ -388,6 +581,22 @@ where
         } => {
             let txid = rpc_client.transfer(dest, value_sats, fee_sats).await?;
             format!("{txid}")
+        }
+        Command::UpdateSwapL1Txid {
+            swap_id,
+            l1_txid_hex,
+            confirmations,
+            l2_claimer_address,
+        } => {
+            rpc_client
+                .update_swap_l1_txid(
+                    swap_id,
+                    l1_txid_hex,
+                    confirmations,
+                    l2_claimer_address,
+                )
+                .await?;
+            format!("Swap {} updated with L1 txid and confirmations", swap_id)
         }
         Command::Withdraw {
             mainchain_address,
