@@ -1,5 +1,21 @@
 # Coinshift
 
+Coinshift is a BIP300-style sidechain node with a trustless **L2 ↔ L1 swap** system: you can exchange sidechain (L2) coins for parent-chain (L1) assets such as BTC, BCH, or LTC, and vice versa. The app includes a JSON-RPC server, CLI, and GUI.
+
+## Supported chains (swaps)
+
+Swaps support the following L1 parent chains (Bitcoin Core–compatible RPC):
+
+| Chain            | Ticker | Default RPC port | Confirmations |
+|------------------|--------|------------------|---------------|
+| Bitcoin          | BTC    | 8332             | 6             |
+| Bitcoin Cash     | BCH    | 8332             | 3             |
+| Litecoin         | LTC    | 9332             | 3             |
+| Bitcoin Signet   | sBTC   | 38332            | 3             |
+| Bitcoin Regtest  | rBTC   | 18443            | 3             |
+
+Configure RPC per chain via the GUI (**L1 Config**) or CLI (`set-l1-config`). See [docs/ADDING_PARENT_CHAINS.md](docs/ADDING_PARENT_CHAINS.md) for adding new chains.
+
 ## Building
 
 Check out the repo with `git clone`, and then
@@ -132,3 +148,20 @@ The CLI talks to the Coinshift RPC server (default `http://localhost:6255`). Use
 | Command | Description |
 |--------|-------------|
 | `openapi-schema` | Print OpenAPI schema |
+
+## Documentation
+
+| Doc | Description |
+|-----|--------------|
+| [docs/SETUP_ORDER.md](docs/SETUP_ORDER.md) | Step-by-step regtest setup (mainchain, enforcer, wallets, mining) |
+| [docs/ADDING_PARENT_CHAINS.md](docs/ADDING_PARENT_CHAINS.md) | Supported L1 chains and how to add new ones |
+| [docs/COINSHIFT_HOW_IT_WORKS.md](docs/COINSHIFT_HOW_IT_WORKS.md) | Architecture and swap flow |
+| [docs/MANUAL_SETUP_SWAP_REGTEST.md](docs/MANUAL_SETUP_SWAP_REGTEST.md) | Manual regtest + swap (Alice & Bob) |
+| [docs/ENFORCER_WALLET_GUIDE.md](docs/ENFORCER_WALLET_GUIDE.md) | Enforcer wallet creation and usage |
+| [docs/SETUP_COMMANDS.md](docs/SETUP_COMMANDS.md) | Copy-paste setup commands (signet/regtest) |
+| [docs/specs/swap-implementation-spec.md](docs/specs/swap-implementation-spec.md) | Swap implementation specification |
+
+## Scripts
+
+- **Regtest environment:** [scripts/regtest/](scripts/regtest/) — start mainchain, parentchain, enforcer, mine, fund wallets. See [scripts/README.md](scripts/README.md) and [docs/SETUP_ORDER.md](docs/SETUP_ORDER.md).
+- **Other:** `scripts/setup.sh`, `scripts/test_swap.sh`.

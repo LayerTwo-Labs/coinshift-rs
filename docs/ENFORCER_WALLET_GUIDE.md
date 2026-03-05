@@ -16,17 +16,17 @@ The enforcer can automatically create a wallet when it starts if the `--auto-cre
 
 ### Option 2: Manual creation via gRPC
 
-Use the `create_enforcer_wallet.sh` script:
+Use the `scripts/regtest/create_enforcer_wallet.sh` script:
 
 ```bash
 # Create encrypted wallet with generated mnemonic
-./docs/create_enforcer_wallet.sh "mypassword"
+./scripts/regtest/create_enforcer_wallet.sh "mypassword"
 
 # Create unencrypted wallet with generated mnemonic
-./docs/create_enforcer_wallet.sh ""
+./scripts/regtest/create_enforcer_wallet.sh ""
 
 # Create wallet with existing mnemonic
-./docs/create_enforcer_wallet.sh "mypassword" /path/to/mnemonic.txt
+./scripts/regtest/create_enforcer_wallet.sh "mypassword" /path/to/mnemonic.txt
 ```
 
 ## Do You Need to Move Funds?
@@ -55,13 +55,13 @@ The enforcer wallet **DOES need funds** for:
 ### 1. Create the wallet (if not auto-created)
 
 ```bash
-./docs/create_enforcer_wallet.sh [password]
+./scripts/regtest/create_enforcer_wallet.sh [password]
 ```
 
 ### 2. Unlock the wallet
 
 ```bash
-./docs/unlock_enforcer_wallet.sh [password]
+./scripts/regtest/unlock_enforcer_wallet.sh [password]
 ```
 
 ### 3. Get the wallet address
@@ -81,11 +81,10 @@ ENFORCER_ADDR=$(grpcurl -plaintext 127.0.0.1:50051 \
   cusf.mainchain.v1.WalletService/CreateNewAddress | \
   grep -o '"address":"[^"]*"' | cut -d'"' -f4)
 
-# Send funds from mainchain wallet
-BITCOIN_CLI="/home/parallels/Projects/bitcoin-patched/build/bin/bitcoin-cli"
+# Send funds from mainchain wallet (set BITCOIN_CLI and MAINCHAIN_DATADIR to match your setup)
 $BITCOIN_CLI -regtest \
   -rpcuser=user -rpcpassword=passwordDC \
-  -rpcport=18443 -datadir=/home/parallels/Projects/coinshift-mainchain-data \
+  -rpcport=18443 -datadir=$MAINCHAIN_DATADIR \
   -rpcwallet=mainchainwallet \
   sendtoaddress "$ENFORCER_ADDR" 1.0
 ```
@@ -100,7 +99,7 @@ grpcurl -plaintext 127.0.0.1:50051 \
 ### 6. Mine blocks
 
 ```bash
-./docs/mine_with_enforcer.sh 5
+./scripts/regtest/mine_with_enforcer.sh 5
 ```
 
 ## Important Notes

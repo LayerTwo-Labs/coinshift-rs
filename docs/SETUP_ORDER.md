@@ -8,7 +8,7 @@ Make sure you have:
 - Bitcoin Core (patched) built and available
 - `bip300301_enforcer` built and available
 - `grpcurl` installed (for gRPC calls)
-- All scripts are executable (`chmod +x docs/*.sh`)
+- All scripts are executable (`chmod +x scripts/regtest/*.sh`)
 
 ## Step-by-Step Setup
 
@@ -17,8 +17,8 @@ Make sure you have:
 **Script:** `1_start_mainchain.sh`
 
 ```bash
-cd /home/parallels/Projects/coinshift-rs/docs
-./1_start_mainchain.sh
+# From project root
+./scripts/regtest/1_start_mainchain.sh
 ```
 
 **What it does:**
@@ -32,10 +32,10 @@ cd /home/parallels/Projects/coinshift-rs/docs
 
 ### Step 2: (Optional) Start Parentchain Regtest Node
 
-**Script:** `2_start_parentchain.sh`
+**Script:** `scripts/regtest/2_start_parentchain.sh`
 
 ```bash
-./2_start_parentchain.sh
+./scripts/regtest/2_start_parentchain.sh
 ```
 
 **What it does:**
@@ -49,10 +49,10 @@ cd /home/parallels/Projects/coinshift-rs/docs
 
 ### Step 3: Start Enforcer
 
-**Script:** `3_start_enforcer.sh`
+**Script:** `scripts/regtest/3_start_enforcer.sh`
 
 ```bash
-./3_start_enforcer.sh
+./scripts/regtest/3_start_enforcer.sh
 ```
 
 **What it does:**
@@ -70,14 +70,14 @@ cd /home/parallels/Projects/coinshift-rs/docs
 
 ### Step 4: Create Enforcer Wallet
 
-**Script:** `create_enforcer_wallet.sh`
+**Script:** `scripts/regtest/create_enforcer_wallet.sh`
 
 ```bash
 # Create unencrypted wallet (easiest for testing)
-./create_enforcer_wallet.sh ""
+./scripts/regtest/create_enforcer_wallet.sh ""
 
 # OR create encrypted wallet
-./create_enforcer_wallet.sh "mypassword"
+./scripts/regtest/create_enforcer_wallet.sh "mypassword"
 ```
 
 **What it does:**
@@ -94,14 +94,14 @@ cd /home/parallels/Projects/coinshift-rs/docs
 
 ### Step 5: Unlock Enforcer Wallet
 
-**Script:** `unlock_enforcer_wallet.sh`
+**Script:** `scripts/regtest/unlock_enforcer_wallet.sh`
 
 ```bash
 # If wallet has no password
-./unlock_enforcer_wallet.sh ""
+./scripts/regtest/unlock_enforcer_wallet.sh ""
 
 # If wallet has a password
-./unlock_enforcer_wallet.sh "mypassword"
+./scripts/regtest/unlock_enforcer_wallet.sh "mypassword"
 ```
 
 **What it does:**
@@ -119,14 +119,14 @@ cd /home/parallels/Projects/coinshift-rs/docs
 
 ### Step 6: (Optional) Fund Enforcer Wallet
 
-**Script:** `fund_enforcer_wallet.sh`
+**Script:** `scripts/regtest/fund_enforcer_wallet.sh`
 
 ```bash
 # Send 1 BTC (default)
-./fund_enforcer_wallet.sh
+./scripts/regtest/fund_enforcer_wallet.sh
 
 # Send custom amount
-./fund_enforcer_wallet.sh 5.0
+./scripts/regtest/fund_enforcer_wallet.sh 5.0
 ```
 
 **What it does:**
@@ -143,17 +143,17 @@ cd /home/parallels/Projects/coinshift-rs/docs
 
 ### Step 7: Mine Blocks
 
-**Script:** `mine_with_enforcer.sh`
+**Script:** `scripts/regtest/mine_with_enforcer.sh`
 
 ```bash
 # Mine 1 block (default)
-./mine_with_enforcer.sh
+./scripts/regtest/mine_with_enforcer.sh
 
 # Mine multiple blocks
-./mine_with_enforcer.sh 5
+./scripts/regtest/mine_with_enforcer.sh 5
 
 # Mine blocks and ACK all proposals
-./mine_with_enforcer.sh 5 true
+./scripts/regtest/mine_with_enforcer.sh 5 true
 ```
 
 **What it does:**
@@ -169,17 +169,17 @@ cd /home/parallels/Projects/coinshift-rs/docs
 
 ## Alternative: Mine Blocks on Mainchain Directly
 
-**Script:** `4_mine_blocks.sh`
+**Script:** `scripts/regtest/4_mine_blocks.sh`
 
 ```bash
 # Mine 1 block on both mainchain and parentchain
-./4_mine_blocks.sh
+./scripts/regtest/4_mine_blocks.sh
 
 # Mine 5 blocks on mainchain only
-./4_mine_blocks.sh mainchain 5
+./scripts/regtest/4_mine_blocks.sh mainchain 5
 
 # Mine 10 blocks on parentchain only
-./4_mine_blocks.sh parentchain 10
+./scripts/regtest/4_mine_blocks.sh parentchain 10
 ```
 
 **What it does:**
@@ -198,51 +198,51 @@ cd /home/parallels/Projects/coinshift-rs/docs
 
 ### Generate addresses (mainchain / parentchain)
 
-**Script:** `generate_addresses.sh`
+**Script:** `scripts/regtest/generate_addresses.sh`
 
 Always shows **getblockchaininfo** for both mainchain and parentchain, then generates addresses.
 
 ```bash
 # Mainchain address only (default)
-./generate_addresses.sh
+./scripts/regtest/generate_addresses.sh
 
 # Parentchain address only
-./generate_addresses.sh parentchain
+./scripts/regtest/generate_addresses.sh parentchain
 
 # One address from each chain
-./generate_addresses.sh both
+./scripts/regtest/generate_addresses.sh both
 ```
 
 ### Send from mainchain or parentchain
 
-**Script:** `send_from.sh`
+**Script:** `scripts/regtest/send_from.sh`
 
 Send from mainchain or parentchain to any address. Always shows **getblockchaininfo** for both chains before and after.
 
 ```bash
 # Send 1 BTC from mainchain to address
-./send_from.sh mainchain <address> 1.0
+./scripts/regtest/send_from.sh mainchain <address> 1.0
 
 # Send 0.5 BTC from parentchain to address
-./send_from.sh parentchain <address> 0.5
+./scripts/regtest/send_from.sh parentchain <address> 0.5
 ```
 
-Requires the source chain node to be running. Get an address from the other chain with `./generate_addresses.sh mainchain` or `./generate_addresses.sh parentchain`.
+Requires the source chain node to be running. Get an address from the other chain with `./scripts/regtest/generate_addresses.sh mainchain` or `./scripts/regtest/generate_addresses.sh parentchain`.
 
 ### Initialize coinshift_app for test users (Alice, Bob, Charles)
 
-**Script:** `init_coinshift_app.sh`
+**Script:** `scripts/regtest/init_coinshift_app.sh`
 
 Creates a data directory and a `start.sh` script for each user at a given location. Each user gets unique RPC and P2P ports so you can run multiple coinshift_app instances for testing.
 
 ```bash
 # Initialize one user (e.g. at ./test-users)
-./init_coinshift_app.sh ./test-users alice
-./init_coinshift_app.sh ./test-users bob
-./init_coinshift_app.sh ./test-users charles
+./scripts/regtest/init_coinshift_app.sh ./test-users alice
+./scripts/regtest/init_coinshift_app.sh ./test-users bob
+./scripts/regtest/init_coinshift_app.sh ./test-users charles
 
 # Initialize all three at once
-./init_coinshift_app.sh ./test-users all
+./scripts/regtest/init_coinshift_app.sh ./test-users all
 ```
 
 Then start each user's app (enforcer and mainchain should be running):
@@ -257,19 +257,19 @@ Ports: Alice RPC 6010 / P2P 4010, Bob 6020/4020, Charles 6030/4030. Override bin
 
 ### Get transactions / UTXOs for an address
 
-**Script:** `get_txs_from_address.sh`
+**Script:** `scripts/regtest/get_txs_from_address.sh`
 
 Shows **getblockchaininfo** for both chains, then unspent outputs (and wallet receive history if the address is in the wallet) for a given address.
 
 ```bash
 # On mainchain (default)
-./get_txs_from_address.sh mainchain bcrt1q9z447588v4ua9nna7ff83zqfrcqlj8xklf4nl5
+./scripts/regtest/get_txs_from_address.sh mainchain bcrt1q9z447588v4ua9nna7ff83zqfrcqlj8xklf4nl5
 
 # On parentchain
-./get_txs_from_address.sh parentchain bcrt1q...
+./scripts/regtest/get_txs_from_address.sh parentchain bcrt1q...
 
 # Address only → mainchain
-./get_txs_from_address.sh bcrt1q9z447588v4ua9nna7ff83zqfrcqlj8xklf4nl5
+./scripts/regtest/get_txs_from_address.sh bcrt1q9z447588v4ua9nna7ff83zqfrcqlj8xklf4nl5
 ```
 
 ---
@@ -279,25 +279,25 @@ Shows **getblockchaininfo** for both chains, then unspent outputs (and wallet re
 Here's a complete example for a fresh setup:
 
 ```bash
-cd /home/parallels/Projects/coinshift-rs/docs
+# From project root
 
 # 1. Start mainchain
-./1_start_mainchain.sh
+./scripts/regtest/1_start_mainchain.sh
 
 # 2. Start enforcer
-./3_start_enforcer.sh
+./scripts/regtest/3_start_enforcer.sh
 
 # 3. Create wallet (if needed)
-./create_enforcer_wallet.sh ""
+./scripts/regtest/create_enforcer_wallet.sh ""
 
 # 4. Unlock wallet (if needed)
-./unlock_enforcer_wallet.sh ""
+./scripts/regtest/unlock_enforcer_wallet.sh ""
 
 # 5. Mine blocks with enforcer
-./mine_with_enforcer.sh 10
+./scripts/regtest/mine_with_enforcer.sh 10
 
 # 6. (Optional) Fund wallet for deposits
-./fund_enforcer_wallet.sh 1.0
+./scripts/regtest/fund_enforcer_wallet.sh 1.0
 ```
 
 ---
@@ -305,32 +305,32 @@ cd /home/parallels/Projects/coinshift-rs/docs
 ## Quick Reference: Dependencies
 
 ```
-1_start_mainchain.sh
+scripts/regtest/1_start_mainchain.sh
     └─> (no dependencies)
 
-2_start_parentchain.sh
+scripts/regtest/2_start_parentchain.sh
     └─> (no dependencies, optional)
 
-3_start_enforcer.sh
+scripts/regtest/3_start_enforcer.sh
     └─> Requires: 1_start_mainchain.sh
 
-create_enforcer_wallet.sh
+scripts/regtest/create_enforcer_wallet.sh
     └─> Requires: 3_start_enforcer.sh
 
-unlock_enforcer_wallet.sh
+scripts/regtest/unlock_enforcer_wallet.sh
     └─> Requires: 3_start_enforcer.sh
         (wallet should exist, but script checks)
 
-fund_enforcer_wallet.sh
+scripts/regtest/fund_enforcer_wallet.sh
     └─> Requires: 1_start_mainchain.sh
         Requires: 3_start_enforcer.sh
         Requires: Wallet created and unlocked
 
-mine_with_enforcer.sh
+scripts/regtest/mine_with_enforcer.sh
     └─> Requires: 3_start_enforcer.sh
         Requires: Wallet created and unlocked
 
-4_mine_blocks.sh
+scripts/regtest/4_mine_blocks.sh
     └─> Requires: 1_start_mainchain.sh (and optionally 2_start_parentchain.sh)
 ```
 
@@ -339,22 +339,22 @@ mine_with_enforcer.sh
 ## Troubleshooting
 
 ### "Mainchain is not running"
-- Run `1_start_mainchain.sh` first
+- Run `scripts/regtest/1_start_mainchain.sh` first
 
 ### "Enforcer gRPC is not accessible"
-- Run `3_start_enforcer.sh` first
+- Run `scripts/regtest/3_start_enforcer.sh` first
 - Wait for enforcer to fully start (check logs)
 
 ### "Wallet not unlocked"
-- Run `unlock_enforcer_wallet.sh` with the correct password
+- Run `scripts/regtest/unlock_enforcer_wallet.sh` with the correct password
 
 ### "Wallet already exists"
-- Wallet was already created, skip `create_enforcer_wallet.sh`
-- Just unlock it with `unlock_enforcer_wallet.sh`
+- Wallet was already created, skip `scripts/regtest/create_enforcer_wallet.sh`
+- Just unlock it with `scripts/regtest/unlock_enforcer_wallet.sh`
 
 ### "Insufficient funds"
-- Mine more blocks on mainchain: `4_mine_blocks.sh mainchain 101`
-- Or send funds: `fund_enforcer_wallet.sh`
+- Mine more blocks on mainchain: `scripts/regtest/4_mine_blocks.sh mainchain 101`
+- Or send funds: `scripts/regtest/fund_enforcer_wallet.sh`
 
 ---
 
