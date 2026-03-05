@@ -292,6 +292,10 @@ pub fn connect_prevalidated(
                     }
                 }
 
+                // L2 creator = first input's address (only they may cancel/delete)
+                let l2_creator_address =
+                    filled.spent_utxos.first().map(|o| o.address);
+
                 // Reconstruct swap object
                 let swap = Swap::new(
                     swap_id,
@@ -305,6 +309,7 @@ pub fn connect_prevalidated(
                     l1_amount.map(bitcoin::Amount::from_sat),
                     current_height,
                     None, // TODO: Add expiration support
+                    l2_creator_address,
                 );
 
                 // Verify swap ID matches
@@ -712,8 +717,8 @@ pub fn disconnect_tip(
                     }
                 }
 
-                // Delete swap
-                state.delete_swap(rwtxn, &swap_id)?;
+                // Delete swap (rollback: no creator check)
+                state.delete_swap_unchecked(rwtxn, &swap_id)?;
             }
             TxData::SwapClaim { swap_id, .. } => {
                 let swap_id = SwapId(*swap_id);

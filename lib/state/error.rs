@@ -102,6 +102,8 @@ pub enum Error {
     WithdrawalBundle(#[from] WithdrawalBundleError),
     #[error("Swap not found: {swap_id}")]
     SwapNotFound { swap_id: SwapId },
+    #[error("Only the swap creator can cancel or delete this swap")]
+    SwapNotCreator,
     #[error("Invalid transaction: {0}")]
     InvalidTransaction(String),
     #[error(

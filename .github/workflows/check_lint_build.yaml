@@ -83,7 +83,6 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: nightly
-          target: x86_64-pc-windows-gnu
 
       - name: Rust Cache (electrs)
         uses: Swatinem/rust-cache@v2
@@ -117,7 +116,7 @@ jobs:
           export BITCOIN_CLI='../bitcoin-patched-bins/bitcoin-cli'
           export ELECTRS='../electrs/target/release/electrs'
           export COINSHIFT_APP='target/debug/coinshift_app'
-          cargo run --example integration_tests
+          cargo run -p coinshift_integration_tests --example integration_tests
 
   build-release:
     strategy:

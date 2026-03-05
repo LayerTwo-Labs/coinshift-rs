@@ -793,16 +793,33 @@ impl State {
     }
 
     /// Cancel a swap (unlock outputs and mark as cancelled)
-    /// Only allowed for Pending swaps (before L1 transaction is detected)
+    /// Only allowed for Pending swaps (before L1 transaction is detected).
+    /// Only the swap creator may cancel; pass `creator` from wallet (None = deny for old records).
     pub fn cancel_swap(
         &self,
         rwtxn: &mut RwTxn,
         swap_id: &SwapId,
+        creator: Option<&Address>,
     ) -> Result<(), Error> {
         // Get swap - use get_swap which handles deserialization errors gracefully
         let mut swap = self
             .get_swap(rwtxn, swap_id)?
             .ok_or(Error::SwapNotFound { swap_id: *swap_id })?;
+
+        // Only the creator may cancel
+        match &swap.l2_creator_address {
+            Some(swap_creator) => {
+                let allowed =
+                    creator.map(|c| c == swap_creator).unwrap_or(false);
+                if !allowed {
+                    return Err(Error::SwapNotCreator);
+                }
+            }
+            None => {
+                // Old record without creator; deny to avoid allowing cross-user cancel
+                return Err(Error::SwapNotCreator);
+            }
+        }
 
         // Only allow cancellation for Pending swaps
         if !matches!(swap.state, SwapState::Pending) {
@@ -844,13 +861,35 @@ impl State {
         Ok(())
     }
 
+    /// Only the swap creator may delete; pass `creator` from wallet (None = deny for old records).
     pub fn delete_swap(
         &self,
         rwtxn: &mut RwTxn,
         swap_id: &SwapId,
+        creator: Option<&Address>,
     ) -> Result<(), Error> {
-        // Get swap to update indexes
-        // Use get_swap which handles deserialization errors gracefully
+        if let Some(swap) = self.get_swap(rwtxn, swap_id)? {
+            // Only the creator may delete
+            match &swap.l2_creator_address {
+                Some(swap_creator) => {
+                    let allowed =
+                        creator.map(|c| c == swap_creator).unwrap_or(false);
+                    if !allowed {
+                        return Err(Error::SwapNotCreator);
+                    }
+                }
+                None => return Err(Error::SwapNotCreator),
+            }
+        }
+        self.delete_swap_unchecked(rwtxn, swap_id)
+    }
+
+    /// Delete swap without creator check. For internal use only (e.g. block rollback).
+    pub fn delete_swap_unchecked(
+        &self,
+        rwtxn: &mut RwTxn,
+        swap_id: &SwapId,
+    ) -> Result<(), Error> {
         if let Some(swap) = self.get_swap(rwtxn, swap_id)? {
             // Only Pending or Cancelled swaps can be deleted (not WaitingConfirmations, ReadyToClaim, Completed)
             if !matches!(swap.state, SwapState::Pending | SwapState::Cancelled)
@@ -1750,6 +1789,10 @@ impl State {
                         // Reconstruct L1 txid
                         let l1_txid = SwapTxId::from_bytes(l1_txid_bytes);
 
+                        // L2 creator = first input's address (only they may cancel/delete)
+                        let l2_creator_address =
+                            filled.spent_utxos.first().map(|o| o.address);
+
                         // Reconstruct swap object
                         let swap = Swap::new(
                             swap_id,
@@ -1763,6 +1806,7 @@ impl State {
                             l1_amount.map(bitcoin::Amount::from_sat),
                             height,
                             None, // TODO: Add expiration support
+                            l2_creator_address,
                         );
 
                         // Lock outputs for L2 → L1 swaps

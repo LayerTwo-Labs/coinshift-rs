@@ -299,6 +299,7 @@ impl CreateSwap {
                 return;
             }
 
+            app.node.add_created_pending_swap(swap_id);
             tracing::info!("Swap created: swap_id={}, txid={}", swap_id, txid);
             *self = Self::default();
             self.parent_chain = ParentChainType::BTC; // Keep parent chain selection

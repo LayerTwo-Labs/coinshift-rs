@@ -2,7 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     fmt::Debug,
     net::SocketAddr,
-    sync::Arc,
+    sync::{Arc, Mutex as StdMutex},
 };
 
 use bitcoin::amount::CheckedSum;
@@ -21,7 +21,7 @@ use crate::{
         Accumulator, Address, AmountOverflowError, AmountUnderflowError,
         Authorized, AuthorizedTransaction, BlockHash, BmmResult, Body,
         FilledTransaction, GetValue, Header, Network, OutPoint, OutPointKey,
-        Output, SpentOutput, Tip, Transaction, Txid, WithdrawalBundle,
+        Output, SpentOutput, SwapId, Tip, Transaction, Txid, WithdrawalBundle,
         proto::{self, mainchain},
     },
     util::Watchable,
@@ -116,6 +116,8 @@ pub struct Node<MainchainTransport = Channel> {
     cusf_mainchain: Arc<Mutex<mainchain::ValidatorClient<MainchainTransport>>>,
     cusf_mainchain_wallet:
         Option<Arc<Mutex<mainchain::WalletClient<MainchainTransport>>>>,
+    /// Swap IDs we created that are still pending (mempool). Only creator can cancel those.
+    created_pending_swap_ids: Arc<StdMutex<HashSet<SwapId>>>,
     env: sneed::Env,
     mainchain_task: MainchainTaskHandle,
     mempool: MemPool,
@@ -286,6 +288,7 @@ where
             archive,
             cusf_mainchain: Arc::new(Mutex::new(config.cusf_mainchain)),
             cusf_mainchain_wallet,
+            created_pending_swap_ids: Arc::new(StdMutex::new(HashSet::new())),
             env,
             mainchain_task,
             mempool,
@@ -294,6 +297,28 @@ where
             state,
             wallet: config.wallet,
         })
+    }
+
+    /// Record that we created this swap (pending in mempool). Only the creator can cancel it.
+    pub fn add_created_pending_swap(&self, swap_id: SwapId) {
+        if let Ok(mut set) = self.created_pending_swap_ids.lock() {
+            set.insert(swap_id);
+        }
+    }
+
+    /// Returns true if we created this swap and it is still pending (so we may cancel it).
+    pub fn is_created_pending_swap(&self, swap_id: &SwapId) -> bool {
+        self.created_pending_swap_ids
+            .lock()
+            .map(|set| set.contains(swap_id))
+            .unwrap_or(false)
+    }
+
+    /// Remove from created-pending set (e.g. after cancelling or once confirmed).
+    pub fn remove_created_pending_swap(&self, swap_id: &SwapId) {
+        if let Ok(mut set) = self.created_pending_swap_ids.lock() {
+            set.remove(swap_id);
+        }
     }
 
     pub fn env(&self) -> &Env {

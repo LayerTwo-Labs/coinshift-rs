@@ -119,6 +119,7 @@ impl SwapList {
                             l1_amount.map(bitcoin::Amount::from_sat),
                             0,    // Height 0 for pending (not yet in a block)
                             None, // No expiration
+                            None, // Creator unknown for mempool display
                         );
                         swaps_result.push(swap);
                         tracing::debug!(
@@ -396,35 +397,42 @@ impl SwapList {
             // Show L1 transaction ID (canonical order)
             ui.label(format!("L1 TxID: {}", swap.l1_txid.to_hex()));
 
-            // Cancel and Delete buttons
+            // Cancel and Delete buttons (only for swap creator)
             ui.separator();
+            let can_manage = self.can_manage_swap(app, swap);
             ui.horizontal(|ui| {
-                // Cancel button (only for pending swaps)
+                // Cancel button (only for pending swaps, only for creator)
                 if matches!(swap.state, SwapState::Pending) {
                     if ui
                         .add_enabled(
-                            app.is_some(),
+                            can_manage,
                             Button::new(egui::RichText::new("❌ Cancel Swap").color(egui::Color32::ORANGE)),
                         )
                         .clicked()
                     && let Some(app) = app {
-                        self.cancel_swap(app, &swap.id);
+                        self.cancel_swap(app, swap);
                     }
                     ui.label("(Unlocks outputs and marks as cancelled)");
+                    if !can_manage && app.is_some() {
+                        ui.label(egui::RichText::new("— only swap creator can cancel").small().color(egui::Color32::GRAY));
+                    }
                 }
 
-                // Delete button (only for pending or cancelled swaps)
+                // Delete button (only for pending or cancelled swaps, only for creator)
                 if matches!(swap.state, SwapState::Pending | SwapState::Cancelled) {
                     if ui
                         .add_enabled(
-                            app.is_some(),
+                            can_manage,
                             Button::new(egui::RichText::new("🗑️ Delete Swap").color(egui::Color32::RED)),
                         )
                         .clicked()
                     && let Some(app) = app {
-                        self.delete_swap(app, &swap.id);
+                        self.delete_swap(app, swap);
                     }
                     ui.label("(Permanently removes from database)");
+                    if !can_manage && app.is_some() {
+                        ui.label(egui::RichText::new("— only swap creator can delete").small().color(egui::Color32::GRAY));
+                    }
                 }
             });
 
@@ -771,6 +779,7 @@ impl SwapList {
                                     l1_amount.map(bitcoin::Amount::from_sat),
                                     0, // Height 0 for pending
                                     None,
+                                    None, // Creator unknown for mempool display
                                 );
                                 self.searched_swap = Some(swap);
                                 tracing::info!(
@@ -1306,24 +1315,41 @@ impl SwapList {
         self.refresh_swaps(app);
     }
 
-    fn cancel_swap(&mut self, app: &App, swap_id: &SwapId) {
-        // Check if this is a pending swap (in mempool, not yet in a block)
-        let is_pending = self
-            .swaps
-            .as_ref()
-            .and_then(|swaps| swaps.iter().find(|s| s.id == *swap_id))
-            .map(|s| s.created_at_height == 0)
-            .unwrap_or(false);
+    /// True if the current user may cancel/delete this swap (creator only).
+    fn can_manage_swap(&self, app: Option<&App>, swap: &Swap) -> bool {
+        let Some(app) = app else {
+            return false;
+        };
+        if swap.created_at_height == 0 {
+            app.node.is_created_pending_swap(&swap.id)
+        } else {
+            match &swap.l2_creator_address {
+                Some(creator) => app
+                    .wallet
+                    .get_addresses()
+                    .map(|addrs| addrs.iter().any(|a| a == creator))
+                    .unwrap_or(false),
+                None => false,
+            }
+        }
+    }
+
+    fn cancel_swap(&mut self, app: &App, swap: &Swap) {
+        let swap_id = swap.id;
+        let is_pending = swap.created_at_height == 0;
 
         if is_pending {
-            // For pending swaps, remove from mempool
+            if !app.node.is_created_pending_swap(&swap_id) {
+                tracing::error!(swap_id = %swap_id, "Only the swap creator can cancel a pending swap");
+                return;
+            }
             if let Ok(mempool_txs) = app.node.get_all_transactions() {
                 for tx in mempool_txs {
                     if let coinshift::types::TxData::SwapCreate {
                         swap_id: tx_swap_id,
                         ..
                     } = &tx.transaction.data
-                        && coinshift::types::SwapId(*tx_swap_id) == *swap_id
+                        && coinshift::types::SwapId(*tx_swap_id) == swap_id
                     {
                         let txid = tx.transaction.txid();
                         if let Err(err) = app.node.remove_from_mempool(txid) {
@@ -1335,6 +1361,7 @@ impl SwapList {
                             );
                             return;
                         }
+                        app.node.remove_created_pending_swap(&swap_id);
                         tracing::info!(
                             swap_id = %swap_id,
                             txid = %txid,
@@ -1350,7 +1377,7 @@ impl SwapList {
                 "Pending swap not found in mempool"
             );
         } else {
-            // For confirmed swaps, use state database
+            let creator = swap.l2_creator_address.as_ref();
             let mut rwtxn = match app.node.env().write_txn() {
                 Ok(txn) => txn,
                 Err(err) => {
@@ -1359,7 +1386,7 @@ impl SwapList {
                 }
             };
 
-            match app.node.state().cancel_swap(&mut rwtxn, swap_id) {
+            match app.node.state().cancel_swap(&mut rwtxn, &swap_id, creator) {
                 Ok(()) => {
                     if let Err(err) = rwtxn.commit() {
                         tracing::error!("Failed to commit: {err:#}");
@@ -1379,24 +1406,22 @@ impl SwapList {
         }
     }
 
-    fn delete_swap(&mut self, app: &App, swap_id: &SwapId) {
-        // Check if this is a pending swap (in mempool, not yet in a block)
-        let is_pending = self
-            .swaps
-            .as_ref()
-            .and_then(|swaps| swaps.iter().find(|s| s.id == *swap_id))
-            .map(|s| s.created_at_height == 0)
-            .unwrap_or(false);
+    fn delete_swap(&mut self, app: &App, swap: &Swap) {
+        let swap_id = swap.id;
+        let is_pending = swap.created_at_height == 0;
 
         if is_pending {
-            // For pending swaps, remove from mempool
+            if !app.node.is_created_pending_swap(&swap_id) {
+                tracing::error!(swap_id = %swap_id, "Only the swap creator can delete a pending swap");
+                return;
+            }
             if let Ok(mempool_txs) = app.node.get_all_transactions() {
                 for tx in mempool_txs {
                     if let coinshift::types::TxData::SwapCreate {
                         swap_id: tx_swap_id,
                         ..
                     } = &tx.transaction.data
-                        && coinshift::types::SwapId(*tx_swap_id) == *swap_id
+                        && coinshift::types::SwapId(*tx_swap_id) == swap_id
                     {
                         let txid = tx.transaction.txid();
                         if let Err(err) = app.node.remove_from_mempool(txid) {
@@ -1408,6 +1433,7 @@ impl SwapList {
                             );
                             return;
                         }
+                        app.node.remove_created_pending_swap(&swap_id);
                         tracing::info!(
                             swap_id = %swap_id,
                             txid = %txid,
@@ -1423,7 +1449,7 @@ impl SwapList {
                 "Pending swap not found in mempool"
             );
         } else {
-            // For confirmed swaps, use state database
+            let creator = swap.l2_creator_address.as_ref();
             let mut rwtxn = match app.node.env().write_txn() {
                 Ok(txn) => txn,
                 Err(err) => {
@@ -1432,7 +1458,8 @@ impl SwapList {
                 }
             };
 
-            if let Err(err) = app.node.state().delete_swap(&mut rwtxn, swap_id)
+            if let Err(err) =
+                app.node.state().delete_swap(&mut rwtxn, &swap_id, creator)
             {
                 tracing::error!("Failed to delete swap: {err:#}");
                 return;

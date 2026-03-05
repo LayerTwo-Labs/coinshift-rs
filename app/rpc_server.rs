@@ -3,6 +3,7 @@ use std::net::SocketAddr;
 use bitcoin::Amount;
 use coinshift::{
     net::Peer,
+    state,
     types::{
         Address, ParentChainType, PointedOutput, Swap, SwapId, SwapState,
         SwapTxId, Txid, WithdrawalBundle,
@@ -26,6 +27,36 @@ use crate::app::App;
 
 pub struct RpcServerImpl {
     app: App,
+}
+
+impl RpcServerImpl {
+    /// Resolve creator address for a swap: only the creator may cancel/delete. Returns Ok(Some(addr)) if we own the swap, Err if not allowed.
+    fn resolve_swap_creator(
+        &self,
+        swap_id: &SwapId,
+    ) -> Result<Option<Address>, state::Error> {
+        let rotxn = self.app.node.env().read_txn().map_err(|e| {
+            state::Error::InvalidTransaction(format!("read txn: {}", e))
+        })?;
+        let swap = self
+            .app
+            .node
+            .state()
+            .get_swap(&rotxn, swap_id)?
+            .ok_or(state::Error::SwapNotFound { swap_id: *swap_id })?;
+        let creator = match &swap.l2_creator_address {
+            Some(addr) => *addr,
+            None => return Err(state::Error::SwapNotCreator),
+        };
+        let our_addresses = self.app.wallet.get_addresses().map_err(|e| {
+            state::Error::InvalidTransaction(format!("wallet: {}", e))
+        })?;
+        if our_addresses.iter().any(|a| a == &creator) {
+            Ok(Some(creator))
+        } else {
+            Err(state::Error::SwapNotCreator)
+        }
+    }
 }
 
 fn custom_err_msg(err_msg: impl Into<String>) -> ErrorObject<'static> {
@@ -349,6 +380,7 @@ impl RpcServer for RpcServerImpl {
             .map_err(custom_err)?;
         let txid = tx.txid();
         self.app.sign_and_send(tx).map_err(custom_err)?;
+        self.app.node.add_created_pending_swap(swap_id);
         Ok((swap_id, txid))
     }
 
@@ -567,22 +599,26 @@ impl RpcServer for RpcServerImpl {
     }
 
     async fn cancel_swap(&self, swap_id: SwapId) -> RpcResult<()> {
+        let creator =
+            self.resolve_swap_creator(&swap_id).map_err(custom_err)?;
         let mut rwtxn = self.app.node.env().write_txn().map_err(custom_err)?;
         self.app
             .node
             .state()
-            .cancel_swap(&mut rwtxn, &swap_id)
+            .cancel_swap(&mut rwtxn, &swap_id, creator.as_ref())
             .map_err(custom_err)?;
         rwtxn.commit().map_err(custom_err)?;
         Ok(())
     }
 
     async fn delete_swap(&self, swap_id: SwapId) -> RpcResult<()> {
+        let creator =
+            self.resolve_swap_creator(&swap_id).map_err(custom_err)?;
         let mut rwtxn = self.app.node.env().write_txn().map_err(custom_err)?;
         self.app
             .node
             .state()
-            .delete_swap(&mut rwtxn, &swap_id)
+            .delete_swap(&mut rwtxn, &swap_id, creator.as_ref())
             .map_err(custom_err)?;
         rwtxn.commit().map_err(custom_err)?;
         Ok(())

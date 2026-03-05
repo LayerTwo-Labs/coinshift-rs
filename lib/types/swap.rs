@@ -470,6 +470,9 @@ pub struct Swap {
     pub l1_txid_validated_at_block_hash: Option<BlockHash>,
     /// Sidechain block height where L1 txid was validated via parent chain RPC
     pub l1_txid_validated_at_height: Option<u32>,
+    /// L2 address that created the swap (first input of SwapCreate). Used to restrict cancel/delete to creator.
+    #[serde(default)]
+    pub l2_creator_address: Option<Address>,
 }
 
 // Custom Borsh serialization for Swap (needed for integration tests)
@@ -503,6 +506,7 @@ impl BorshSerialize for Swap {
             writer,
         )?;
         BorshSerialize::serialize(&self.l1_txid_validated_at_height, writer)?;
+        BorshSerialize::serialize(&self.l2_creator_address, writer)?;
         Ok(())
     }
 }
@@ -538,6 +542,7 @@ impl BorshDeserialize for Swap {
             l1_txid_validated_at_height: BorshDeserialize::deserialize_reader(
                 reader,
             )?,
+            l2_creator_address: BorshDeserialize::deserialize_reader(reader)?,
         })
     }
 }
@@ -556,6 +561,7 @@ impl Swap {
         l1_amount: Option<bitcoin::Amount>,
         created_at_height: u32,
         expires_at_height: Option<u32>,
+        l2_creator_address: Option<Address>,
     ) -> Self {
         let required_confirmations = required_confirmations
             .unwrap_or_else(|| parent_chain.default_confirmations());
@@ -576,6 +582,7 @@ impl Swap {
             expires_at_height,
             l1_txid_validated_at_block_hash: None,
             l1_txid_validated_at_height: None,
+            l2_creator_address,
         }
     }
 

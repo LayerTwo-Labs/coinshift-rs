@@ -333,7 +333,6 @@ impl App {
     ) -> Result<(), Error> {
         use coinshift::parent_chain_rpc::{ParentChainRpcClient, RpcConfig};
         use coinshift::types::{ParentChainType, SwapState, SwapTxId};
-        use hex;
         use serde::{Deserialize, Serialize};
         use std::collections::HashMap;
         use std::path::PathBuf;
