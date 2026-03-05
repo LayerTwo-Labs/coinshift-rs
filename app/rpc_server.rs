@@ -565,6 +565,28 @@ impl RpcServer for RpcServerImpl {
             .map_err(custom_err)?;
         Ok(swaps)
     }
+
+    async fn cancel_swap(&self, swap_id: SwapId) -> RpcResult<()> {
+        let mut rwtxn = self.app.node.env().write_txn().map_err(custom_err)?;
+        self.app
+            .node
+            .state()
+            .cancel_swap(&mut rwtxn, &swap_id)
+            .map_err(custom_err)?;
+        rwtxn.commit().map_err(custom_err)?;
+        Ok(())
+    }
+
+    async fn delete_swap(&self, swap_id: SwapId) -> RpcResult<()> {
+        let mut rwtxn = self.app.node.env().write_txn().map_err(custom_err)?;
+        self.app
+            .node
+            .state()
+            .delete_swap(&mut rwtxn, &swap_id)
+            .map_err(custom_err)?;
+        rwtxn.commit().map_err(custom_err)?;
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug)]

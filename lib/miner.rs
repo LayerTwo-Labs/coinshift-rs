@@ -59,7 +59,7 @@ where
                 header.prev_main_hash,
             )
             .await?;
-        tracing::info!("attempt BMM: created TX: {txid}");
+        tracing::info!(%txid, "BMM mining: sent transaction (broadcast to mainchain)");
         // assert_eq!(header.merkle_root, body.compute_merkle_root());
         self.block = Some((header, body));
         Ok(txid)

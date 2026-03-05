@@ -1,3 +1,4 @@
+use coinshift::parent_chain_rpc;
 use coinshift::types::{Address, ParentChainType};
 use eframe::egui::{self, Button, Color32, ComboBox, RichText, TextEdit};
 
@@ -17,8 +18,13 @@ pub struct CreateSwap {
 
 impl Default for CreateSwap {
     fn default() -> Self {
+        let supported = parent_chain_rpc::supported_l1_parent_chain_types();
+        let first = supported
+            .first()
+            .copied()
+            .unwrap_or(ParentChainType::Signet);
         Self {
-            parent_chain: ParentChainType::BTC,
+            parent_chain: first,
             l1_recipient_address: String::new(),
             l1_amount: String::new(),
             l2_recipient: None,
@@ -47,34 +53,29 @@ impl CreateSwap {
 
         ui.horizontal(|ui| {
             ui.label("Parent chain:");
+            let supported = parent_chain_rpc::supported_l1_parent_chain_types();
+            let label = match self.parent_chain {
+                ParentChainType::Signet => "Bitcoin Signet (sBTC)",
+                ParentChainType::BCH => "Bitcoin Cash Testnet 4 (BCH)",
+                _ => "Select network",
+            };
             ComboBox::from_id_salt("parent_chain")
-                .selected_text(format!("{:?}", self.parent_chain))
+                .selected_text(label)
                 .show_ui(ui, |ui| {
-                    ui.selectable_value(
-                        &mut self.parent_chain,
-                        ParentChainType::BTC,
-                        "BTC",
-                    );
-                    ui.selectable_value(
-                        &mut self.parent_chain,
-                        ParentChainType::Signet,
-                        "Signet",
-                    );
-                    ui.selectable_value(
-                        &mut self.parent_chain,
-                        ParentChainType::Regtest,
-                        "Regtest",
-                    );
-                    ui.selectable_value(
-                        &mut self.parent_chain,
-                        ParentChainType::BCH,
-                        "BCH",
-                    );
-                    ui.selectable_value(
-                        &mut self.parent_chain,
-                        ParentChainType::LTC,
-                        "LTC",
-                    );
+                    for chain in supported {
+                        let option_label = match chain {
+                            ParentChainType::Signet => "Bitcoin Signet (sBTC)",
+                            ParentChainType::BCH => {
+                                "Bitcoin Cash Testnet 4 (BCH)"
+                            }
+                            _ => continue,
+                        };
+                        ui.selectable_value(
+                            &mut self.parent_chain,
+                            *chain,
+                            option_label,
+                        );
+                    }
                 });
         });
 

@@ -58,6 +58,8 @@ pub enum Error {
     },
     #[error("wallet error")]
     Wallet(#[from] wallet::Error),
+    #[error("L1 config validation failed: {0}")]
+    L1ConfigValidation(#[from] coinshift::parent_chain_rpc::Error),
 }
 
 impl From<node::Error> for Error {
@@ -123,6 +125,7 @@ pub struct App {
     pub local_pool: LocalPoolHandle,
     /// Set by the L1 sync task: true when the mainchain (parentchain for mining) is reachable.
     /// Mining is only allowed when this is true so we can fetch blocks from the mainchain.
+    #[allow(dead_code)]
     pub mainchain_reachable: Arc<AtomicBool>,
 }
 
@@ -429,16 +432,8 @@ impl App {
             for swap in swaps_to_check {
                 // Get RPC config for this swap's parent chain
                 if let Some(rpc_config) = load_rpc_config(swap.parent_chain) {
-                    // Convert L1 txid to hex string for RPC query
-                    let l1_txid_hex = match &swap.l1_txid {
-                        SwapTxId::Hash32(hash) => {
-                            use bitcoin::hashes::Hash;
-                            let txid = bitcoin::Txid::from_slice(hash)
-                                .unwrap_or_else(|_| bitcoin::Txid::all_zeros());
-                            txid.to_string()
-                        }
-                        SwapTxId::Hash(bytes) => hex::encode(bytes),
-                    };
+                    // L1 txid in canonical order for parent chain getrawtransaction
+                    let l1_txid_hex = swap.l1_txid.to_hex();
 
                     // Fetch current confirmations from RPC
                     let client = ParentChainRpcClient::new(rpc_config);
@@ -625,6 +620,15 @@ impl App {
             config.datadir.display()
         );
 
+        // Validate L1 config file before start: test all configured networks
+        let l1_rpc_config_path = dirs::data_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("coinshift")
+            .join("l1_rpc_configs.json");
+        coinshift::parent_chain_rpc::validate_l1_config_file(
+            &l1_rpc_config_path,
+        )?;
+
         let wallet = Wallet::new(&config.datadir.join("wallet.mdb"))?;
         if let Some(seed_phrase_path) = &config.mnemonic_seed_phrase_path {
             let mnemonic = std::fs::read_to_string(seed_phrase_path)?;
@@ -675,10 +679,6 @@ impl App {
 
         tracing::info!("Instantiating node struct");
         let node_start = std::time::Instant::now();
-        let l1_rpc_config_path = dirs::data_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join("coinshift")
-            .join("l1_rpc_configs.json");
         let node_config = node::NodeConfig {
             datadir: config.datadir.clone(),
             bind_addr: config.net_addr,
@@ -1068,6 +1068,7 @@ impl App {
             .attempt_bmm(bribe.to_sat(), 0, header, body)
             .await?;
 
+        tracing::info!(%bmm_txid, "mine: BMM transaction sent, waiting for confirmation");
         tracing::debug!(%bmm_txid, "mine: confirming BMM...");
         if let Some((main_hash, header, body)) =
             miner_write.confirm_bmm().await.inspect_err(|err| {

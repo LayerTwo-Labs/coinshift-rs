@@ -263,9 +263,22 @@ pub enum SwapTxId {
     Hash(Vec<u8>),
 }
 
+/// Reverse bytes in place (used for Bitcoin txid RPC order ↔ canonical order).
+fn reverse_32(buf: &mut [u8; 32]) {
+    buf.reverse();
+}
+
+fn reversed_32(bytes: &[u8; 32]) -> [u8; 32] {
+    let mut out = *bytes;
+    reverse_32(&mut out);
+    out
+}
+
 impl SwapTxId {
+    /// Create from a bitcoin::Txid (RPC/internal byte order). Stored in canonical order.
     pub fn from_bitcoin_txid(txid: &bitcoin::Txid) -> Self {
-        Self::Hash32(*txid.as_ref())
+        let rpc_order = *txid.as_ref();
+        Self::Hash32(reversed_32(&rpc_order))
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Self {
@@ -278,9 +291,8 @@ impl SwapTxId {
         }
     }
 
-    /// Parse L1 txid from a hex string (e.g. from user input or RPC).
-    /// Requires exactly 64 hex characters (32 bytes) to avoid truncation or
-    /// length confusion that could corrupt the stored txid.
+    /// Parse L1 txid from a hex string in **canonical** order (natural hash order,
+    /// e.g. as shown by block explorers). Requires exactly 64 hex characters (32 bytes).
     pub fn from_hex(hex_str: &str) -> Result<Self, String> {
         let s = hex_str.trim();
         if s.len() != 64 {
@@ -299,17 +311,56 @@ impl SwapTxId {
         Ok(Self::from_bytes(&bytes))
     }
 
+    /// Parse L1 txid from a hex string in **RPC** order (e.g. as returned by Bitcoin Core
+    /// getrawtransaction / listunspent). Converts to canonical order for storage.
+    pub fn from_hex_rpc(hex_str: &str) -> Result<Self, String> {
+        let s = hex_str.trim();
+        if s.len() != 64 {
+            return Err(format!(
+                "L1 txid must be exactly 64 hex characters (32 bytes), got {}",
+                s.len()
+            ));
+        }
+        let bytes = hex::decode(s).map_err(|e| format!("Invalid hex: {e}"))?;
+        if bytes.len() != 32 {
+            return Err(format!(
+                "Decoded L1 txid must be 32 bytes, got {}",
+                bytes.len()
+            ));
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        reverse_32(&mut arr);
+        Ok(Self::Hash32(arr))
+    }
+
     pub fn to_bitcoin_txid(&self) -> Option<bitcoin::Txid> {
         match self {
-            Self::Hash32(hash) => Some(bitcoin::Txid::from_byte_array(*hash)),
+            Self::Hash32(hash) => {
+                Some(bitcoin::Txid::from_byte_array(reversed_32(hash)))
+            }
             Self::Hash(_) => None,
         }
     }
 
-    /// Hex encoding of the txid bytes (for RPC calls and display).
+    /// Hex encoding in **canonical** order (for display and user-facing APIs).
     pub fn to_hex(&self) -> String {
         match self {
             Self::Hash32(hash) => hex::encode(hash),
+            Self::Hash(bytes) => hex::encode(bytes),
+        }
+    }
+
+    /// Hex encoding in **RPC** order (for Bitcoin Core getrawtransaction, etc.).
+    pub fn to_hex_rpc(&self) -> String {
+        match self {
+            Self::Hash32(hash) => hex::encode(reversed_32(hash)),
+            Self::Hash(bytes) if bytes.len() == 32 => {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(bytes);
+                reverse_32(&mut arr);
+                hex::encode(arr)
+            }
             Self::Hash(bytes) => hex::encode(bytes),
         }
     }
@@ -337,6 +388,22 @@ mod tests {
         let with_spaces = format!("  {}  ", valid);
         let txid2 = SwapTxId::from_hex(&with_spaces).unwrap();
         assert_eq!(txid2.to_hex(), valid);
+    }
+
+    #[test]
+    fn txid_canonical_vs_rpc_byte_order() {
+        // Canonical (block explorer) vs RPC (Bitcoin Core) are byte-reversed
+        let canonical =
+            "ceaa5bbe14a2fe2658115f32ea90a11c073a5028df5713adbcdb35c70c3e9127";
+        let rpc_order =
+            "27913e0cc735dbbcad1357df28503a071ca190ea325f115826fea214be5baace";
+        let from_canonical = SwapTxId::from_hex(canonical).unwrap();
+        let from_rpc = SwapTxId::from_hex_rpc(rpc_order).unwrap();
+        assert_eq!(from_canonical.to_hex(), from_rpc.to_hex());
+        assert_eq!(from_canonical.to_hex(), canonical);
+        assert_eq!(from_canonical.to_hex_rpc(), rpc_order);
+        assert_eq!(from_rpc.to_hex(), canonical);
+        assert_eq!(from_rpc.to_hex_rpc(), rpc_order);
     }
 }
 
