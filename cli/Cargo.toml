@@ -9,7 +9,6 @@ version.workspace = true
 [dependencies]
 anyhow = { workspace = true }
 bitcoin = { workspace = true, features = ["serde"] }
-hex = "0.4"
 dirs = "5.0.1"
 hex = "0.4.3"
 clap = { version = "4.5.4", features = ["derive"] }
