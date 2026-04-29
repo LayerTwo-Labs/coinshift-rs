@@ -28,13 +28,32 @@ where
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    const COMMON_PROTO: &str = "../proto/proto/cusf/common/v1/common.proto";
-    const VALIDATOR_PROTO: &str =
-        "../proto/proto/cusf/mainchain/v1/validator.proto";
-    const WALLET_PROTO: &str = "../proto/proto/cusf/mainchain/v1/wallet.proto";
-    const ALL_PROTOS: &[&str] = &[COMMON_PROTO, VALIDATOR_PROTO, WALLET_PROTO];
-    const INCLUDES: &[&str] = &["../proto/proto"];
-    let file_descriptors = protox::compile(ALL_PROTOS, INCLUDES)?;
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?);
+    let workspace_root = manifest_dir
+        .parent()
+        .expect("lib crate must live under coinshift-rs workspace root");
+    let proto_include = [
+        workspace_root.join("proto/proto"),
+        workspace_root.join("proto"),
+        workspace_root.join("../proto/proto"),
+        workspace_root.join("../proto"),
+    ]
+    .into_iter()
+    .find(|p| p.join("cusf/common/v1/common.proto").is_file())
+    .expect(
+        "proto/ (cusf_sidechain_proto git submodule) not found; run \
+         `git submodule update --init --recursive`",
+    );
+    let common_proto = proto_include.join("cusf/common/v1/common.proto");
+    let validator_proto = proto_include.join("cusf/mainchain/v1/validator.proto");
+    let wallet_proto = proto_include.join("cusf/mainchain/v1/wallet.proto");
+    let all_protos: Vec<&Path> = vec![
+        common_proto.as_path(),
+        validator_proto.as_path(),
+        wallet_proto.as_path(),
+    ];
+    let includes: [&Path; 1] = [proto_include.as_path()];
+    let file_descriptors = protox::compile(&all_protos, &includes)?;
     let file_descriptor_path = PathBuf::from(
         env::var("OUT_DIR").expect("OUT_DIR environment variable not set"),
     )
@@ -43,14 +62,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let () = compile_protos_with_config(
         &file_descriptor_path,
-        &[COMMON_PROTO],
-        INCLUDES,
+        &[common_proto.as_path()],
+        &includes,
         |_| Ok(()),
     )?;
     let () = compile_protos_with_config(
         &file_descriptor_path,
-        &[VALIDATOR_PROTO, WALLET_PROTO],
-        INCLUDES,
+        &[validator_proto.as_path(), wallet_proto.as_path()],
+        &includes,
         |config| {
             config
                 .extern_path(".cusf.common.v1", "crate::types::proto::common");
