@@ -28,6 +28,14 @@ git submodule update --init
 cargo build
 ```
 
+The **`proto`** submodule keeps `.proto` files under **`proto/proto/`**; `lib/build.rs` resolves that layout automatically.
+
+### Follow-ups (maintainers)
+
+- **Publish:** Use credentials with push access to the org remote when landing changes.
+- After changing the **`proto`** submodule pointer, run **`cargo test --workspace`** before pushing.
+
+
 ## Running
 
 ```bash
