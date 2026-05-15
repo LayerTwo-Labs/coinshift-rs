@@ -20,7 +20,7 @@ clap = { version = "4.5.60" }
 fallible-iterator = "0.3.0"
 futures = { version = "0.3.30", default-features = false }
 http = "1.2.0"
-jsonrpsee = { version = "0.25.1", features = ["tracing"] }
+jsonrpsee = { version = "0.26.0", features = ["tracing"] }
 parking_lot = "0.12.1"
 prost = "0.13.3"
 serde = "1.0.179"
