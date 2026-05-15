@@ -22,7 +22,7 @@ futures = { version = "0.3.30", default-features = false }
 http = "1.2.0"
 jsonrpsee = { version = "0.25.1", features = ["tracing"] }
 parking_lot = "0.12.1"
-prost = "0.13.3"
+prost = "0.14.3"
 serde = "1.0.179"
 serde_json = "1.0.113"
 strum = { version = "0.26.3", features = ["derive"] }
