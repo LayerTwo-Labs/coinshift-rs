@@ -239,7 +239,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/') && needs.parse-semver.outputs.prerelease == ''
     steps:
       - name: Download release assets
-        uses: robinraju/release-downloader@v1.9
+        uses: robinraju/release-downloader@v1.13
         with:
           tag: ${{ github.ref_name }}
 
