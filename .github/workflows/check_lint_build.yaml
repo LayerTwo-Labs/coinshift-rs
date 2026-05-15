@@ -183,7 +183,7 @@ jobs:
           popd
 
       - name: 'Upload Artifacts (coinshift)'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ env.COINSHIFT_APP_FILENAME }}
           if-no-files-found: error
