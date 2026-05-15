@@ -131,6 +131,10 @@ jobs:
             name: x86_64-apple-darwin
             binary-suffix: ""
             rustflags: ""
+          - os: macos-latest
+            name: aarch64-apple-darwin
+            binary-suffix: ""
+            rustflags: ""
           - os: ubuntu-latest
             name: x86_64-pc-windows-gnu
             binary-suffix: .exe
@@ -247,7 +251,7 @@ jobs:
         run: |
           shopt -s extglob nullglob
           version='+([0-9]).+([0-9]).+([0-9])?(-+([a-zA-Z0-9.]))'
-          for target in x86_64-apple-darwin x86_64-pc-windows-gnu x86_64-unknown-linux-gnu; do
+          for target in aarch64-apple-darwin x86_64-apple-darwin x86_64-pc-windows-gnu x86_64-unknown-linux-gnu; do
             ext=""; [[ $target == *windows* ]] && ext=".exe"
             mv coinshift-${version}-${target}${ext} coinshift-latest-${target}${ext}
             mv coinshift-cli-${version}-${target}${ext} coinshift-cli-latest-${target}${ext}
