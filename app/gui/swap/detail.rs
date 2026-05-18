@@ -151,16 +151,12 @@ impl SwapDetail {
                         ui.label(show_l2_amount(swap.l2_amount));
                         ui.end_row();
 
-                        if let Some(l1_amount) = swap.l1_amount {
-                            ui.label(
-                                egui::RichText::new("L1 Amount:").strong(),
-                            );
-                            ui.label(show_l1_amount(
-                                l1_amount,
-                                swap.parent_chain,
-                            ));
-                            ui.end_row();
-                        }
+                        ui.label(egui::RichText::new("L1 Amount:").strong());
+                        ui.label(show_l1_amount(
+                            swap.l1_amount,
+                            swap.parent_chain,
+                        ));
+                        ui.end_row();
 
                         ui.label(egui::RichText::new("L2 Recipient:").strong());
                         if let Some(addr) = &swap.l2_recipient {
@@ -170,13 +166,9 @@ impl SwapDetail {
                         }
                         ui.end_row();
 
-                        if let Some(addr) = &swap.l1_recipient_address {
-                            ui.label(
-                                egui::RichText::new("L1 Recipient:").strong(),
-                            );
-                            ui.label(addr.to_string());
-                            ui.end_row();
-                        }
+                        ui.label(egui::RichText::new("L1 Recipient:").strong());
+                        ui.label(swap.l1_recipient_address.to_string());
+                        ui.end_row();
 
                         if let Some(addr) = &swap.l1_claimer_address {
                             ui.label(
@@ -870,37 +862,32 @@ impl SwapDetail {
                 Ok(tx_info) => {
                     let conf = tx_info.confirmations;
 
-                    // Validate outputs if expected recipient/amount known
-                    if let (Some(expected_recipient), Some(expected_amount)) =
-                        (&swap.l1_recipient_address, swap.l1_amount)
-                    {
-                        let expected_sats = expected_amount.to_sat();
-                        let found = tx_info.vout.iter().any(|vout| {
-                            let sats = (vout.value * 100_000_000.0) as u64;
-                            let addr_match = vout
+                    // Validate outputs
+                    let found = tx_info.vout.iter().any(|vout| {
+                        let sats = (vout.value * 100_000_000.0) as u64;
+                        let addr_match = vout
+                            .script_pub_key
+                            .address
+                            .as_ref()
+                            .map(|a| a == &swap.l1_recipient_address)
+                            .unwrap_or(false)
+                            || vout
                                 .script_pub_key
-                                .address
+                                .addresses
                                 .as_ref()
-                                .map(|a| a == expected_recipient)
-                                .unwrap_or(false)
-                                || vout
-                                    .script_pub_key
-                                    .addresses
-                                    .as_ref()
-                                    .map(|addrs| {
-                                        addrs.contains(expected_recipient)
-                                    })
-                                    .unwrap_or(false);
-                            addr_match && sats == expected_sats
-                        });
+                                .map(|addrs| {
+                                    addrs.contains(&swap.l1_recipient_address)
+                                })
+                                .unwrap_or(false);
+                        addr_match && sats == swap.l1_amount.to_sat()
+                    });
 
-                        if !found {
-                            self.claim_error = Some(
-                                "L1 tx doesn't match expected recipient/amount"
-                                    .into(),
-                            );
-                            return;
-                        }
+                    if !found {
+                        self.claim_error = Some(
+                            "L1 tx doesn't match expected recipient/amount"
+                                .into(),
+                        );
+                        return;
                     }
 
                     conf

@@ -527,8 +527,8 @@ pub enum TxData {
         /// L2 recipient address. None means open swap (anyone can fill)
         l2_recipient: Option<Address>,
         l2_amount: u64,
-        l1_recipient_address: Option<String>,
-        l1_amount: Option<u64>,
+        l1_recipient_address: String,
+        l1_amount: u64,
     },
     /// Swap claim transaction
     SwapClaim {

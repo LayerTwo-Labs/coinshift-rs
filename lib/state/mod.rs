@@ -1824,7 +1824,7 @@ impl State {
                             *l2_recipient,
                             bitcoin::Amount::from_sat(*l2_amount),
                             l1_recipient_address.clone(),
-                            l1_amount.map(bitcoin::Amount::from_sat),
+                            bitcoin::Amount::from_sat(*l1_amount),
                             height,
                             None, // TODO: Add expiration support
                             l2_creator_address,
@@ -1832,7 +1832,7 @@ impl State {
 
                         // Lock outputs for L2 → L1 swaps
                         // Only lock SwapPending outputs (never change outputs)
-                        if l1_recipient_address.is_some() {
+                        {
                             for (vout, output) in
                                 filled.transaction.outputs.iter().enumerate()
                             {

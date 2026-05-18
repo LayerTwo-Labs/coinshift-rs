@@ -397,8 +397,8 @@ impl Wallet {
                 required_confirmations,
                 l2_recipient, // Optional
                 l2_amount: l2_amount.to_sat(),
-                l1_recipient_address: Some(l1_recipient_address),
-                l1_amount: Some(l1_amount.to_sat()),
+                l1_recipient_address,
+                l1_amount: l1_amount.to_sat(),
             },
         };
 
