@@ -570,10 +570,6 @@ impl Wallet {
             // Filter out SwapPending outputs - they are locked and should only be spent in SwapClaim transactions
             if output.content.is_swap_pending() {
                 skipped_swap_pending += 1;
-                tracing::warn!(
-                    outpoint = ?outpoint,
-                    "Skipping SwapPending output in select_coins (should not be in wallet UTXOs)"
-                );
                 continue;
             }
             if is_locked_output {
