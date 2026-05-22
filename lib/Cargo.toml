@@ -43,7 +43,7 @@ rcgen = "0.13.2"
 rustls = { version = "0.23.40", default-features = false, features = ["ring"] }
 rustreexo = { workspace = true, features = ["with-serde"] }
 smallvec = { version = "1.13.2", features = ["write"] }
-semver = { version = "1.0.25", features = ["serde"] }
+semver = { version = "1.0.28", features = ["serde"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 serde_with = { version = "3.4.0" }
