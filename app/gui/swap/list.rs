@@ -107,7 +107,7 @@ impl SwapList {
                             *l2_recipient,
                             bitcoin::Amount::from_sat(*l2_amount),
                             l1_recipient_address.clone(),
-                            l1_amount.map(bitcoin::Amount::from_sat),
+                            bitcoin::Amount::from_sat(*l1_amount),
                             0,
                             None,
                             None,
@@ -483,10 +483,7 @@ impl SwapList {
                         );
 
                         // Col 6: L1 Amount
-                        let l1_text = swap
-                            .l1_amount
-                            .map(|a| show_l1_amount(a, swap.parent_chain))
-                            .unwrap_or_else(|| "--".into());
+                        let l1_text = show_l1_amount(swap.l1_amount, swap.parent_chain);
                         ui.label(egui::RichText::new(l1_text).size(11.0));
 
                         // Col 7: Tags

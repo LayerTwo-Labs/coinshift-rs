@@ -452,8 +452,8 @@ mod tests {
             None,
             None,
             bitcoin::Amount::from_sat(1_000_000),
-            Some("tb1qtest".to_string()),
-            Some(bitcoin::Amount::from_sat(500_000)),
+            "tb1qtest".to_string(),
+            bitcoin::Amount::from_sat(500_000),
             created_at,
             expires_at,
             None,
@@ -530,36 +530,6 @@ mod tests {
     }
 }
 
-// Custom serde module for Option<Amount> that serializes as Option<u64>
-// This ensures proper roundtrip serialization with bincode
-mod amount_opt_serde {
-    use bitcoin::Amount;
-    use serde::{Deserialize, Deserializer, Serializer};
-
-    pub fn serialize<S>(
-        amount: &Option<Amount>,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        match amount {
-            Some(amt) => serializer.serialize_some(&amt.to_sat()),
-            None => serializer.serialize_none(),
-        }
-    }
-
-    pub fn deserialize<'de, D>(
-        deserializer: D,
-    ) -> Result<Option<Amount>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let opt: Option<u64> = Option::deserialize(deserializer)?;
-        Ok(opt.map(Amount::from_sat))
-    }
-}
-
 /// Swap data structure
 #[derive(
     Clone, Debug, Deserialize, Eq, PartialEq, Serialize, utoipa::ToSchema,
@@ -576,10 +546,10 @@ pub struct Swap {
     #[serde(with = "bitcoin::amount::serde::as_sat")]
     #[schema(value_type = u64)]
     pub l2_amount: bitcoin::Amount,
-    pub l1_recipient_address: Option<String>,
-    #[serde(with = "amount_opt_serde")]
-    #[schema(value_type = Option<u64>)]
-    pub l1_amount: Option<bitcoin::Amount>,
+    pub l1_recipient_address: String,
+    #[serde(with = "bitcoin::amount::serde::as_sat")]
+    #[schema(value_type = u64)]
+    pub l1_amount: bitcoin::Amount,
     /// Address of the person who sent the L1 transaction (the claimer)
     /// Set when L1 transaction is detected
     pub l1_claimer_address: Option<String>,
@@ -615,11 +585,8 @@ impl BorshSerialize for Swap {
         // Serialize Amount as u64
         BorshSerialize::serialize(&self.l2_amount.to_sat(), writer)?;
         BorshSerialize::serialize(&self.l1_recipient_address, writer)?;
-        // Serialize Option<Amount> as Option<u64>
-        BorshSerialize::serialize(
-            &self.l1_amount.map(|amt| amt.to_sat()),
-            writer,
-        )?;
+        // Serialize Amount as u64
+        BorshSerialize::serialize(&self.l1_amount.to_sat(), writer)?;
         BorshSerialize::serialize(&self.l1_claimer_address, writer)?;
         BorshSerialize::serialize(&self.l2_claimer_address, writer)?;
         BorshSerialize::serialize(&self.created_at_height, writer)?;
@@ -653,9 +620,10 @@ impl BorshDeserialize for Swap {
                 BorshDeserialize::deserialize_reader(reader)?,
             ),
             l1_recipient_address: BorshDeserialize::deserialize_reader(reader)?,
-            // Deserialize Option<u64> and convert to Option<Amount>
-            l1_amount: Option::<u64>::deserialize_reader(reader)?
-                .map(bitcoin::Amount::from_sat),
+            // Deserialize u64 and convert to Amount
+            l1_amount: bitcoin::Amount::from_sat(
+                BorshDeserialize::deserialize_reader(reader)?,
+            ),
             l1_claimer_address: BorshDeserialize::deserialize_reader(reader)?,
             l2_claimer_address: BorshDeserialize::deserialize_reader(reader)?,
             created_at_height: BorshDeserialize::deserialize_reader(reader)?,
@@ -680,8 +648,8 @@ impl Swap {
         required_confirmations: Option<u32>,
         l2_recipient: Option<Address>,
         l2_amount: bitcoin::Amount,
-        l1_recipient_address: Option<String>,
-        l1_amount: Option<bitcoin::Amount>,
+        l1_recipient_address: String,
+        l1_amount: bitcoin::Amount,
         created_at_height: u32,
         expires_at_height: Option<u32>,
         l2_creator_address: Option<Address>,

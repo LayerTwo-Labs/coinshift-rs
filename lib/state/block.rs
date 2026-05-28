@@ -325,7 +325,7 @@ pub fn connect_prevalidated(
                     *l2_recipient, // Now optional
                     bitcoin::Amount::from_sat(*l2_amount),
                     l1_recipient_address.clone(),
-                    l1_amount.map(bitcoin::Amount::from_sat),
+                    bitcoin::Amount::from_sat(*l1_amount),
                     current_height,
                     Some(
                         current_height
@@ -352,23 +352,20 @@ pub fn connect_prevalidated(
 
                 // Lock outputs for L2 → L1 swaps
                 // Only lock outputs with SwapPending content, not change outputs
-                if l1_recipient_address.is_some() {
-                    for (vout, output) in
-                        filled.transaction.outputs.iter().enumerate()
-                    {
-                        // Only lock SwapPending outputs, not regular Value outputs (change)
-                        if matches!(
-                            output.content,
-                            crate::types::OutputContent::SwapPending { .. }
-                        ) {
-                            let outpoint = OutPoint::Regular {
-                                txid,
-                                vout: vout as u32,
-                            };
-                            state.lock_output_to_swap(
-                                rwtxn, &outpoint, &swap_id,
-                            )?;
-                        }
+                for (vout, output) in
+                    filled.transaction.outputs.iter().enumerate()
+                {
+                    // Only lock SwapPending outputs, not regular Value outputs (change)
+                    if matches!(
+                        output.content,
+                        crate::types::OutputContent::SwapPending { .. }
+                    ) {
+                        let outpoint = OutPoint::Regular {
+                            txid,
+                            vout: vout as u32,
+                        };
+                        state
+                            .lock_output_to_swap(rwtxn, &outpoint, &swap_id)?;
                     }
                 }
 

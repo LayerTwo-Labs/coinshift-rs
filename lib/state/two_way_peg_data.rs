@@ -561,17 +561,17 @@ fn query_and_update_swap(
     rwtxn: &mut RwTxn,
     rpc_config: &RpcConfig,
     swap: &mut Swap,
-    l1_recipient: &str,
-    l1_amount: bitcoin::Amount,
     block_hash: BlockHash,
     block_height: u32,
 ) -> Result<bool, Error> {
     let client = ParentChainRpcClient::new(rpc_config.clone());
-    let amount_sats = l1_amount.to_sat();
+    let amount_sats = swap.l1_amount.to_sat();
 
     // Find transactions matching address and amount
-    let matches = client
-        .find_transactions_by_address_and_amount(l1_recipient, amount_sats)?;
+    let matches = client.find_transactions_by_address_and_amount(
+        &swap.l1_recipient_address,
+        amount_sats,
+    )?;
 
     if matches.is_empty() {
         return Ok(false);
@@ -727,12 +727,9 @@ fn process_coinshift_transactions(
         }
 
         pending_swaps_count += 1;
-        let l1_amount_str = swap
-            .l1_amount
-            .map(|amt| amt.to_string_in(bitcoin::Denomination::Bitcoin))
-            .unwrap_or_else(|| "N/A".to_string());
-        let l1_amount_sats =
-            swap.l1_amount.map(|amt| amt.to_sat()).unwrap_or(0);
+        let l1_amount_str =
+            swap.l1_amount.to_string_in(bitcoin::Denomination::Bitcoin);
+        let l1_amount_sats = swap.l1_amount.to_sat();
         tracing::debug!(
             swap_id = %swap.id,
             parent_chain = ?swap.parent_chain,
@@ -784,14 +781,9 @@ fn process_coinshift_transactions(
         // - Swap target: Signet (for coinshift transactions)
         // - We query Signet for transactions, not Regtest!
         //
-        let l1_recipient_str =
-            swap.l1_recipient_address.as_deref().unwrap_or("N/A");
-        let l1_amount_str = swap
-            .l1_amount
-            .map(|amt| amt.to_string_in(bitcoin::Denomination::Bitcoin))
-            .unwrap_or_else(|| "N/A".to_string());
-        let l1_amount_sats =
-            swap.l1_amount.map(|amt| amt.to_sat()).unwrap_or(0);
+        let l1_amount_str =
+            swap.l1_amount.to_string_in(bitcoin::Denomination::Bitcoin);
+        let l1_amount_sats = swap.l1_amount.to_sat();
         tracing::debug!(
             swap_id = %swap.id,
             parent_chain = ?swap.parent_chain,
@@ -800,7 +792,7 @@ fn process_coinshift_transactions(
             l1_amount_sats = %l1_amount_sats,
             "Scanning enforcer on {:?} for transactions to {} with amount {} BTC",
             swap.parent_chain,
-            l1_recipient_str,
+            swap.l1_recipient_address,
             l1_amount_str
         );
 
@@ -812,19 +804,15 @@ fn process_coinshift_transactions(
         // URL is chosen by swap.parent_chain: we look up that chain in l1_rpc_configs.json.
         // If no RPC config exists for this chain, we skip L1 lookup and the swap stays
         // Pending until config is set or the user updates via update_swap_l1_txid.
-        let l1_recipient_clone = swap.l1_recipient_address.clone();
-        let l1_amount_clone = swap.l1_amount;
         let parent_chain_clone = swap.parent_chain;
-        if let (Some(l1_recipient), Some(l1_amount)) =
-            (l1_recipient_clone.as_deref(), l1_amount_clone)
-            && let Some(get_rpc_config) = rpc_config_getter
+        if let Some(get_rpc_config) = rpc_config_getter
             && let Some(rpc_config) = get_rpc_config(parent_chain_clone)
         {
             tracing::info!(
                 swap_id = %swap.id,
                 parent_chain = ?parent_chain_clone,
-                l1_recipient = %l1_recipient,
-                l1_amount_sats = %l1_amount.to_sat(),
+                l1_recipient = %swap.l1_recipient_address,
+                l1_amount_sats = %swap.l1_amount.to_sat(),
                 url = %rpc_config.url,
                 "Querying L1 for swap"
             );
@@ -833,8 +821,6 @@ fn process_coinshift_transactions(
                 rwtxn,
                 &rpc_config,
                 &mut swap,
-                l1_recipient,
-                l1_amount,
                 block_hash,
                 block_height,
             ) {
@@ -853,14 +839,14 @@ fn process_coinshift_transactions(
                     tracing::warn!(
                         swap_id = %swap.id,
                         parent_chain = ?parent_chain_clone,
-                        l1_recipient = %l1_recipient,
+                        l1_recipient = %swap.l1_recipient_address,
                         url = %rpc_config.url,
                         error = %e,
                         "Failed to query L1 for swap; swap will stay pending until RPC succeeds or l1_txid is set manually"
                     );
                 }
             }
-        } else if l1_recipient_clone.is_some() && l1_amount_clone.is_some() {
+        } else {
             tracing::debug!(
                 swap_id = %swap.id,
                 parent_chain = ?parent_chain_clone,

@@ -91,22 +91,7 @@ fn recover_wallet_addresses(node: &Node, wallet: &Wallet) -> Result<(), Error> {
 fn update_wallet(node: &Node, wallet: &Wallet) -> Result<(), Error> {
     tracing::trace!("starting wallet update");
     let addresses = wallet.get_addresses()?;
-    let mut utxos = node.get_utxos_by_addresses(&addresses)?;
-
-    // Filter out SwapPending outputs - they should not be in the wallet's UTXO database
-    // SwapPending outputs are locked and should only be spent in SwapClaim transactions
-    let swap_pending_count = utxos
-        .iter()
-        .filter(|(_, output)| output.content.is_swap_pending())
-        .count();
-    if swap_pending_count > 0 {
-        tracing::warn!(
-            swap_pending_count = swap_pending_count,
-            "Filtering out SwapPending outputs from wallet UTXOs"
-        );
-        utxos.retain(|_, output| !output.content.is_swap_pending());
-    }
-
+    let utxos = node.get_utxos_by_addresses(&addresses)?;
     let outpoints: Vec<_> = wallet.get_utxos()?.into_keys().collect();
     let spent: Vec<_> = node
         .get_spent_utxos(&outpoints)?
