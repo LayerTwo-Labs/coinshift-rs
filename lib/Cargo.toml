@@ -18,7 +18,7 @@ async-lock = "3.4.0"
 bincode = { workspace = true }
 bitcoin = { workspace = true, features = ["serde"] }
 blake3 = "1.4.1"
-borsh = { version = "1.3.1", features = ["derive"] }
+borsh = { version = "1.6.1", features = ["derive"] }
 byteorder = "1.4.3"
 bytes = "1.4.0"
 clap = { workspace = true, features = ["derive"], optional = true }
@@ -40,7 +40,7 @@ quinn = "0.11.6"
 rayon = "1.7.0"
 reqwest = { version = "0.12", features = ["blocking", "json"] }
 rcgen = "0.13.2"
-rustls = { version = "0.23.21", default-features = false, features = ["ring"] }
+rustls = { version = "0.23.40", default-features = false, features = ["ring"] }
 rustreexo = { workspace = true, features = ["with-serde"] }
 smallvec = { version = "1.13.2", features = ["write"] }
 semver = { version = "1.0.25", features = ["serde"] }

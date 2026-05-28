@@ -33,9 +33,7 @@ pub fn validate_swap_create(
     };
 
     // 1. Verify swap ID matches computed ID
-    let computed_swap_id = if let (Some(l1_addr), Some(l1_amt)) =
-        (l1_recipient_address.as_ref(), l1_amount)
-    {
+    let computed_swap_id = {
         // L2 → L1 swap
         // We need the sender's address - get it from the first input
         let first_input =
@@ -46,16 +44,11 @@ pub fn validate_swap_create(
             })?;
         let l2_sender_address = first_input.address;
         SwapId::from_l2_to_l1(
-            l1_addr,
-            bitcoin::Amount::from_sat(*l1_amt),
+            l1_recipient_address,
+            bitcoin::Amount::from_sat(*l1_amount),
             &l2_sender_address,
             l2_recipient.as_ref(), // Now optional
         )
-    } else {
-        return Err(Error::InvalidTransaction(
-            "L2 → L1 swap requires l1_recipient_address and l1_amount"
-                .to_string(),
-        ));
     };
 
     if computed_swap_id.0 != *swap_id {
@@ -89,80 +82,77 @@ pub fn validate_swap_create(
     }
 
     // 5. For L2 → L1 swaps, verify inputs aren't locked and sufficient funds
-    if l1_recipient_address.is_some() {
-        // Check that no inputs are locked to another swap
-        for (outpoint, _) in &transaction.inputs {
-            if let Some(locked_swap_id) =
-                state.is_output_locked_to_swap(rotxn, outpoint)?
-                && locked_swap_id.0 != *swap_id
-            {
-                // Check if the locked swap exists and is valid
-                match state.get_swap(rotxn, &locked_swap_id) {
-                    Ok(Some(_)) => {
-                        // Swap exists and is valid - this is a real lock
-                        return Err(Error::InvalidTransaction(format!(
-                            "Input {} is locked to swap {}",
-                            outpoint, locked_swap_id
-                        )));
-                    }
-                    Ok(None) => {
-                        // Swap doesn't exist - orphaned lock
-                        return Err(Error::InvalidTransaction(format!(
-                            "Input {} is locked to non-existent swap {} (orphaned lock). Please run cleanup_orphaned_locks to fix this.",
-                            outpoint, locked_swap_id
-                        )));
-                    }
-                    Err(err) => {
-                        // Check if it's a deserialization error (corrupted swap)
-                        let err_str = format!("{err:#}");
-                        let err_debug = format!("{err:?}");
-                        let is_deserialization_error = err_str
-                            .contains("Decoding")
-                            || err_str.contains("InvalidTagEncoding")
-                            || err_str.contains("deserialize")
-                            || err_str.contains("bincode")
-                            || err_str.contains("Borsh")
-                            || err_debug.contains("Decoding")
-                            || err_debug.contains("InvalidTagEncoding")
-                            || err_debug.contains("deserialize");
+    // Check that no inputs are locked to another swap
+    for (outpoint, _) in &transaction.inputs {
+        if let Some(locked_swap_id) =
+            state.is_output_locked_to_swap(rotxn, outpoint)?
+            && locked_swap_id.0 != *swap_id
+        {
+            // Check if the locked swap exists and is valid
+            match state.get_swap(rotxn, &locked_swap_id) {
+                Ok(Some(_)) => {
+                    // Swap exists and is valid - this is a real lock
+                    return Err(Error::InvalidTransaction(format!(
+                        "Input {} is locked to swap {}",
+                        outpoint, locked_swap_id
+                    )));
+                }
+                Ok(None) => {
+                    // Swap doesn't exist - orphaned lock
+                    return Err(Error::InvalidTransaction(format!(
+                        "Input {} is locked to non-existent swap {} (orphaned lock). Please run cleanup_orphaned_locks to fix this.",
+                        outpoint, locked_swap_id
+                    )));
+                }
+                Err(err) => {
+                    // Check if it's a deserialization error (corrupted swap)
+                    let err_str = format!("{err:#}");
+                    let err_debug = format!("{err:?}");
+                    let is_deserialization_error = err_str.contains("Decoding")
+                        || err_str.contains("InvalidTagEncoding")
+                        || err_str.contains("deserialize")
+                        || err_str.contains("bincode")
+                        || err_str.contains("Borsh")
+                        || err_debug.contains("Decoding")
+                        || err_debug.contains("InvalidTagEncoding")
+                        || err_debug.contains("deserialize");
 
-                        if is_deserialization_error {
-                            // Swap is corrupted - orphaned lock
-                            return Err(Error::InvalidTransaction(format!(
-                                "Input {} is locked to corrupted swap {} (orphaned lock). Please run cleanup_orphaned_locks to fix this.",
-                                outpoint, locked_swap_id
-                            )));
-                        } else {
-                            // Other database error - return original error
-                            return Err(Error::InvalidTransaction(format!(
-                                "Input {} is locked to swap {}, but error checking swap: {}",
-                                outpoint, locked_swap_id, err
-                            )));
-                        }
+                    if is_deserialization_error {
+                        // Swap is corrupted - orphaned lock
+                        return Err(Error::InvalidTransaction(format!(
+                            "Input {} is locked to corrupted swap {} (orphaned lock). Please run cleanup_orphaned_locks to fix this.",
+                            outpoint, locked_swap_id
+                        )));
+                    } else {
+                        // Other database error - return original error
+                        return Err(Error::InvalidTransaction(format!(
+                            "Input {} is locked to swap {}, but error checking swap: {}",
+                            outpoint, locked_swap_id, err
+                        )));
                     }
                 }
             }
         }
+    }
 
-        // Verify transaction spends at least l2_amount
-        let total_input_value = filled_transaction
-            .spent_utxos
-            .iter()
-            .map(crate::types::GetValue::get_value)
-            .try_fold(bitcoin::Amount::ZERO, |acc, val| {
-                acc.checked_add(val).ok_or(())
-            })
-            .map_err(|_| {
-                Error::InvalidTransaction("Input value overflow".to_string())
-            })?;
+    // Verify transaction spends at least l2_amount
+    let total_input_value = filled_transaction
+        .spent_utxos
+        .iter()
+        .map(crate::types::GetValue::get_value)
+        .try_fold(bitcoin::Amount::ZERO, |acc, val| {
+            acc.checked_add(val).ok_or(())
+        })
+        .map_err(|_| {
+            Error::InvalidTransaction("Input value overflow".to_string())
+        })?;
 
-        let required_amount = bitcoin::Amount::from_sat(*l2_amount);
-        if total_input_value < required_amount {
-            return Err(Error::InvalidTransaction(format!(
-                "Insufficient funds: need {}, have {}",
-                required_amount, total_input_value
-            )));
-        }
+    let required_amount = bitcoin::Amount::from_sat(*l2_amount);
+    if total_input_value < required_amount {
+        return Err(Error::InvalidTransaction(format!(
+            "Insufficient funds: need {}, have {}",
+            required_amount, total_input_value
+        )));
     }
 
     Ok(())

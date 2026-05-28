@@ -76,10 +76,10 @@ async fn verify_swap_created(
         swap.l2_amount.to_sat()
     );
     anyhow::ensure!(
-        swap.l1_amount.map(|a| a.to_sat()) == Some(expected_l1_amount),
+        swap.l1_amount.to_sat() == expected_l1_amount,
         "L1 amount mismatch: expected {}, got {:?}",
         expected_l1_amount,
-        swap.l1_amount.map(|a| a.to_sat())
+        swap.l1_amount.to_sat()
     );
     anyhow::ensure!(
         swap.l2_recipient == expected_l2_recipient,
