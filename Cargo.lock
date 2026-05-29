@@ -887,7 +887,7 @@ dependencies = [
  "jsonrpsee",
  "miette",
  "nom",
- "nonempty",
+ "nonempty 0.11.0",
  "ordermap",
  "ouroboros",
  "parking_lot",
@@ -1392,7 +1392,7 @@ dependencies = [
  "hex 0.4.3",
  "jsonrpsee",
  "merkle-cbt",
- "nonempty",
+ "nonempty 0.12.0",
  "parking_lot",
  "prost 0.13.5",
  "prost-build 0.13.5",
@@ -1792,7 +1792,7 @@ dependencies = [
  "indexmap 2.13.0",
  "jsonrpsee",
  "lending-iterator",
- "nonempty",
+ "nonempty 0.11.0",
  "num-traits",
  "parking_lot",
  "serde",
@@ -4483,6 +4483,12 @@ name = "nonempty"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "549e471b99ccaf2f89101bec68f4d244457d5a95a9c3d0672e9564124397741d"
+
+[[package]]
+name = "nonempty"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9737e026353e5cd0736f98eddae28665118eb6f6600902a7f50db585621fecb6"
 dependencies = [
  "serde",
 ]
