@@ -5,9 +5,28 @@ use sneed::RoTxn;
 use crate::{
     state::{Error, State},
     types::{
-        FilledTransaction, SwapId, SwapState, SwapTxId, Transaction, TxData,
+        Address, FilledTransaction, GetValue, SwapId, SwapState, SwapTxId,
+        Transaction, TxData,
     },
 };
+
+/// Total value of the outputs paying `recipient`.
+fn amount_paid_to(
+    transaction: &Transaction,
+    recipient: &Address,
+) -> Result<bitcoin::Amount, Error> {
+    transaction
+        .outputs
+        .iter()
+        .filter(|output| output.address == *recipient)
+        .map(GetValue::get_value)
+        .try_fold(bitcoin::Amount::ZERO, |acc, val| acc.checked_add(val))
+        .ok_or_else(|| {
+            Error::InvalidTransaction(
+                "Output value overflow in SwapClaim".to_string(),
+            )
+        })
+}
 
 /// Validate a SwapCreate transaction
 pub fn validate_swap_create(
@@ -255,15 +274,14 @@ pub fn validate_swap_claim(
         }
     };
 
-    let recipient_receives = transaction
-        .outputs
-        .iter()
-        .any(|output| output.address == expected_recipient);
-
-    if !recipient_receives {
+    // The recipient must receive the full swapped amount. Checking only that
+    // some output pays the recipient lets a claimer spend the locked output
+    // while paying the recipient a token amount and keeping the rest.
+    let amount_to_recipient = amount_paid_to(transaction, &expected_recipient)?;
+    if amount_to_recipient < swap.l2_amount {
         return Err(Error::InvalidTransaction(format!(
-            "SwapClaim must have at least one output to {}",
-            expected_recipient
+            "SwapClaim must pay at least {} to {}, but pays {}",
+            swap.l2_amount, expected_recipient, amount_to_recipient
         )));
     }
 
@@ -344,20 +362,18 @@ pub fn validate_swap_claim_consensus(
         ));
     }
 
-    // For pre-specified swaps the recipient is fixed at creation, so consensus
-    // can require the claim to pay them. Open swaps derive their recipient from
-    // node-local L1 monitoring, so that binding is left to the mempool check.
+    // For pre-specified swaps both the recipient and the swapped amount are
+    // fixed at creation, so consensus can require the claim to pay the recipient
+    // the full amount. Open swaps derive their recipient from node-local L1
+    // monitoring, so that binding is left to the mempool check.
     if let Some(swap) = state.get_swap(rotxn, &swap_id)?
         && let Some(recipient) = swap.l2_recipient
     {
-        let recipient_receives = transaction
-            .outputs
-            .iter()
-            .any(|output| output.address == recipient);
-        if !recipient_receives {
+        let amount_to_recipient = amount_paid_to(transaction, &recipient)?;
+        if amount_to_recipient < swap.l2_amount {
             return Err(Error::InvalidTransaction(format!(
-                "SwapClaim must have at least one output to {}",
-                recipient
+                "SwapClaim must pay at least {} to {}, but pays {}",
+                swap.l2_amount, recipient, amount_to_recipient
             )));
         }
     }
