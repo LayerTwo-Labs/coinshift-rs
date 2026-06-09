@@ -5,7 +5,7 @@ use sneed::{RoTxn, RwTxn, db::error::Error as DbError};
 
 use crate::{
     authorization::Authorization,
-    state::{Error, PrevalidatedBlock, State, error},
+    state::{Error, PrevalidatedBlock, State, error, swap},
     types::{
         AccumulatorDiff, AmountOverflowError, Body, FilledTransaction,
         GetAddress as _, GetValue as _, Header, InPoint, MerkleRoot, OutPoint,
@@ -95,6 +95,12 @@ pub fn prevalidate(
             spent_utxos,
             transaction: transaction.clone(),
         };
+        swap::validate_block_transaction(
+            state,
+            rotxn,
+            transaction,
+            &filled_tx,
+        )?;
         total_fees = total_fees
             .checked_add(state.validate_filled_transaction(&filled_tx)?)
             .ok_or(AmountOverflowError)?;
@@ -525,6 +531,12 @@ pub fn validate(
     let mut all_input_keys = Vec::with_capacity(total_inputs);
     for filled_transaction in &filled_transactions {
         let txid = filled_transaction.transaction.txid();
+        swap::validate_block_transaction(
+            state,
+            rotxn,
+            &filled_transaction.transaction,
+            filled_transaction,
+        )?;
         // hashes of spent utxos, used to verify the utreexo proof
         let mut spent_utxo_hashes = Vec::<BitcoinNodeHash>::with_capacity(
             filled_transaction.transaction.inputs.len(),

@@ -295,3 +295,99 @@ pub fn validate_no_locked_outputs(
 
     Ok(())
 }
+
+/// Validate the deterministic swap rules for a `SwapClaim` during block
+/// validation.
+///
+/// Unlike [`validate_swap_claim`], this does not inspect the swap's `state`
+/// (`ReadyToClaim`) or whether an L1 transaction has been detected. Those are
+/// derived from each node's own parent-chain monitoring (see
+/// `two_way_peg_data::query_and_update_swap`) and are not part of consensus, so
+/// `connect` trusts the block and advances the local state to match. Enforcing
+/// them here would let a node that has not yet observed the L1 fill reject an
+/// otherwise valid block. Only the rules that follow deterministically from
+/// on-chain data are checked: that the claim spends an output locked to its
+/// swap, spends nothing locked to another swap, and, for pre-specified swaps,
+/// pays the recipient fixed at creation.
+pub fn validate_swap_claim_consensus(
+    state: &State,
+    rotxn: &RoTxn,
+    transaction: &Transaction,
+) -> Result<(), Error> {
+    let TxData::SwapClaim { swap_id, .. } = &transaction.data else {
+        return Err(Error::InvalidTransaction(
+            "Expected SwapClaim transaction".to_string(),
+        ));
+    };
+    let swap_id = SwapId(*swap_id);
+
+    // The claim must spend at least one output locked to this swap, and must
+    // not spend any output locked to a different swap.
+    let mut found_locked_input = false;
+    for (outpoint, _) in &transaction.inputs {
+        if let Some(locked_swap_id) =
+            state.is_output_locked_to_swap(rotxn, outpoint)?
+        {
+            if locked_swap_id != swap_id {
+                return Err(Error::InvalidTransaction(format!(
+                    "Input {} is locked to different swap {}",
+                    outpoint, locked_swap_id
+                )));
+            }
+            found_locked_input = true;
+        }
+    }
+    if !found_locked_input {
+        return Err(Error::InvalidTransaction(
+            "SwapClaim must spend at least one output locked to the swap"
+                .to_string(),
+        ));
+    }
+
+    // For pre-specified swaps the recipient is fixed at creation, so consensus
+    // can require the claim to pay them. Open swaps derive their recipient from
+    // node-local L1 monitoring, so that binding is left to the mempool check.
+    if let Some(swap) = state.get_swap(rotxn, &swap_id)?
+        && let Some(recipient) = swap.l2_recipient
+    {
+        let recipient_receives = transaction
+            .outputs
+            .iter()
+            .any(|output| output.address == recipient);
+        if !recipient_receives {
+            return Err(Error::InvalidTransaction(format!(
+                "SwapClaim must have at least one output to {}",
+                recipient
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+/// Validate swap consensus rules for a single transaction in a block.
+///
+/// Block validation must enforce the same swap rules as the mempool path in
+/// [`State::validate_transaction`]; otherwise a miner could include a swap
+/// transaction that no node would accept from the mempool, e.g. a regular
+/// transaction spending a swap-locked output, or a claim that pays the attacker
+/// instead of the swap recipient. `SwapClaim` uses the consensus subset that
+/// ignores node-local L1 state; see [`validate_swap_claim_consensus`].
+pub fn validate_block_transaction(
+    state: &State,
+    rotxn: &RoTxn,
+    transaction: &Transaction,
+    filled_transaction: &FilledTransaction,
+) -> Result<(), Error> {
+    match &transaction.data {
+        TxData::SwapCreate { .. } => {
+            validate_swap_create(state, rotxn, transaction, filled_transaction)
+        }
+        TxData::SwapClaim { .. } => {
+            validate_swap_claim_consensus(state, rotxn, transaction)
+        }
+        TxData::Regular => {
+            validate_no_locked_outputs(state, rotxn, transaction)
+        }
+    }
+}
