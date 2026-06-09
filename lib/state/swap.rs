@@ -391,3 +391,189 @@ pub fn validate_block_transaction(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use sneed::Env;
+
+    use super::*;
+    use crate::types::{
+        Address, OutPoint, Output, OutputContent, ParentChainType, Swap,
+        SwapDirection, SwapTxId, Transaction, Txid,
+    };
+
+    fn sat(value: u64) -> bitcoin::Amount {
+        bitcoin::Amount::from_sat(value)
+    }
+
+    /// Build a `State` backed by a fresh temporary LMDB environment.
+    fn test_state() -> (temp_dir::TempDir, Env, State) {
+        let dir = temp_dir::TempDir::new().unwrap();
+        let mut opts = heed::EnvOpenOptions::new();
+        opts.map_size(10 * 1024 * 1024).max_dbs(State::NUM_DBS);
+        let env = unsafe { Env::open(&opts, dir.path()) }.unwrap();
+        let state = State::new(&env).unwrap();
+        (dir, env, state)
+    }
+
+    /// A regular (non-claim) transaction that spends a swap-locked output must
+    /// be rejected by block validation, just as it is in the mempool.
+    #[test]
+    fn block_validation_rejects_spending_locked_output() {
+        let (_dir, env, state) = test_state();
+        let swap_id = SwapId([7u8; 32]);
+        let outpoint = OutPoint::Regular {
+            txid: Txid([9u8; 32]),
+            vout: 0,
+        };
+        let locked_output = Output {
+            address: Address([1u8; 20]),
+            content: OutputContent::SwapPending {
+                value: sat(50_000),
+                swap_id: swap_id.0,
+            },
+        };
+
+        let mut rwtxn = env.write_txn().unwrap();
+        state
+            .lock_output_to_swap(&mut rwtxn, &outpoint, &swap_id)
+            .unwrap();
+        rwtxn.commit().unwrap();
+
+        let tx = Transaction {
+            inputs: vec![(outpoint, [0u8; 32])],
+            proof: Default::default(),
+            outputs: vec![Output {
+                address: Address([2u8; 20]),
+                content: OutputContent::Value(sat(50_000)),
+            }],
+            data: TxData::Regular,
+        };
+        let filled = FilledTransaction {
+            spent_utxos: vec![locked_output],
+            transaction: tx.clone(),
+        };
+
+        let rotxn = env.read_txn().unwrap();
+        let result = validate_block_transaction(&state, &rotxn, &tx, &filled);
+        assert!(
+            matches!(result, Err(Error::InvalidTransaction(_))),
+            "spending a locked output in a regular tx should be rejected, got {result:?}"
+        );
+    }
+
+    fn pre_specified_swap_state() -> (
+        temp_dir::TempDir,
+        Env,
+        State,
+        SwapId,
+        OutPoint,
+        Output,
+        Address,
+    ) {
+        let (dir, env, state) = test_state();
+        let recipient = Address([3u8; 20]);
+        let creator = Address([5u8; 20]);
+        let swap_id = SwapId([8u8; 32]);
+        let outpoint = OutPoint::Regular {
+            txid: Txid([1u8; 32]),
+            vout: 0,
+        };
+        let locked_output = Output {
+            address: recipient,
+            content: OutputContent::SwapPending {
+                value: sat(50_000),
+                swap_id: swap_id.0,
+            },
+        };
+        let swap = Swap::new(
+            swap_id,
+            SwapDirection::L2ToL1,
+            ParentChainType::Regtest,
+            SwapTxId::Hash32([0u8; 32]),
+            None,
+            Some(recipient),
+            sat(50_000),
+            "rbtc-recipient".to_string(),
+            sat(40_000),
+            0,
+            None,
+            Some(creator),
+        );
+
+        let mut rwtxn = env.write_txn().unwrap();
+        state.save_swap(&mut rwtxn, &swap).unwrap();
+        state
+            .lock_output_to_swap(&mut rwtxn, &outpoint, &swap_id)
+            .unwrap();
+        rwtxn.commit().unwrap();
+
+        (dir, env, state, swap_id, outpoint, locked_output, recipient)
+    }
+
+    /// A claim of a pre-specified swap that pays someone other than the
+    /// recipient fixed at creation must be rejected by block validation.
+    #[test]
+    fn block_validation_rejects_claim_to_wrong_recipient() {
+        let (_dir, env, state, swap_id, outpoint, locked_output, _recipient) =
+            pre_specified_swap_state();
+
+        let tx = Transaction {
+            inputs: vec![(outpoint, [0u8; 32])],
+            proof: Default::default(),
+            outputs: vec![Output {
+                address: Address([4u8; 20]), // attacker, not the recipient
+                content: OutputContent::Value(sat(49_000)),
+            }],
+            data: TxData::SwapClaim {
+                swap_id: swap_id.0,
+                l2_claimer_address: None,
+                proof_data: None,
+            },
+        };
+        let filled = FilledTransaction {
+            spent_utxos: vec![locked_output],
+            transaction: tx.clone(),
+        };
+
+        let rotxn = env.read_txn().unwrap();
+        let result = validate_block_transaction(&state, &rotxn, &tx, &filled);
+        assert!(
+            matches!(result, Err(Error::InvalidTransaction(_))),
+            "claim paying the wrong recipient should be rejected, got {result:?}"
+        );
+    }
+
+    /// A claim that does pay the pre-specified recipient and spends the locked
+    /// output must still pass block validation.
+    #[test]
+    fn block_validation_accepts_claim_to_recipient() {
+        let (_dir, env, state, swap_id, outpoint, locked_output, recipient) =
+            pre_specified_swap_state();
+
+        let tx = Transaction {
+            inputs: vec![(outpoint, [0u8; 32])],
+            proof: Default::default(),
+            outputs: vec![Output {
+                address: recipient,
+                content: OutputContent::Value(sat(50_000)),
+            }],
+            data: TxData::SwapClaim {
+                swap_id: swap_id.0,
+                l2_claimer_address: None,
+                proof_data: None,
+            },
+        };
+        let filled = FilledTransaction {
+            spent_utxos: vec![locked_output],
+            transaction: tx.clone(),
+        };
+
+        let rotxn = env.read_txn().unwrap();
+        let result = validate_block_transaction(&state, &rotxn, &tx, &filled);
+        assert!(
+            result.is_ok(),
+            "claim paying the recipient should be accepted, got {result:?}"
+        );
+    }
+}
