@@ -592,4 +592,160 @@ mod tests {
             "claim paying the recipient should be accepted, got {result:?}"
         );
     }
+
+    /// A claim of a pre-specified swap that pays the recipient less than the
+    /// swapped amount must be rejected by block validation; otherwise a claimer
+    /// could pay the recipient a token amount and keep the rest of the locked
+    /// value.
+    #[test]
+    fn block_validation_rejects_underpaying_claim() {
+        let (_dir, env, state, swap_id, outpoint, locked_output, recipient) =
+            pre_specified_swap_state();
+
+        let tx = Transaction {
+            inputs: vec![(outpoint, [0u8; 32])],
+            proof: Default::default(),
+            outputs: vec![
+                Output {
+                    address: recipient,
+                    content: OutputContent::Value(sat(1)),
+                },
+                Output {
+                    address: Address([4u8; 20]), // attacker keeps the rest
+                    content: OutputContent::Value(sat(49_999)),
+                },
+            ],
+            data: TxData::SwapClaim {
+                swap_id: swap_id.0,
+                l2_claimer_address: None,
+                proof_data: None,
+            },
+        };
+        let filled = FilledTransaction {
+            spent_utxos: vec![locked_output],
+            transaction: tx.clone(),
+        };
+
+        let rotxn = env.read_txn().unwrap();
+        let result = validate_block_transaction(&state, &rotxn, &tx, &filled);
+        assert!(
+            matches!(result, Err(Error::InvalidTransaction(_))),
+            "claim underpaying the recipient should be rejected, got {result:?}"
+        );
+    }
+
+    fn ready_swap_state() -> (
+        temp_dir::TempDir,
+        Env,
+        State,
+        SwapId,
+        OutPoint,
+        Output,
+        Address,
+    ) {
+        let (dir, env, state) = test_state();
+        let recipient = Address([6u8; 20]);
+        let swap_id = SwapId([11u8; 32]);
+        let outpoint = OutPoint::Regular {
+            txid: Txid([2u8; 32]),
+            vout: 0,
+        };
+        let locked_output = Output {
+            address: recipient,
+            content: OutputContent::SwapPending {
+                value: sat(50_000),
+                swap_id: swap_id.0,
+            },
+        };
+        let mut swap = Swap::new(
+            swap_id,
+            SwapDirection::L2ToL1,
+            ParentChainType::Regtest,
+            SwapTxId::Hash32([0u8; 32]),
+            None,
+            Some(recipient),
+            sat(50_000),
+            "rbtc-recipient".to_string(),
+            sat(40_000),
+            0,
+            None,
+            Some(Address([5u8; 20])),
+        );
+        swap.state = SwapState::ReadyToClaim;
+
+        let mut rwtxn = env.write_txn().unwrap();
+        state.save_swap(&mut rwtxn, &swap).unwrap();
+        state
+            .lock_output_to_swap(&mut rwtxn, &outpoint, &swap_id)
+            .unwrap();
+        rwtxn.commit().unwrap();
+
+        (dir, env, state, swap_id, outpoint, locked_output, recipient)
+    }
+
+    /// The mempool claim validator must also require the recipient to receive
+    /// the full amount, not merely some output.
+    #[test]
+    fn mempool_claim_rejects_underpayment() {
+        let (_dir, env, state, swap_id, outpoint, locked_output, recipient) =
+            ready_swap_state();
+
+        let tx = Transaction {
+            inputs: vec![(outpoint, [0u8; 32])],
+            proof: Default::default(),
+            outputs: vec![Output {
+                address: recipient,
+                content: OutputContent::Value(sat(10_000)),
+            }],
+            data: TxData::SwapClaim {
+                swap_id: swap_id.0,
+                l2_claimer_address: None,
+                proof_data: None,
+            },
+        };
+        let filled = FilledTransaction {
+            spent_utxos: vec![locked_output],
+            transaction: tx.clone(),
+        };
+
+        let rotxn = env.read_txn().unwrap();
+        let result = validate_swap_claim(&state, &rotxn, &tx, &filled);
+        assert!(
+            matches!(result, Err(Error::InvalidTransaction(_))),
+            "underpaying claim should be rejected by the mempool validator, got {result:?}"
+        );
+    }
+
+    /// A claim that pays the recipient the full amount passes the mempool
+    /// validator.
+    #[test]
+    fn mempool_claim_accepts_full_payment() {
+        let (_dir, env, state, swap_id, outpoint, locked_output, recipient) =
+            ready_swap_state();
+
+        let tx = Transaction {
+            inputs: vec![(outpoint, [0u8; 32])],
+            proof: Default::default(),
+            outputs: vec![Output {
+                address: recipient,
+                content: OutputContent::Value(sat(50_000)),
+            }],
+            data: TxData::SwapClaim {
+                swap_id: swap_id.0,
+                l2_claimer_address: None,
+                proof_data: None,
+            },
+        };
+        let filled = FilledTransaction {
+            spent_utxos: vec![locked_output],
+            transaction: tx.clone(),
+        };
+
+        let rotxn = env.read_txn().unwrap();
+        let result = validate_swap_claim(&state, &rotxn, &tx, &filled);
+        assert!(
+            result.is_ok(),
+            "full-amount claim should pass the mempool validator, got {result:?}"
+        );
+    }
 }
