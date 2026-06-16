@@ -72,9 +72,6 @@ features = ["quanta", "std"]
 [features]
 clap = ["dep:clap"]
 
-[dev-dependencies]
-temp-dir = "0.2"
-
 [lints]
 workspace = true
 

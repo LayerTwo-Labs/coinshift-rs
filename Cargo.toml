@@ -58,7 +58,6 @@ rev = "6da503b598470f6e87aa9d769b94df64df7ff3ae"
 all = { level = "deny", priority = -1 }
 assertions_on_result_states = "allow"
 let_unit_value = "allow"
-result_large_err = "allow"
 print_stderr = "deny"
 print_stdout = "deny"
 significant_drop_in_scrutinee = "deny"
