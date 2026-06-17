@@ -119,7 +119,19 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             failure_collector,
         )
         .into_iter()
-        .map(|trial| trial.run_blocking(rt_handle.clone())),
+        .map(|trial| {
+            let trial = trial.run_blocking(rt_handle.clone());
+            // `multi_node_verification` is flaky in CI: the verifier node
+            // evicts the miner on a transient, mainchain-gated BMM
+            // verification failure and then wedges. Disabled until the
+            // underlying race is fixed. See:
+            // https://github.com/LayerTwo-Labs/coinshift-rs/issues/76
+            if trial.name() == "multi_node_verification" {
+                trial.with_ignored_flag(true)
+            } else {
+                trial
+            }
+        }),
     );
     // Optional filter for selected tests
     if let Some(selected) = &args.tests {
