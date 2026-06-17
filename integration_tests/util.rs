@@ -8,11 +8,6 @@ use bip300301_enforcer_integration_tests::util::{
     spawn_command_with_args,
 };
 
-fn load_env_var_from_string(s: &str) -> Result<(), VarError> {
-    dotenvy::from_read_override(s.as_bytes())
-        .map_err(|err| VarError::new(s, err))
-}
-
 #[derive(Clone, Debug)]
 pub struct BinPaths {
     pub coinshift_app: PathBuf,
@@ -22,11 +17,11 @@ pub struct BinPaths {
 impl BinPaths {
     /// Read from environment variables
     pub fn from_env() -> Result<Self, VarError> {
-        let () = load_env_var_from_string("BITCOIN_UTIL=''")?;
-        let () = load_env_var_from_string("SIGNET_MINER=''")?;
+        // The enforcer's `BinPaths` reads each binary path from the environment
+        // lazily (on first access), so we only need to resolve our own binary.
         Ok(Self {
-            coinshift_app: get_env_var("COINSHIFT_APP")?.into(),
-            others: EnforcerBinPaths::from_env()?,
+            coinshift_app: get_env_var::<_, PathBuf>("COINSHIFT_APP")?,
+            others: EnforcerBinPaths::new(),
         })
     }
 }

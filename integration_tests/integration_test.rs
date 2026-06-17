@@ -30,12 +30,15 @@ fn deposit_withdraw_roundtrip(
         "deposit_withdraw_roundtrip",
         async move {
             let (res_tx, _) = futures::channel::mpsc::unbounded();
-            let post_setup = bip300301_enforcer_integration_tests::setup::setup(
+            let pre_setup = bip300301_enforcer_integration_tests::setup::PreSetup::new(
                 &bin_paths.others,
                 Network::Regtest,
-                Mode::Mempool,
-                res_tx
-            ).await?;
+            )?;
+            let setup_opts: bip300301_enforcer_integration_tests::setup::SetupOpts =
+                Default::default();
+            let post_setup = pre_setup
+                .setup(Mode::Mempool, setup_opts, res_tx)
+                .await?;
             bip300301_enforcer_integration_tests::integration_test::deposit_withdraw_roundtrip::<PostSetup>(
                     post_setup,
                     Init {
