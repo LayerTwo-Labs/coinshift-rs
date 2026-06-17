@@ -5,8 +5,8 @@ use bip300301_enforcer_integration_tests::{
         activate_sidechain, deposit, fund_enforcer, propose_sidechain,
     },
     setup::{
-        Mode, Network, PostSetup as EnforcerPostSetup, Sidechain as _,
-        setup as setup_enforcer,
+        Mode, Network, PostSetup as EnforcerPostSetup, PreSetup, SetupOpts,
+        Sidechain as _,
     },
     util::{AbortOnDrop, AsyncTrial, TestFailureCollector, TestFileRegistry},
 };
@@ -28,13 +28,11 @@ async fn setup(
     bin_paths: &BinPaths,
     res_tx: mpsc::UnboundedSender<anyhow::Result<()>>,
 ) -> anyhow::Result<EnforcerPostSetup> {
-    let mut enforcer_post_setup = setup_enforcer(
-        &bin_paths.others,
-        Network::Regtest,
-        Mode::Mempool,
-        res_tx.clone(),
-    )
-    .await?;
+    let pre_setup = PreSetup::new(&bin_paths.others, Network::Regtest)?;
+    let setup_opts: SetupOpts = Default::default();
+    let mut enforcer_post_setup = pre_setup
+        .setup(Mode::Mempool, setup_opts, res_tx.clone())
+        .await?;
     let () = propose_sidechain::<PostSetup>(&mut enforcer_post_setup).await?;
     tracing::info!("Proposed sidechain successfully");
     let () = activate_sidechain::<PostSetup>(&mut enforcer_post_setup).await?;

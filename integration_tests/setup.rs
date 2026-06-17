@@ -181,7 +181,24 @@ impl Sidechain for PostSetup {
         let rpc_client = jsonrpsee::http_client::HttpClient::builder()
             .build(format!("http://127.0.0.1:{}", reserved_ports.rpc.port()))?;
         tracing::debug!("Generating mnemonic seed phrase");
-        let mnemonic = rpc_client.generate_mnemonic().await?;
+        // Poll the RPC until it accepts connections. The app needs a moment to
+        // connect to the mainchain gRPC and bind its RPC port; on slower hosts
+        // this can take longer than the fixed sleep above.
+        let mnemonic = {
+            let mut attempt = 0u32;
+            loop {
+                match rpc_client.generate_mnemonic().await {
+                    Ok(mnemonic) => break mnemonic,
+                    Err(err) => {
+                        attempt += 1;
+                        if attempt >= 60 {
+                            return Err(err.into());
+                        }
+                        sleep(Duration::from_millis(500)).await;
+                    }
+                }
+            }
+        };
         tracing::debug!("Setting mnemonic seed phrase");
         let () = rpc_client.set_seed_from_mnemonic(mnemonic).await?;
         tracing::debug!("Generating deposit address");
