@@ -275,7 +275,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -286,7 +286,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -837,7 +837,7 @@ dependencies = [
  "dotenvy",
  "either",
  "futures",
- "hex 0.4.3",
+ "hex",
  "indicatif",
  "jsonrpsee 0.26.0",
  "libtest-mimic",
@@ -882,7 +882,7 @@ dependencies = [
  "hashlink 0.11.0",
  "heed 0.22.1",
  "heed-types",
- "hex 0.4.3",
+ "hex",
  "jiff",
  "jsonrpsee 0.26.0",
  "miette",
@@ -900,7 +900,7 @@ dependencies = [
  "rusty-leveldb",
  "serde",
  "serde_json",
- "sneed 0.0.22",
+ "sneed",
  "thiserror 2.0.18",
  "tokio",
  "tokio-rusqlite",
@@ -981,7 +981,7 @@ dependencies = [
  "bitcoin",
  "educe",
  "hashlink 0.11.0",
- "hex 0.4.3",
+ "hex",
  "http",
  "jsonrpsee 0.26.0",
  "monostate",
@@ -1389,7 +1389,7 @@ dependencies = [
  "governor",
  "hashlink 0.11.0",
  "heed 0.21.0",
- "hex 0.4.3",
+ "hex",
  "jsonrpsee 0.25.1",
  "merkle-cbt",
  "nonempty 0.11.0",
@@ -1409,7 +1409,7 @@ dependencies = [
  "serde_json",
  "serde_with",
  "smallvec",
- "sneed 0.0.11",
+ "sneed",
  "strum 0.26.3",
  "temp-dir",
  "thiserror 2.0.18",
@@ -1439,7 +1439,7 @@ dependencies = [
  "eframe",
  "fallible-iterator",
  "futures",
- "hex 0.4.3",
+ "hex",
  "http",
  "human-size",
  "include_path",
@@ -1479,7 +1479,7 @@ dependencies = [
  "coinshift",
  "coinshift_app_rpc_api",
  "dirs",
- "hex 0.4.3",
+ "hex",
  "http",
  "jsonrpsee 0.25.1",
  "serde_json",
@@ -1520,13 +1520,13 @@ dependencies = [
  "dotenvy",
  "futures",
  "heed 0.21.0",
- "hex 0.4.3",
+ "hex",
  "jsonrpsee 0.25.1",
  "libtest-mimic",
  "reserve-port",
  "serde",
  "serde_json",
- "sneed 0.0.11",
+ "sneed",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -2326,7 +2326,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3113,15 +3113,6 @@ dependencies = [
 
 [[package]]
 name = "heck"
-version = "0.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6d621efb26863f0e9924c6ac577e8275e5e6b77455db64ffa6c65c904e9e132c"
-dependencies = [
- "unicode-segmentation",
-]
-
-[[package]]
-name = "heck"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "95505c38b4572b2d910cecb0281560f54b440a19336cbbcb27bf6ce6adc6f5a8"
@@ -3194,12 +3185,6 @@ name = "hermit-abi"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc0fef456e4baa96da950455cd02c081ca953b141298e41db3fc7e36b1da849c"
-
-[[package]]
-name = "hex"
-version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "805026a5d0141ffc30abb3be3173848ad46a1b1664fe632428479619a3644d77"
 
 [[package]]
 name = "hex"
@@ -4742,7 +4727,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5601,7 +5586,7 @@ version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be769465445e8c1474e9c5dac2018218498557af32d9ed057325ec9a41ae81bf"
 dependencies = [
- "heck 0.5.0",
+ "heck 0.4.1",
  "itertools 0.14.0",
  "log",
  "multimap",
@@ -6226,7 +6211,7 @@ dependencies = [
  "errno 0.3.14",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6306,7 +6291,7 @@ dependencies = [
  "security-framework 3.5.1",
  "security-framework-sys",
  "webpki-root-certs 1.0.5",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6611,7 +6596,7 @@ checksum = "4fa237f2807440d238e0364a218270b98f767a00d3dada77b1c53ae88940e2e7"
 dependencies = [
  "base64 0.22.1",
  "chrono",
- "hex 0.4.3",
+ "hex",
  "indexmap 1.9.3",
  "indexmap 2.14.0",
  "schemars 0.9.0",
@@ -6677,7 +6662,7 @@ version = "1.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c4db69cba1110affc0e9f7bcd48bbf87b3f4fc7c61fc9155afd4c469eb3d6c1b"
 dependencies = [
- "errno 0.3.14",
+ "errno 0.2.8",
  "libc",
 ]
 
@@ -6803,23 +6788,6 @@ checksum = "1b6b67fb9a61334225b5b790716f609cd58395f895b3fe8b328786812a40bc3b"
 
 [[package]]
 name = "sneed"
-version = "0.0.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e88f2debe4df0b76d3ab56e33e642a09177559148527d4fff3590976de13e08"
-dependencies = [
- "educe",
- "enum-ordinalize",
- "fallible-iterator",
- "heed 0.21.0",
- "hex 0.3.2",
- "strum 0.20.0",
- "syn 1.0.109",
- "thiserror 1.0.69",
- "tokio",
-]
-
-[[package]]
-name = "sneed"
 version = "0.0.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ee7a0c2e3943d649a50f22cd21198aac5355b3eee046277f0f000c465efd6d78"
@@ -6828,7 +6796,7 @@ dependencies = [
  "enum-ordinalize",
  "fallible-iterator",
  "heed 0.22.1",
- "hex 0.4.3",
+ "hex",
  "strum 0.27.2",
  "syn 1.0.109",
  "thiserror 2.0.18",
@@ -6852,7 +6820,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "52d1cfed4120b4d927bf7c0f86d2087a4a7d6027c906d9f9d525a80573b9be51"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -6925,15 +6893,6 @@ checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 
 [[package]]
 name = "strum"
-version = "0.20.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7318c509b5ba57f18533982607f24070a55d353e90d4cae30c467cdb2ad5ac5c"
-dependencies = [
- "strum_macros 0.20.1",
-]
-
-[[package]]
-name = "strum"
 version = "0.26.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8fec0f0aef304996cf250b31b5a10dee7980c85da9d759361292b8bca5a18f06"
@@ -6957,18 +6916,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9628de9b8791db39ceda2b119bbe13134770b56c138ec1d3af810d045c04f9bd"
 dependencies = [
  "strum_macros 0.28.0",
-]
-
-[[package]]
-name = "strum_macros"
-version = "0.20.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ee8bc6b87a5112aeeab1f4a9f7ab634fe6cbefc4850006df31267f4cfb9e3149"
-dependencies = [
- "heck 0.3.3",
- "proc-macro2",
- "quote",
- "syn 1.0.109",
 ]
 
 [[package]]
@@ -7098,10 +7045,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.2",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -9066,7 +9013,7 @@ dependencies = [
  "futures-core",
  "futures-sink",
  "futures-util",
- "hex 0.4.3",
+ "hex",
  "nix",
  "ordered-stream",
  "rand 0.8.5",
