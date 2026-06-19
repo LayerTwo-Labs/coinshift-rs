@@ -38,7 +38,7 @@ tonic = { workspace = true }
 tonic-health = "0.12.3"
 # needs to line up with jsonrpsee tower version...
 tower = "0.5.2"
-tower-http = { version = "0.6.2", features = ["request-id", "trace"] }
+tower-http = { version = "0.7.0", features = ["request-id", "trace"] }
 tracing = { workspace = true }
 tracing-appender = "0.2.3"
 tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
