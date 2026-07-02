@@ -370,6 +370,10 @@ impl State {
         let mut value_in = bitcoin::Amount::ZERO;
         let mut value_out = bitcoin::Amount::ZERO;
         for utxo in &transaction.spent_utxos {
+            // a withdrawal output is committed to a bundle, not spendable by a tx
+            if utxo.content.is_withdrawal() {
+                return Err(Error::SpendWithdrawalOutput);
+            }
             value_in = value_in
                 .checked_add(utxo.get_value())
                 .ok_or(AmountOverflowError)?;
