@@ -580,7 +580,7 @@ impl Wallet {
                 );
                 continue;
             }
-            if total > value {
+            if total >= value {
                 break;
             }
             total = total
@@ -1014,5 +1014,67 @@ impl Watchable<()> for Wallet {
             #[allow(clippy::unused_unit)]
             ()
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::Txid;
+
+    fn sat(value: u64) -> bitcoin::Amount {
+        bitcoin::Amount::from_sat(value)
+    }
+
+    fn value_output(value: u64) -> Output {
+        Output {
+            address: Address([0x42; 20]),
+            content: OutputContent::Value(sat(value)),
+        }
+    }
+
+    fn regular_outpoint(vout: u32) -> OutPoint {
+        OutPoint::Regular {
+            txid: Txid([vout as u8; 32]),
+            vout,
+        }
+    }
+
+    /// Build a `Wallet` backed by a fresh temporary LMDB environment.
+    fn test_wallet() -> (temp_dir::TempDir, Wallet) {
+        let dir = temp_dir::TempDir::new().unwrap();
+        let wallet = Wallet::new(dir.path()).unwrap();
+        (dir, wallet)
+    }
+
+    /// When the accumulated total exactly reaches the target, coin selection
+    /// must stop instead of pulling in one extra (larger) UTXO.
+    #[test]
+    fn select_coins_exact_target_does_not_overshoot() {
+        let (_dir, wallet) = test_wallet();
+        let utxos = HashMap::from([
+            (regular_outpoint(0), value_output(1000)),
+            (regular_outpoint(1), value_output(2000)),
+        ]);
+        wallet.put_utxos(&utxos).unwrap();
+
+        let (total, selected) = wallet.select_coins(sat(1000)).unwrap();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(total, sat(1000));
+    }
+
+    /// A target below the smallest UTXO still selects a single input.
+    #[test]
+    fn select_coins_below_smallest_selects_single_input() {
+        let (_dir, wallet) = test_wallet();
+        let utxos = HashMap::from([
+            (regular_outpoint(0), value_output(1000)),
+            (regular_outpoint(1), value_output(2000)),
+        ]);
+        wallet.put_utxos(&utxos).unwrap();
+
+        let (total, selected) = wallet.select_coins(sat(500)).unwrap();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(total, sat(1000));
     }
 }
