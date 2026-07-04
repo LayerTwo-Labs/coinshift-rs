@@ -134,11 +134,19 @@ pub struct State {
         DatabaseUnique<SerdeBincode<Address>, SerdeBincode<Vec<SwapId>>>,
     /// Tracks which outputs are locked to which swap
     pub locked_swap_outputs: DatabaseUnique<OutPointKey, SerdeBincode<SwapId>>,
+    /// Reversal data for swap expiries applied during 2WPD connect, keyed by
+    /// the connect block height. For each swap expired at that height, records
+    /// its state before expiry and the outputs that were unlocked, so a 2WPD
+    /// disconnect can restore the pre-expiry (locked + non-`Cancelled`) state.
+    pub expired_swaps: DatabaseUnique<
+        SerdeBincode<u32>,
+        SerdeBincode<Vec<(SwapId, SwapState, Vec<OutPoint>)>>,
+    >,
     _version: DatabaseUnique<UnitKey, SerdeBincode<Version>>,
 }
 
 impl State {
-    pub const NUM_DBS: u32 = 15;
+    pub const NUM_DBS: u32 = 16;
 
     pub fn new(env: &sneed::Env) -> Result<Self, Error> {
         let mut rwtxn = env.write_txn().map_err(EnvError::from)?;
@@ -188,6 +196,9 @@ impl State {
         let locked_swap_outputs =
             DatabaseUnique::create(env, &mut rwtxn, "locked_swap_outputs")
                 .map_err(EnvError::from)?;
+        let expired_swaps =
+            DatabaseUnique::create(env, &mut rwtxn, "expired_swaps")
+                .map_err(EnvError::from)?;
         let version = DatabaseUnique::create(env, &mut rwtxn, "state_version")
             .map_err(EnvError::from)?;
         if version
@@ -215,6 +226,7 @@ impl State {
             swaps_by_l1_txid,
             swaps_by_recipient,
             locked_swap_outputs,
+            expired_swaps,
             _version: version,
         })
     }
