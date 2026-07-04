@@ -903,17 +903,6 @@ impl State {
                 }
                 None => return Err(Error::SwapNotCreator),
             }
-        }
-        self.delete_swap_unchecked(rwtxn, swap_id)
-    }
-
-    /// Delete swap without creator check. For internal use only (e.g. block rollback).
-    pub fn delete_swap_unchecked(
-        &self,
-        rwtxn: &mut RwTxn,
-        swap_id: &SwapId,
-    ) -> Result<(), Error> {
-        if let Some(swap) = self.get_swap(rwtxn, swap_id)? {
             // Only Pending or Cancelled swaps can be deleted (not WaitingConfirmations, ReadyToClaim, Completed)
             if !matches!(swap.state, SwapState::Pending | SwapState::Cancelled)
             {
@@ -922,6 +911,19 @@ impl State {
                     swap_id, swap.state
                 )));
             }
+        }
+        self.delete_swap_unchecked(rwtxn, swap_id)
+    }
+
+    /// Delete swap without creator or state check. For internal use only
+    /// (e.g. block rollback), where reversing a swap's creating block must
+    /// always succeed regardless of any local L1-observation state advance.
+    pub fn delete_swap_unchecked(
+        &self,
+        rwtxn: &mut RwTxn,
+        swap_id: &SwapId,
+    ) -> Result<(), Error> {
+        if let Some(swap) = self.get_swap(rwtxn, swap_id)? {
             // Delete from swaps_by_l1_txid
             let l1_txid_key = (swap.parent_chain, swap.l1_txid.clone());
             self.swaps_by_l1_txid

@@ -748,4 +748,42 @@ mod tests {
             "full-amount claim should pass the mempool validator, got {result:?}"
         );
     }
+
+    /// Reversing the block that created a swap must always succeed, even when
+    /// local L1 monitoring has already advanced the swap past `Pending` (e.g. to
+    /// `ReadyToClaim`). `disconnect_tip` deletes the swap via
+    /// `delete_swap_unchecked`, so that helper must never refuse based on state;
+    /// otherwise a sidechain reorg that removes the creating block aborts and the
+    /// node is wedged on the losing branch.
+    #[test]
+    fn delete_swap_unchecked_deletes_ready_to_claim_swap() {
+        let (_dir, env, state, swap_id, ..) = ready_swap_state();
+
+        let mut rwtxn = env.write_txn().unwrap();
+        let result = state.delete_swap_unchecked(&mut rwtxn, &swap_id);
+        assert!(
+            result.is_ok(),
+            "rollback deletion of a ReadyToClaim swap must succeed, got {result:?}"
+        );
+        assert!(
+            state.get_swap(&rwtxn, &swap_id).unwrap().is_none(),
+            "swap should be gone after rollback deletion"
+        );
+    }
+
+    /// The user-facing `delete_swap` path keeps its state guard: an active
+    /// (non-Pending/Cancelled) swap must not be manually deletable, even by its
+    /// creator.
+    #[test]
+    fn delete_swap_still_refuses_ready_to_claim_swap() {
+        let (_dir, env, state, swap_id, ..) = ready_swap_state();
+        let creator = Address([5u8; 20]);
+
+        let mut rwtxn = env.write_txn().unwrap();
+        let result = state.delete_swap(&mut rwtxn, &swap_id, Some(&creator));
+        assert!(
+            matches!(result, Err(Error::InvalidTransaction(_))),
+            "user deletion of a ReadyToClaim swap should be refused, got {result:?}"
+        );
+    }
 }
