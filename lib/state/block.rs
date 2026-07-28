@@ -361,10 +361,16 @@ pub fn connect_prevalidated(
                 for (vout, output) in
                     filled.transaction.outputs.iter().enumerate()
                 {
-                    // Only lock SwapPending outputs, not regular Value outputs (change)
+                    // Only lock SwapPending outputs escrowed for this swap, not
+                    // regular Value outputs (change) or outputs carrying another
+                    // swap's id. This is exactly the set `validate_swap_create`
+                    // requires to cover `l2_amount`.
                     if matches!(
                         output.content,
-                        crate::types::OutputContent::SwapPending { .. }
+                        crate::types::OutputContent::SwapPending {
+                            swap_id: output_swap_id,
+                            ..
+                        } if output_swap_id == swap_id.0
                     ) {
                         let outpoint = OutPoint::Regular {
                             txid,

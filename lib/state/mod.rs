@@ -1845,14 +1845,20 @@ impl State {
                         );
 
                         // Lock outputs for L2 → L1 swaps
-                        // Only lock SwapPending outputs (never change outputs)
+                        // Only lock SwapPending outputs escrowed for this swap
+                        // (never change outputs, never another swap's escrow),
+                        // so a rescan reproduces exactly the set that block
+                        // connection locked.
                         {
                             for (vout, output) in
                                 filled.transaction.outputs.iter().enumerate()
                             {
                                 if matches!(
                                     output.content,
-                                    crate::types::OutputContent::SwapPending { .. }
+                                    crate::types::OutputContent::SwapPending {
+                                        swap_id: output_swap_id,
+                                        ..
+                                    } if output_swap_id == swap_id.0
                                 ) {
                                     let outpoint = OutPoint::Regular {
                                         txid,
