@@ -84,6 +84,7 @@ fn create_withdrawal(
         amount,
         mainchain_fee,
         fee,
+        |outpoint| app.is_output_locked_to_swap(outpoint),
     )?;
     app.sign_and_send(tx)?;
     Ok(())
