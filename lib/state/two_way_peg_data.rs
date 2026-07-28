@@ -196,7 +196,9 @@ fn connect_withdrawal_bundle_submitted(
         .try_get(rwtxn, &m6id)
         .map_err(DbError::from)?
     {
-        // Already applied
+        // Already applied: the m6id is already recorded, so this submission is
+        // a no-op. `disconnect_withdrawal_bundle_submitted` mirrors this by
+        // leaving the stored bundle untouched.
         assert_eq!(
             bundle_status.earliest().value,
             WithdrawalBundleStatus::Submitted
@@ -1024,8 +1026,34 @@ fn disconnect_withdrawal_bundle_submitted(
         }
     };
     let bundle_status = bundle_status.latest();
-    assert_eq!(bundle_status.value, WithdrawalBundleStatus::Submitted);
-    assert_eq!(bundle_status.height, block_height);
+    if bundle_status.height > block_height {
+        // The stored status was recorded by a block later than the one being
+        // disconnected, so it must have been disconnected already.
+        return Err(Error::UnexpectedWithdrawalBundleStatus {
+            m6id,
+            status: bundle_status.value,
+            status_height: bundle_status.height,
+            block_height,
+        });
+    }
+    if bundle_status.value != WithdrawalBundleStatus::Submitted
+        || bundle_status.height != block_height
+    {
+        // The bundle was recorded by an earlier block, so connecting this
+        // event took the "Already applied" branch of
+        // `connect_withdrawal_bundle_submitted` and did not modify any state.
+        // This happens when the parent chain proposes the same m6id again
+        // after it expired or was paid out. Disconnecting must not modify any
+        // state either.
+        tracing::debug!(
+            %block_height,
+            %m6id,
+            status = ?bundle_status.value,
+            status_height = %bundle_status.height,
+            "Withdrawal bundle submission was applied by an earlier block, nothing to disconnect"
+        );
+        return Ok(());
+    }
     match bundle {
         WithdrawalBundleInfo::Unknown
         | WithdrawalBundleInfo::UnknownConfirmed { .. } => (),
@@ -1505,6 +1533,150 @@ mod expiry_reversal_tests {
             state.is_output_locked_to_swap(&rwtxn, &outpoint).unwrap(),
             Some(swap_id),
             "disconnect must re-lock the output to the swap"
+        );
+    }
+}
+
+#[cfg(test)]
+mod withdrawal_bundle_reversal_tests {
+    use bitcoin::hashes::Hash as _;
+    use sneed::Env;
+
+    use super::*;
+    use crate::types::{Address, Txid};
+
+    fn sat(value: u64) -> bitcoin::Amount {
+        bitcoin::Amount::from_sat(value)
+    }
+
+    /// Build a `State` backed by a fresh temporary LMDB environment.
+    fn test_state() -> (temp_dir::TempDir, Env, State) {
+        let dir = temp_dir::TempDir::new().unwrap();
+        let mut opts = heed::EnvOpenOptions::new();
+        opts.map_size(10 * 1024 * 1024).max_dbs(State::NUM_DBS);
+        let env = unsafe { Env::open(&opts, dir.path()) }.unwrap();
+        let state = State::new(&env).unwrap();
+        (dir, env, state)
+    }
+
+    fn bundle_event(
+        m6id: M6id,
+        status: WithdrawalBundleStatus,
+    ) -> WithdrawalBundleEvent {
+        WithdrawalBundleEvent { m6id, status }
+    }
+
+    /// The parent chain only refuses a bundle proposal while its m6id is still
+    /// pending, so once an m6id has expired the very same m6id can be proposed
+    /// again, producing the event sequence `Submitted(X)`, `Failed(X)`,
+    /// `Submitted(X)`. Connecting the repeated `Submitted` leaves the stored
+    /// bundle untouched ("Already applied"), so disconnecting it must leave the
+    /// stored bundle untouched too, instead of assuming that the latest stored
+    /// status is a `Submitted` recorded by the disconnected block.
+    #[test]
+    fn disconnect_repeated_bundle_submission_is_noop() {
+        let (_dir, env, state) = test_state();
+        let outpoint = OutPoint::Regular {
+            txid: Txid([9u8; 32]),
+            vout: 0,
+        };
+        let key = OutPointKey::from(&outpoint);
+        let output = Output {
+            address: Address([1u8; 20]),
+            content: OutputContent::Value(sat(30_000)),
+        };
+        let bundle_output = bitcoin::TxOut {
+            value: sat(29_000),
+            script_pubkey: bitcoin::ScriptBuf::new(),
+        };
+        let bundle = WithdrawalBundle::new(
+            9,
+            sat(1_000),
+            BTreeMap::from([(outpoint, output.clone())]),
+            vec![bundle_output],
+        )
+        .unwrap();
+        let m6id = bundle.compute_m6id();
+        let event_block_hash = bitcoin::BlockHash::all_zeros();
+
+        let mut rwtxn = env.write_txn().unwrap();
+        state.utxos.put(&mut rwtxn, &key, &output).unwrap();
+        state
+            .pending_withdrawal_bundle
+            .put(&mut rwtxn, &(), &(bundle, 9))
+            .unwrap();
+        let mut accumulator_diff = AccumulatorDiff::default();
+
+        // Submitted at height 10, then expired at height 11, which restores the
+        // spent UTXO.
+        connect_withdrawal_bundle_event(
+            &state,
+            &mut rwtxn,
+            10,
+            &mut accumulator_diff,
+            &event_block_hash,
+            &bundle_event(m6id, WithdrawalBundleStatus::Submitted),
+        )
+        .unwrap();
+        connect_withdrawal_bundle_event(
+            &state,
+            &mut rwtxn,
+            11,
+            &mut accumulator_diff,
+            &event_block_hash,
+            &bundle_event(m6id, WithdrawalBundleStatus::Failed),
+        )
+        .unwrap();
+        // The same m6id is proposed again at height 12.
+        connect_withdrawal_bundle_event(
+            &state,
+            &mut rwtxn,
+            12,
+            &mut accumulator_diff,
+            &event_block_hash,
+            &bundle_event(m6id, WithdrawalBundleStatus::Submitted),
+        )
+        .unwrap();
+        let (_bundle, bundle_status) = state
+            .withdrawal_bundles
+            .try_get(&rwtxn, &m6id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            bundle_status.latest().value,
+            WithdrawalBundleStatus::Failed,
+            "connecting the repeated submission should not change the status"
+        );
+
+        // Disconnecting the block that connected the repeated submission must
+        // reverse nothing, since connecting it applied nothing.
+        disconnect_withdrawal_bundle_event(
+            &state,
+            &mut rwtxn,
+            12,
+            &mut accumulator_diff,
+            &bundle_event(m6id, WithdrawalBundleStatus::Submitted),
+        )
+        .unwrap();
+        let (_bundle, bundle_status) = state
+            .withdrawal_bundles
+            .try_get(&rwtxn, &m6id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            bundle_status.latest().value,
+            WithdrawalBundleStatus::Failed,
+            "disconnect must leave the failed bundle in place"
+        );
+        assert_eq!(bundle_status.latest().height, 11);
+        assert_eq!(
+            state.utxos.try_get(&rwtxn, &key).unwrap().as_ref(),
+            Some(&output),
+            "disconnect must not touch the UTXO restored by the expiry"
+        );
+        assert!(
+            state.stxos.try_get(&rwtxn, &key).unwrap().is_none(),
+            "disconnect must not re-spend the UTXO restored by the expiry"
         );
     }
 }
