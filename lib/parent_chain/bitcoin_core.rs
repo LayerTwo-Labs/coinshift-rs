@@ -80,7 +80,7 @@ fn pays_address(vout: &Vout, address: &str) -> bool {
 pub struct BitcoinCoreClient {
     chain: ParentChainType,
     config: L1ChainConfig,
-    client: reqwest::blocking::Client,
+    client: reqwest::Client,
 }
 
 /// Apply the configured authentication scheme to an outgoing request.
@@ -88,9 +88,9 @@ pub struct BitcoinCoreClient {
 /// Kept here rather than on [`L1Auth`] so the config module stays free of any
 /// particular HTTP client.
 fn apply_auth(
-    builder: reqwest::blocking::RequestBuilder,
+    builder: reqwest::RequestBuilder,
     auth: &L1Auth,
-) -> reqwest::blocking::RequestBuilder {
+) -> reqwest::RequestBuilder {
     match auth {
         L1Auth::None => builder,
         L1Auth::Basic { user, password } => {
@@ -104,7 +104,7 @@ fn apply_auth(
 
 impl BitcoinCoreClient {
     pub fn new(chain: ParentChainType, config: L1ChainConfig) -> Self {
-        let client = reqwest::blocking::Client::builder()
+        let client = reqwest::Client::builder()
             .timeout(config.timeout())
             .build()
             .expect("Failed to create HTTP client");
@@ -121,7 +121,7 @@ impl BitcoinCoreClient {
         &self.config.url
     }
 
-    fn call<T: for<'de> Deserialize<'de>>(
+    async fn call<T: for<'de> Deserialize<'de>>(
         &self,
         method: &str,
         params: serde_json::Value,
@@ -146,7 +146,7 @@ impl BitcoinCoreClient {
             &self.config.auth,
         );
 
-        let response = request_builder.send().inspect_err(|err| {
+        let response = request_builder.send().await.inspect_err(|err| {
             tracing::error!(
                 url = %self.config.url,
                 method = %method,
@@ -156,7 +156,7 @@ impl BitcoinCoreClient {
         })?;
 
         let status = response.status();
-        let response_text = response.text().inspect_err(|err| {
+        let response_text = response.text().await.inspect_err(|err| {
             tracing::error!(
                 url = %self.config.url,
                 method = %method,
@@ -196,17 +196,18 @@ impl BitcoinCoreClient {
     }
 
     /// `getrawtransaction <txid> true`.
-    pub fn get_transaction(
+    pub async fn get_transaction(
         &self,
         txid: &str,
     ) -> Result<TransactionInfo, Error> {
         self.call::<TransactionInfo>("getrawtransaction", json!([txid, true]))
+            .await
     }
 
     /// The `chain` field of `getblockchaininfo`, lowercased.
-    pub fn get_blockchain_chain_name(&self) -> Result<String, Error> {
+    pub async fn get_blockchain_chain_name(&self) -> Result<String, Error> {
         let info: serde_json::Value =
-            self.call("getblockchaininfo", json!([]))?;
+            self.call("getblockchaininfo", json!([])).await?;
         let chain = info
             .get("chain")
             .and_then(|value| value.as_str())
@@ -220,9 +221,13 @@ impl BitcoinCoreClient {
     /// watches, so a fill that has since been spent becomes invisible. That
     /// limitation is inherent to discovering payments this way and predates the
     /// trait.
-    fn list_transactions(&self, address: &str) -> Result<Vec<String>, Error> {
-        let unspent: Vec<serde_json::Value> =
-            self.call("listunspent", json!([0, 999999, [address]]))?;
+    async fn list_transactions(
+        &self,
+        address: &str,
+    ) -> Result<Vec<String>, Error> {
+        let unspent: Vec<serde_json::Value> = self
+            .call("listunspent", json!([0, 999999, [address]]))
+            .await?;
 
         let mut txids = std::collections::HashSet::new();
         for utxo in unspent {
@@ -234,16 +239,16 @@ impl BitcoinCoreClient {
         // Not all nodes support this; the result is unused, but calling it can
         // populate the node's internal index.
         let _result: Result<f64, _> =
-            self.call("getreceivedbyaddress", json!([address, 0]));
+            self.call("getreceivedbyaddress", json!([address, 0])).await;
 
         Ok(txids.into_iter().collect())
     }
 
     /// Resolve the sender as the address funding the transaction's first input.
-    fn sender_of(&self, tx: &TransactionInfo) -> Option<String> {
+    async fn sender_of(&self, tx: &TransactionInfo) -> Option<String> {
         let vin = tx.vin.first()?;
         let (input_txid, input_vout) = (vin.txid.as_ref()?, vin.vout?);
-        let input_tx = self.get_transaction(input_txid).ok()?;
+        let input_tx = self.get_transaction(input_txid).await.ok()?;
         let prevout = input_tx.vout.get(input_vout as usize)?;
         prevout.script_pub_key.address.clone().or_else(|| {
             prevout
@@ -284,14 +289,16 @@ impl BitcoinCoreClient {
     }
 }
 
+#[async_trait::async_trait]
 impl ParentChainClient for BitcoinCoreClient {
-    fn identify(&self) -> Result<ChainIdentity, Error> {
-        let chain_name = self.get_blockchain_chain_name()?;
+    async fn identify(&self) -> Result<ChainIdentity, Error> {
+        let chain_name = self.get_blockchain_chain_name().await?;
         // A node that will not answer `getblockhash 0` is unusual but not by
         // itself a reason to reject it; the caller then matches on the network
         // name alone.
         let genesis = self
             .call::<String>("getblockhash", json!([0]))
+            .await
             .inspect_err(|err| {
                 tracing::debug!(
                     url = %self.config.url,
@@ -306,21 +313,21 @@ impl ParentChainClient for BitcoinCoreClient {
         })
     }
 
-    fn tip(&self) -> Result<u64, Error> {
+    async fn tip(&self) -> Result<u64, Error> {
         let info: serde_json::Value =
-            self.call("getblockchaininfo", json!([]))?;
+            self.call("getblockchaininfo", json!([])).await?;
         info.get("blocks")
             .and_then(|value| value.as_u64())
             .ok_or(Error::InvalidResponse)
     }
 
-    fn find_payments(
+    async fn find_payments(
         &self,
         query: &PaymentQuery,
     ) -> Result<Vec<L1Payment>, Error> {
         let mut matches = Vec::new();
-        for txid in self.list_transactions(&query.address)? {
-            let tx = match self.get_transaction(&txid) {
+        for txid in self.list_transactions(&query.address).await? {
+            let tx = match self.get_transaction(&txid).await {
                 Ok(tx) => tx,
                 // A spent or unknown transaction is simply not a candidate.
                 Err(Error::TransactionNotFound) => continue,
@@ -337,13 +344,13 @@ impl ParentChainClient for BitcoinCoreClient {
             if !payment.matches_query {
                 continue;
             }
-            payment.sender = self.sender_of(&tx);
+            payment.sender = self.sender_of(&tx).await;
             matches.push(payment);
         }
         Ok(matches)
     }
 
-    fn get_payment(
+    async fn get_payment(
         &self,
         txid: &SwapTxId,
         query: &PaymentQuery,
@@ -354,7 +361,10 @@ impl ParentChainClient for BitcoinCoreClient {
         // byte-order note in docs/PARENT_CHAIN_ROADMAP.md. Deliberately
         // preserved rather than "fixed" here, since changing it changes which
         // stored swaps can be looked up.
-        match self.get_transaction(&txid.display_for_chain(self.chain)) {
+        match self
+            .get_transaction(&txid.display_for_chain(self.chain))
+            .await
+        {
             Ok(tx) => {
                 let mut payment = self.to_payment(&tx, query);
                 // Report the txid the caller asked about, so it can match the

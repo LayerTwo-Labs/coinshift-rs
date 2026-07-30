@@ -6,17 +6,15 @@ use fallible_iterator::FallibleIterator;
 use sneed::{RoTxn, RwTxn, db::error::Error as DbError};
 
 use crate::{
-    parent_chain::{ClientGetter, ParentChainClient, PaymentQuery},
     state::{
         Error, State, WITHDRAWAL_BUNDLE_FAILURE_GAP, WithdrawalBundleInfo,
         rollback::RollBack,
     },
     types::{
-        AccumulatorDiff, AggregatedWithdrawal, AmountOverflowError, BlockHash,
-        GetValue, InPoint, M6id, OutPoint, OutPointKey, Output, OutputContent,
-        PointedOutput, PointedOutputRef, SpentOutput, Swap, SwapId, SwapState,
-        SwapTxId, WithdrawalBundle, WithdrawalBundleEvent,
-        WithdrawalBundleStatus, hash,
+        AccumulatorDiff, AggregatedWithdrawal, AmountOverflowError, GetValue,
+        InPoint, M6id, OutPoint, OutPointKey, Output, OutputContent,
+        PointedOutput, PointedOutputRef, SpentOutput, SwapId, SwapState,
+        WithdrawalBundle, WithdrawalBundleEvent, WithdrawalBundleStatus, hash,
         proto::mainchain::{BlockEvent, TwoWayPegData},
     },
     wallet::Wallet,
@@ -531,150 +529,18 @@ fn connect_event(
     Ok(())
 }
 
-/// Process coinshift transactions - update swap states based on L1 transactions
-/// This should be called when connecting 2WPD to check for L1 transactions
-/// that match pending swaps.
+/// Cancel swaps that have reached their expiry height, unlocking their outputs.
 ///
-/// IMPORTANT: This queries the SWAP TARGET CHAIN (e.g., Signet), NOT the sidechain's
-/// mainchain (e.g., Regtest). The swap target chain is specified in swap.parent_chain.
-///
-/// Flow:
-/// 1. Get all pending swaps
-/// 2. For each swap, query swap.parent_chain (e.g., Signet) for transactions
-/// 3. Match transactions by: l1_recipient_address and l1_amount
-/// 4. Update swap state based on found transactions and confirmations
-///
-/// **BMM / header chain / merkle proof:** None of these are used for swap L1
-/// verification in this repo. L1 presence and confirmations are taken from the
-/// configured parent chain RPC only (no BMM reports, no per–parent-chain header
-/// chain for swaps, no merkle proof of L1 tx in block).
-///
-/// Query L1 blockchain for matching transactions and update swap.
-///
-/// `block_hash` and `block_height` are the sidechain block where this
-/// validation occurs.
-///
-/// Enforces L1 transaction uniqueness: the same (parent_chain, l1_txid) must
-/// not be associated with more than one swap. Uses `get_swap_by_l1_txid` before
-/// accepting a new L1 tx.
-fn query_and_update_swap(
-    state: &State,
-    rwtxn: &mut RwTxn,
-    client: &dyn ParentChainClient,
-    swap: &mut Swap,
-    block_hash: BlockHash,
-    block_height: u32,
-) -> Result<bool, Error> {
-    let query = PaymentQuery::for_swap(swap);
-    let payments = client.find_payments(&query)?;
-
-    // Only accept payments that are confirmed, included in a block, and not
-    // older than the chain's maximum L1 transaction age.
-    //
-    // Age and finality are checked separately: they are the same quantity for
-    // Bitcoin-family chains but unrelated for a chain whose finality is a
-    // commitment level rather than a depth.
-    let Some(payment) = payments
-        .into_iter()
-        .inspect(|payment| {
-            if payment.included && payment.age > query.max_age {
-                tracing::info!(
-                    swap_id = %swap.id,
-                    l1_txid = %payment.txid_display,
-                    age = %payment.age,
-                    max_age = %query.max_age,
-                    "Rejecting L1 tx: older than max_l1_tx_age"
-                );
-            }
-        })
-        .find(|payment| payment.is_acceptable_for(&query))
-    else {
-        tracing::debug!(
-            swap_id = %swap.id,
-            "No confirmed or block-included L1 match; rejecting unconfirmed, mempool-only, or too-old tx"
-        );
-        return Ok(false);
-    };
-
-    // Check if this is an update or new detection
-    let zero_hash32 = [0u8; 32];
-    let is_new = matches!(swap.l1_txid, SwapTxId::Hash32(h) if h == zero_hash32)
-        || matches!(swap.l1_txid, SwapTxId::Hash(ref v) if v.is_empty() || v.iter().all(|&b| b == 0));
-
-    // Confirmations reaching the requirement means claimable; otherwise keep
-    // showing progress towards it.
-    let required = swap.required_confirmations;
-    let state_for = move |confirmations: u32| {
-        if confirmations >= required {
-            SwapState::ReadyToClaim
-        } else {
-            SwapState::WaitingConfirmations(confirmations, required)
-        }
-    };
-
-    if is_new {
-        // L1 transaction uniqueness: do not accept an L1 tx already used by another swap
-        if let Some(existing) = state.get_swap_by_l1_txid(
-            rwtxn,
-            &swap.parent_chain,
-            &payment.txid,
-        )? && existing.id != swap.id
-        {
-            tracing::info!(
-                swap_id = %swap.id,
-                existing_swap_id = %existing.id,
-                l1_txid = %payment.txid_display,
-                "Rejecting L1 tx already associated with another swap"
-            );
-            return Ok(false);
-        }
-
-        tracing::info!(
-            swap_id = %swap.id,
-            l1_txid = %payment.txid_display,
-            confirmations = %payment.confirmations,
-            sender = ?payment.sender,
-            is_open_swap = %swap.l2_recipient.is_none(),
-            "Detected new L1 transaction for swap"
-        );
-
-        // For open swaps we don't store the sender address here - the claimer
-        // provides their L2 address when claiming, and we verify then that they
-        // sent the L1 transaction.
-        swap.update_l1_txid(payment.txid);
-        swap.set_l1_txid_validation_block(block_hash, block_height);
-        swap.state = state_for(payment.confirmations);
-        Ok(true)
-    } else {
-        // Update confirmations for an already-detected transaction.
-        let current_confirmations = match swap.state {
-            SwapState::WaitingConfirmations(current, _) => current,
-            _ => 0,
-        };
-
-        if payment.confirmations > current_confirmations {
-            tracing::debug!(
-                swap_id = %swap.id,
-                old_confirmations = %current_confirmations,
-                new_confirmations = %payment.confirmations,
-                "Updating swap confirmations"
-            );
-            swap.state = state_for(payment.confirmations);
-            Ok(true)
-        } else {
-            Ok(false)
-        }
-    }
-}
-
-fn process_coinshift_transactions(
+/// This stays inside the block-connect transaction because it is deterministic
+/// and its reversal on disconnect depends on running here. Detecting L1
+/// payments does not: it is node-local, not part of consensus, and lives in
+/// [`crate::node::SwapObserver`].
+fn process_swap_expiries(
     state: &State,
     rwtxn: &mut RwTxn,
     block_height: u32,
-    block_hash: BlockHash,
-    client_getter: Option<ClientGetter<'_>>,
 ) -> Result<(), Error> {
-    tracing::debug!(%block_height, "Starting to scan enforcer for coinshift transactions");
+    tracing::debug!(%block_height, "Processing swap expiries");
 
     // Get all pending swaps
     let swaps = state.load_all_swaps(rwtxn)?;
@@ -682,12 +548,11 @@ fn process_coinshift_transactions(
     tracing::debug!(
         %block_height,
         swap_count = total_swaps_count,
-        "Loaded swaps from state, scanning enforcer for matching transactions"
+        "Loaded swaps from state"
     );
 
     let mut pending_swaps_count = 0;
     let mut expired_swaps_count = 0;
-    let mut scanned_swaps_count = 0;
 
     // Reversal data for any swaps expired at this height, so a 2WPD disconnect
     // can restore each swap's pre-expiry state and re-lock its outputs.
@@ -704,18 +569,6 @@ fn process_coinshift_transactions(
         }
 
         pending_swaps_count += 1;
-        let l1_amount_str =
-            swap.l1_amount.to_string_in(bitcoin::Denomination::Bitcoin);
-        let l1_amount_sats = swap.l1_amount.to_sat();
-        tracing::debug!(
-            swap_id = %swap.id,
-            parent_chain = ?swap.parent_chain,
-            l1_recipient_address = ?swap.l1_recipient_address,
-            l1_amount_btc = %l1_amount_str,
-            l1_amount_sats = %l1_amount_sats,
-            swap_state = ?swap.state,
-            "Checking swap for matching L1 transactions"
-        );
 
         // Check if swap has expired
         if let Some(expires_at) = swap.expires_at_height
@@ -753,89 +606,7 @@ fn process_coinshift_transactions(
                 unlocked_outpoints,
             ));
             expired_swaps_count += 1;
-            continue;
         }
-
-        // For L2 → L1 swaps, we need to check if the L1 transaction exists
-        // on the SWAP TARGET CHAIN (swap.parent_chain), NOT the sidechain's mainchain.
-        //
-        // Example:
-        // - Sidechain mainchain: Regtest (for deposits/withdrawals)
-        // - Swap target: Signet (for coinshift transactions)
-        // - We query Signet for transactions, not Regtest!
-        //
-        let l1_amount_str =
-            swap.l1_amount.to_string_in(bitcoin::Denomination::Bitcoin);
-        let l1_amount_sats = swap.l1_amount.to_sat();
-        tracing::debug!(
-            swap_id = %swap.id,
-            parent_chain = ?swap.parent_chain,
-            l1_recipient_address = ?swap.l1_recipient_address,
-            l1_amount_btc = %l1_amount_str,
-            l1_amount_sats = %l1_amount_sats,
-            "Scanning enforcer on {:?} for transactions to {} with amount {} BTC",
-            swap.parent_chain,
-            swap.l1_recipient_address,
-            l1_amount_str
-        );
-
-        // Swap L1 presence and confirmation count rely on the configured RPC for
-        // the swap target chain (swap.parent_chain). If no RPC is configured here,
-        // we skip L1 lookup and the swap stays Pending until RPC is set or the user
-        // manually updates via update_swap_l1_txid.
-        // Query L1 blockchain for matching transactions if RPC config is available.
-        // URL is chosen by swap.parent_chain: we look up that chain in l1_rpc_configs.json.
-        // If no RPC config exists for this chain, we skip L1 lookup and the swap stays
-        // Pending until config is set or the user updates via update_swap_l1_txid.
-        let parent_chain = swap.parent_chain;
-        if let Some(get_client) = client_getter
-            && let Some(client) = get_client(parent_chain)
-        {
-            tracing::info!(
-                swap_id = %swap.id,
-                ?parent_chain,
-                l1_recipient = %swap.l1_recipient_address,
-                l1_amount_sats = %swap.l1_amount.to_sat(),
-                "Querying L1 for swap"
-            );
-            match query_and_update_swap(
-                state,
-                rwtxn,
-                client.as_ref(),
-                &mut swap,
-                block_hash,
-                block_height,
-            ) {
-                Ok(updated) => {
-                    if updated {
-                        tracing::info!(
-                            swap_id = %swap.id,
-                            l1_txid = ?swap.l1_txid,
-                            state = ?swap.state,
-                            "Updated swap with L1 transaction"
-                        );
-                        state.save_swap(rwtxn, &swap)?;
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        swap_id = %swap.id,
-                        ?parent_chain,
-                        l1_recipient = %swap.l1_recipient_address,
-                        error = %e,
-                        "Failed to query L1 for swap; swap will stay pending until RPC succeeds or l1_txid is set manually"
-                    );
-                }
-            }
-        } else {
-            tracing::debug!(
-                swap_id = %swap.id,
-                ?parent_chain,
-                "Skipping L1 lookup: no RPC config for this parent chain (swap stays Pending until config is set or l1_txid is set manually)"
-            );
-        }
-
-        scanned_swaps_count += 1;
     }
 
     // Record the expiry reversal data so a 2WPD disconnect of this block can
@@ -852,8 +623,7 @@ fn process_coinshift_transactions(
         total_swaps = total_swaps_count,
         pending_swaps = pending_swaps_count,
         expired_swaps = expired_swaps_count,
-        scanned_swaps = scanned_swaps_count,
-        "Finished scanning enforcer for coinshift transactions"
+        "Finished processing swap expiries"
     );
 
     Ok(())
@@ -863,7 +633,6 @@ pub fn connect(
     state: &State,
     rwtxn: &mut RwTxn,
     two_way_peg_data: &TwoWayPegData,
-    client_getter: Option<ClientGetter<'_>>,
     wallet: Option<&Wallet>,
 ) -> Result<(), Error> {
     let block_height = state.try_get_height(rwtxn)?.ok_or(Error::NoTip)?;
@@ -892,15 +661,9 @@ pub fn connect(
         }
     }
 
-    // Process coinshift transactions after processing deposits/withdrawals
-    let block_hash = state.try_get_tip(rwtxn)?.ok_or(Error::NoTip)?;
-    process_coinshift_transactions(
-        state,
-        rwtxn,
-        block_height,
-        block_hash,
-        client_getter,
-    )?;
+    // Expire swaps that have reached their deadline. L1 payment detection is
+    // node-local and lives in the swap observer, not here.
+    process_swap_expiries(state, rwtxn, block_height)?;
     // Handle deposits.
     if let Some(latest_deposit_block_hash) = latest_deposit_block_hash {
         let deposit_block_seq_idx = state
@@ -1405,283 +1168,14 @@ pub fn disconnect(
     Ok(())
 }
 
-/// Swap detection, driven through a scripted parent chain.
-///
-/// Nothing exercised this path before: the unit tests never reached a parent
-/// chain and the integration tests bypass it by feeding txids straight to
-/// `update_swap_l1_txid`.
-#[cfg(test)]
-mod swap_detection_tests {
-    use sneed::Env;
-
-    use super::*;
-    use crate::{
-        parent_chain::{
-            L1Payment,
-            mock::{MockBehaviour, MockParentChainClient},
-        },
-        types::{Address, ParentChainType, SwapDirection},
-    };
-
-    const CHAIN: ParentChainType = ParentChainType::Regtest;
-    const REQUIRED_CONFIRMATIONS: u32 = 3;
-    const BLOCK_HEIGHT: u32 = 10;
-
-    fn test_state() -> (temp_dir::TempDir, Env, State) {
-        let dir = temp_dir::TempDir::new().unwrap();
-        let mut opts = heed::EnvOpenOptions::new();
-        opts.map_size(10 * 1024 * 1024).max_dbs(State::NUM_DBS);
-        let env = unsafe { Env::open(&opts, dir.path()) }.unwrap();
-        let state = State::new(&env).unwrap();
-        (dir, env, state)
-    }
-
-    fn pending_swap(id: u8) -> Swap {
-        Swap::new(
-            SwapId([id; 32]),
-            SwapDirection::L2ToL1,
-            CHAIN,
-            // The all-zero txid is how "no L1 transaction seen yet" is encoded.
-            SwapTxId::Hash32([0u8; 32]),
-            Some(REQUIRED_CONFIRMATIONS),
-            Some(Address([3u8; 20])),
-            bitcoin::Amount::from_sat(50_000),
-            "rbtc-recipient".to_string(),
-            bitcoin::Amount::from_sat(40_000),
-            0,
-            None, // never expires, so expiry cannot interfere
-            Some(Address([5u8; 20])),
-        )
-    }
-
-    /// Run one round of detection against `behaviour`, returning the swap as it
-    /// was left in the database.
-    fn detect_with(
-        state: &State,
-        env: &Env,
-        swap: &Swap,
-        behaviour: MockBehaviour,
-    ) -> (Swap, usize) {
-        let client = MockParentChainClient::new(CHAIN, behaviour);
-        let counter = client.clone();
-        let getter = move |_chain: ParentChainType| {
-            Some(std::sync::Arc::new(client.clone())
-                as std::sync::Arc<dyn ParentChainClient>)
-        };
-        let mut rwtxn = env.write_txn().unwrap();
-        process_coinshift_transactions(
-            state,
-            &mut rwtxn,
-            BLOCK_HEIGHT,
-            BlockHash([7u8; 32]),
-            Some(&getter),
-        )
-        .unwrap();
-        let updated = state.get_swap(&rwtxn, &swap.id).unwrap().unwrap();
-        rwtxn.commit().unwrap();
-        (updated, counter.call_count())
-    }
-
-    fn save(state: &State, env: &Env, swap: &Swap) {
-        let mut rwtxn = env.write_txn().unwrap();
-        state.save_swap(&mut rwtxn, swap).unwrap();
-        rwtxn.commit().unwrap();
-    }
-
-    /// A chain reporting one payment that fills `swap`.
-    fn payment(
-        swap: &Swap,
-        txid: SwapTxId,
-        confirmations: u32,
-        age: u64,
-    ) -> MockBehaviour {
-        MockBehaviour::Payments(vec![L1Payment {
-            txid_display: txid.display_for_chain(CHAIN),
-            txid,
-            amount: swap.l1_amount.to_sat(),
-            matches_query: true,
-            sender: Some("mock-sender".to_string()),
-            confirmations,
-            age,
-            included: true,
-            height: Some(1),
-        }])
-    }
-
-    #[test]
-    fn a_shallow_payment_is_detected_and_tracked() {
-        let (_dir, env, state) = test_state();
-        let swap = pending_swap(1);
-        save(&state, &env, &swap);
-
-        let txid = SwapTxId::Hash32([0xab; 32]);
-        let (updated, _) = detect_with(
-            &state,
-            &env,
-            &swap,
-            payment(&swap, txid.clone(), 1, 1),
-        );
-
-        assert_eq!(updated.l1_txid, txid, "the L1 txid must be recorded");
-        assert_eq!(
-            updated.state,
-            SwapState::WaitingConfirmations(1, REQUIRED_CONFIRMATIONS)
-        );
-        assert_eq!(
-            updated.l1_txid_validated_at_height,
-            Some(BLOCK_HEIGHT),
-            "detection must record where it happened, for reorg handling"
-        );
-    }
-
-    #[test]
-    fn a_deep_enough_payment_becomes_claimable() {
-        let (_dir, env, state) = test_state();
-        let swap = pending_swap(2);
-        save(&state, &env, &swap);
-
-        let (updated, _) = detect_with(
-            &state,
-            &env,
-            &swap,
-            payment(
-                &swap,
-                SwapTxId::Hash32([0xcd; 32]),
-                REQUIRED_CONFIRMATIONS,
-                1,
-            ),
-        );
-        assert_eq!(updated.state, SwapState::ReadyToClaim);
-    }
-
-    #[test]
-    fn a_payment_older_than_max_age_is_rejected() {
-        let (_dir, env, state) = test_state();
-        let swap = pending_swap(3);
-        save(&state, &env, &swap);
-
-        // Deeply confirmed, but far older than the chain allows: this is the
-        // guard against reusing an unrelated historical transaction.
-        let too_old = u64::from(CHAIN.max_l1_tx_age()) + 1;
-        let (updated, _) = detect_with(
-            &state,
-            &env,
-            &swap,
-            payment(&swap, SwapTxId::Hash32([0xef; 32]), 1_000, too_old),
-        );
-        assert_eq!(updated.state, SwapState::Pending);
-        assert_eq!(updated.l1_txid, SwapTxId::Hash32([0u8; 32]));
-    }
-
-    #[test]
-    fn an_l1_txid_already_used_by_another_swap_is_rejected() {
-        let (_dir, env, state) = test_state();
-        let shared_txid = SwapTxId::Hash32([0x11; 32]);
-
-        // An existing swap already filled by this transaction.
-        let mut taken = pending_swap(4);
-        taken.l1_txid = shared_txid.clone();
-        taken.state = SwapState::ReadyToClaim; // so detection skips it
-        save(&state, &env, &taken);
-
-        let swap = pending_swap(5);
-        save(&state, &env, &swap);
-
-        let (updated, _) = detect_with(
-            &state,
-            &env,
-            &swap,
-            payment(&swap, shared_txid, REQUIRED_CONFIRMATIONS, 1),
-        );
-        assert_eq!(
-            updated.state,
-            SwapState::Pending,
-            "one L1 payment must not fill two swaps"
-        );
-    }
-
-    #[test]
-    fn confirmations_never_go_backwards() {
-        let (_dir, env, state) = test_state();
-        let txid = SwapTxId::Hash32([0x22; 32]);
-        let mut swap = pending_swap(6);
-        swap.l1_txid = txid.clone();
-        swap.state = SwapState::WaitingConfirmations(5, REQUIRED_CONFIRMATIONS);
-        save(&state, &env, &swap);
-
-        // A reorg-shortened chain reporting fewer confirmations must not
-        // regress the recorded progress.
-        let (updated, _) =
-            detect_with(&state, &env, &swap, payment(&swap, txid, 2, 1));
-        assert_eq!(
-            updated.state,
-            SwapState::WaitingConfirmations(5, REQUIRED_CONFIRMATIONS)
-        );
-    }
-
-    #[test]
-    fn an_unreachable_chain_leaves_the_swap_pending() {
-        let (_dir, env, state) = test_state();
-        let swap = pending_swap(7);
-        save(&state, &env, &swap);
-
-        // An RPC failure must be swallowed: block connection cannot fail
-        // because someone's parent-chain node is down.
-        let (updated, calls) =
-            detect_with(&state, &env, &swap, MockBehaviour::Unreachable);
-        assert_eq!(updated.state, SwapState::Pending);
-        assert_eq!(calls, 1, "the chain was consulted and the error absorbed");
-    }
-
-    #[test]
-    fn without_a_client_the_swap_stays_pending() {
-        // The invariant asserted by the l1_rpc_dependency integration test,
-        // covered here without standing up a node.
-        let (_dir, env, state) = test_state();
-        let swap = pending_swap(8);
-        save(&state, &env, &swap);
-
-        let mut rwtxn = env.write_txn().unwrap();
-        process_coinshift_transactions(
-            &state,
-            &mut rwtxn,
-            BLOCK_HEIGHT,
-            BlockHash([7u8; 32]),
-            None,
-        )
-        .unwrap();
-        let updated = state.get_swap(&rwtxn, &swap.id).unwrap().unwrap();
-        assert_eq!(updated.state, SwapState::Pending);
-        assert_eq!(updated.l1_txid, SwapTxId::Hash32([0u8; 32]));
-    }
-
-    #[test]
-    fn a_payment_for_a_different_amount_is_ignored() {
-        let (_dir, env, state) = test_state();
-        let swap = pending_swap(9);
-        save(&state, &env, &swap);
-
-        // The mock filters on the query, so a payment for the wrong amount
-        // never reaches the swap.
-        let mut wrong = pending_swap(9);
-        wrong.l1_amount =
-            bitcoin::Amount::from_sat(swap.l1_amount.to_sat() + 1);
-        let (updated, _) = detect_with(
-            &state,
-            &env,
-            &swap,
-            payment(&wrong, SwapTxId::Hash32([0x33; 32]), 5, 1),
-        );
-        assert_eq!(updated.state, SwapState::Pending);
-    }
-}
-
 #[cfg(test)]
 mod expiry_reversal_tests {
     use sneed::Env;
 
     use super::*;
-    use crate::types::{Address, ParentChainType, SwapDirection, Txid};
+    use crate::types::{
+        Address, ParentChainType, Swap, SwapDirection, SwapTxId, Txid,
+    };
 
     fn sat(value: u64) -> bitcoin::Amount {
         bitcoin::Amount::from_sat(value)
@@ -1742,14 +1236,7 @@ mod expiry_reversal_tests {
         );
 
         // Connect: process expiry at the expiry height.
-        process_coinshift_transactions(
-            &state,
-            &mut rwtxn,
-            5,
-            BlockHash([0u8; 32]),
-            None,
-        )
-        .unwrap();
+        process_swap_expiries(&state, &mut rwtxn, 5).unwrap();
         assert_eq!(
             state.get_swap(&rwtxn, &swap_id).unwrap().unwrap().state,
             SwapState::Cancelled,

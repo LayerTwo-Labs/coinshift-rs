@@ -134,12 +134,9 @@ impl L1Registry {
     }
 
     /// Probe every configured chain and record the outcome.
-    ///
-    /// Blocking: the client is synchronous, so callers on an async runtime must
-    /// run this on a blocking thread.
-    pub fn probe_all(&self) {
+    pub async fn probe_all(&self) {
         for (chain, client, expected_genesis) in self.probe_targets() {
-            let health = match client.identify() {
+            let health = match client.identify().await {
                 Err(err) => {
                     let consecutive_failures = self
                         .entries
@@ -157,7 +154,7 @@ impl L1Registry {
                         Err(mismatch) => L1ChainHealth::WrongChain {
                             reason: mismatch.to_string(),
                         },
-                        Ok(()) => match client.tip() {
+                        Ok(()) => match client.tip().await {
                             Ok(block_height) => L1ChainHealth::Healthy {
                                 chain_name: reported.chain_name,
                                 block_height,
@@ -269,6 +266,32 @@ impl L1Registry {
             .collect()
     }
 
+    /// A registry with one chain already vouched for, backed by `client`.
+    ///
+    /// Test-only: lets the swap observer be exercised against a scripted parent
+    /// chain without a config file or a real endpoint.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn with_verified_client(
+        chain: ParentChainType,
+        client: Arc<dyn ParentChainClient>,
+    ) -> Self {
+        let config = L1ChainConfig::basic("http://mock", "", "");
+        let entry = ChainEntry {
+            config,
+            health: L1ChainHealth::Healthy {
+                chain_name: "mock".to_string(),
+                block_height: 0,
+            },
+            client,
+            verified_at: Some(Instant::now()),
+            consecutive_failures: 0,
+        };
+        Self {
+            path: None,
+            entries: RwLock::new(BTreeMap::from([(chain, entry)])),
+        }
+    }
+
     /// Chains that are configured but not currently usable, for `--strict-l1-config`.
     pub fn unhealthy_configured(
         &self,
@@ -347,12 +370,12 @@ mod tests {
         drop(std::fs::remove_file(&path));
     }
 
-    #[test]
-    fn an_unreachable_endpoint_is_recorded_not_fatal() {
+    #[tokio::test]
+    async fn an_unreachable_endpoint_is_recorded_not_fatal() {
         let path =
             temp_config("unreachable", &[(ParentChainType::Regtest, true)]);
         let registry = L1Registry::new(Some(path.clone()));
-        registry.probe_all();
+        registry.probe_all().await;
         assert!(matches!(
             registry.health(ParentChainType::Regtest),
             L1ChainHealth::Unreachable { .. }
@@ -362,12 +385,12 @@ mod tests {
         drop(std::fs::remove_file(&path));
     }
 
-    #[test]
-    fn repeated_failures_are_counted() {
+    #[tokio::test]
+    async fn repeated_failures_are_counted() {
         let path = temp_config("failures", &[(ParentChainType::Regtest, true)]);
         let registry = L1Registry::new(Some(path.clone()));
-        registry.probe_all();
-        registry.probe_all();
+        registry.probe_all().await;
+        registry.probe_all().await;
         match registry.health(ParentChainType::Regtest) {
             L1ChainHealth::Unreachable {
                 consecutive_failures,
@@ -378,11 +401,11 @@ mod tests {
         drop(std::fs::remove_file(&path));
     }
 
-    #[test]
-    fn reload_drops_health_when_the_endpoint_changes() {
+    #[tokio::test]
+    async fn reload_drops_health_when_the_endpoint_changes() {
         let path = temp_config("reload", &[(ParentChainType::Signet, true)]);
         let registry = L1Registry::new(Some(path.clone()));
-        registry.probe_all();
+        registry.probe_all().await;
         assert!(matches!(
             registry.health(ParentChainType::Signet),
             L1ChainHealth::Unreachable { .. }
@@ -403,11 +426,11 @@ mod tests {
         drop(std::fs::remove_file(&path));
     }
 
-    #[test]
-    fn reload_keeps_health_for_an_unchanged_entry() {
+    #[tokio::test]
+    async fn reload_keeps_health_for_an_unchanged_entry() {
         let path = temp_config("stable", &[(ParentChainType::Signet, true)]);
         let registry = L1Registry::new(Some(path.clone()));
-        registry.probe_all();
+        registry.probe_all().await;
         let before = registry.health(ParentChainType::Signet);
         registry.reload();
         assert_eq!(registry.health(ParentChainType::Signet), before);

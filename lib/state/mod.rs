@@ -98,9 +98,9 @@ pub type ExpiredSwapReversal = (SwapId, SwapState, Vec<OutPoint>);
 #[derive(Clone)]
 pub struct State {
     /// Current tip
-    tip: DatabaseUnique<UnitKey, SerdeBincode<BlockHash>>,
+    pub(crate) tip: DatabaseUnique<UnitKey, SerdeBincode<BlockHash>>,
     /// Current height
-    height: DatabaseUnique<UnitKey, SerdeBincode<u32>>,
+    pub(crate) height: DatabaseUnique<UnitKey, SerdeBincode<u32>>,
     pub utxos: DatabaseUnique<OutPointKey, SerdeBincode<Output>>,
     pub stxos: DatabaseUnique<OutPointKey, SerdeBincode<SpentOutput>>,
     /// Pending withdrawal bundle and block height
@@ -1999,16 +1999,9 @@ impl State {
         &self,
         rwtxn: &mut RwTxn,
         two_way_peg_data: &TwoWayPegData,
-        client_getter: Option<crate::parent_chain::ClientGetter<'_>>,
         wallet: Option<&crate::wallet::Wallet>,
     ) -> Result<(), Error> {
-        two_way_peg_data::connect(
-            self,
-            rwtxn,
-            two_way_peg_data,
-            client_getter,
-            wallet,
-        )
+        two_way_peg_data::connect(self, rwtxn, two_way_peg_data, wallet)
     }
 
     pub fn disconnect_two_way_peg_data(

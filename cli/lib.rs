@@ -432,7 +432,7 @@ where
             // network is a definite mistake and is refused; a node that is
             // merely down is not, since configuring ahead of starting it is
             // perfectly reasonable.
-            let note = match client_for(parent_chain, &entry).identify() {
+            let note = match client_for(parent_chain, &entry).identify().await {
                 Ok(identity) => match coinshift::l1::identity::verify(
                     parent_chain,
                     &identity,

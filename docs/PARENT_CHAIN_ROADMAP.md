@@ -501,13 +501,18 @@ the (a)/(b)/(c) deployment shapes from §2.5 and a fails-vs-degrades table.
 
 ### 3.2 Risks
 
-1. **Phase 4 is the highest-risk merge.** It changes *when* swap state mutates
-   relative to block connect. Detection currently happens inside the connect txn so
-   a disconnect reverses it; observer writes are outside that. Mitigation: the
-   observer subscribes to tip changes and re-verifies any swap whose
-   `l1_txid_validated_at_block_hash` is no longer on the active chain — the data
-   already exists via `Swap::set_l1_txid_validation_block`. Also: two writers to
-   swap rows on a single-writer LMDB env, so short txns + CAS + retry are mandatory.
+1. ~~**Phase 4 is the highest-risk merge.**~~ **Partly mistaken — corrected during
+   Phase 4.** The premise was that detection happening inside the connect txn
+   meant a disconnect reversed it, so moving it out would lose that. It does not:
+   `two_way_peg_data::disconnect` only ever reversed **expiry**, via the
+   `expired_swaps` table. Detection — `l1_txid`, `WaitingConfirmations`,
+   `ReadyToClaim` — was never reversed on reorg even while it ran inside the
+   write transaction. Moving it out therefore loses no guarantee that existed.
+   The real half of this risk was the other one: two writers to swap rows on a
+   single-writer LMDB env. That is handled by snapshotting outside any
+   transaction and re-reading under the write transaction before applying
+   (compare-and-set), covered by
+   `a_result_computed_against_a_stale_snapshot_is_discarded`.
 2. **Phase 0 must precede Phase 7.** If Solana lands before `parse_l1_amount`, the
    GUI's `Amount::from_str_in(.., Denomination::Bitcoin)` at
    `app/gui/swap/create.rs:173-176` silently creates a 10×-wrong SOL swap.
@@ -731,6 +736,52 @@ Behaviour changes worth a release note:
 
 Risk 3 is resolved by the migration in (2). Risk 7 is handled by the
 `expected_genesis` override plus name-only matching for BCH/LTC.
+
+### 3.7 Phase 4 — implementation notes (done)
+
+`lib/node/swap_observer.rs` is now the only place Coinshift watches a parent
+chain. A round snapshots the work list under a read transaction and drops it,
+does all network I/O with **no transaction held** and all chains concurrently,
+then applies results in one short write transaction.
+
+**The write-transaction problem is gone.** Detection used to make blocking HTTP
+calls while holding the LMDB write lock — `listunspent` plus a
+`getrawtransaction` per candidate, per pending swap, per block. Against a remote
+or rate-limited endpoint that is seconds during which nothing else in the node
+can write. `process_coinshift_transactions` is now `process_swap_expiries` and
+does only the deterministic, consensus-relevant expiry work; the whole
+`client_getter` parameter chain through `connect`, `connect_two_way_peg_data`,
+`connect_tip_` and `net_task` is deleted.
+
+**Three duplicate pollers deleted:** `App::swap_confirmation_check_task`,
+and `SwapList::{check_confirmations_dynamically, load_rpc_config}` — the latter
+including the `std::thread::spawn(...).join()` that blocked the egui thread for
+up to ten seconds per pending swap, every ten seconds.
+
+**The trait is now async**, as §3.0 intended and Phase 2 deferred. With exactly
+one caller left this was the cheapest possible moment to flip it. `reqwest`'s
+`blocking` feature is dropped from `lib`.
+
+**Correction to risk 1.** The plan assumed detection was reorg-reversed because
+it ran inside the connect transaction, and that moving it out would lose that.
+It was not: `disconnect` only ever reversed expiry. Detection was never reversed
+on reorg, then or now. So this phase changes *when* detection happens but takes
+away no guarantee — which is why the planned "re-verify swaps whose validation
+block left the active chain" work is not here. Reorg-aware re-verification is
+worth doing on its own merits, but it would be a new guarantee, not a restored
+one, and belongs in its own change.
+
+The half of risk 1 that was real — two writers to swap rows on a single-writer
+environment — is handled by compare-and-set: the observer re-reads each swap
+under the write transaction and skips it if the state moved since the snapshot,
+so a claim or expiry landing mid-round always wins. Covered by
+`a_result_computed_against_a_stale_snapshot_is_discarded`.
+
+Known remaining, both deliberate: the swap detail view's two **click-triggered**
+fetches still block briefly via `runtime.block_on` (bounded by the endpoint
+timeout, and no longer per-frame), and `app/gui/l1_config.rs` still has its own
+hand-rolled `getblockchaininfo` call for the "test connection" button. Phase 6
+replaces that panel with a registry-driven status table, which removes it.
 
 ---
 

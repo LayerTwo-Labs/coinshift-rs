@@ -26,17 +26,15 @@ use tokio_stream::StreamNotifyClose;
 use super::mainchain_task::{self, MainchainTaskHandle};
 use crate::{
     archive::{self, Archive},
-    l1::L1Registry,
     mempool::{self, MemPool},
     net::{
         self, Net, PeerConnectionError, PeerConnectionInfo,
         PeerConnectionMailboxError, PeerConnectionMessage, PeerInfoRx,
         PeerRequest, PeerResponse, PeerStateId, peer_message,
     },
-    parent_chain::{ClientGetter, ParentChainClient},
     state::{self, State},
     types::{
-        BmmResult, Body, Header, MerkleRoot, ParentChainType, Tip,
+        BmmResult, Body, Header, MerkleRoot, Tip,
         proto::{self, mainchain},
     },
     util::join_set,
@@ -94,7 +92,6 @@ fn connect_tip_(
     header: &Header,
     body: &Body,
     two_way_peg_data: &mainchain::TwoWayPegData,
-    client_getter: Option<ClientGetter<'_>>,
     wallet: Option<&crate::wallet::Wallet>,
 ) -> Result<(), Error> {
     let block_hash = header.hash();
@@ -116,12 +113,7 @@ fn connect_tip_(
             prevalidated,
         )?;
     }
-    let () = state.connect_two_way_peg_data(
-        rwtxn,
-        two_way_peg_data,
-        client_getter,
-        wallet,
-    )?;
+    let () = state.connect_two_way_peg_data(rwtxn, two_way_peg_data, wallet)?;
     let accumulator = state.get_accumulator(rwtxn)?;
     let () = archive.put_header(rwtxn, header)?;
     let () = archive.put_body(rwtxn, block_hash, body)?;
@@ -278,7 +270,6 @@ fn reorg_to_tip(
     mempool: &MemPool,
     state: &State,
     new_tip: Tip,
-    l1_registry: Option<&Arc<L1Registry>>,
     wallet: Option<&crate::wallet::Wallet>,
 ) -> Result<bool, Error> {
     let mut rwtxn = env.write_txn().map_err(EnvError::from)?;
@@ -415,20 +406,6 @@ fn reorg_to_tip(
             }
             two_way_peg_data
         };
-        type BoxedClientGetter =
-            Box<dyn Fn(ParentChainType) -> Option<Arc<dyn ParentChainClient>>>;
-        // Only chains the registry currently vouches for are observed. An
-        // unreachable or wrong-network endpoint yields None, and the swap stays
-        // where it is rather than being advanced on untrusted evidence.
-        let client_getter: Option<BoxedClientGetter> =
-            l1_registry.map(|registry| {
-                let registry = registry.clone();
-                Box::new(move |chain: ParentChainType| {
-                    registry.verified_client(chain)
-                }) as BoxedClientGetter
-            });
-        let client_getter: Option<ClientGetter<'_>> =
-            client_getter.as_ref().map(|getter| getter.as_ref());
         let () = connect_tip_(
             &mut rwtxn,
             archive,
@@ -437,7 +414,6 @@ fn reorg_to_tip(
             &header,
             &body,
             &two_way_peg_data,
-            client_getter,
             wallet,
         )?;
         let new_tip_hash = state.try_get_tip(&rwtxn)?.unwrap();
@@ -472,10 +448,6 @@ struct NetTaskContext {
     net: Net,
     state: State,
     wallet: Option<Arc<crate::wallet::Wallet>>,
-    /// Live parent-chain clients and their health. When set, Coinshift queries
-    /// the swap target chain on each block connect to update swap state -- but
-    /// only for chains the registry currently considers healthy.
-    l1_registry: Option<Arc<L1Registry>>,
 }
 
 /// Message indicating a tip that is ready to reorg to, with the address of the
@@ -1105,7 +1077,6 @@ impl NetTask {
                             &self.ctxt.mempool,
                             &self.ctxt.state,
                             new_tip,
-                            self.ctxt.l1_registry.as_ref(),
                             self.ctxt.wallet.as_deref(),
                         )
                     });
@@ -1340,7 +1311,6 @@ impl NetTaskHandle {
         peer_info_rx: PeerInfoRx,
         state: State,
         wallet: Option<Arc<crate::wallet::Wallet>>,
-        l1_registry: Option<Arc<L1Registry>>,
     ) -> Self {
         let ctxt = NetTaskContext {
             env,
@@ -1350,7 +1320,6 @@ impl NetTaskHandle {
             net,
             state,
             wallet,
-            l1_registry,
         };
         let (
             forward_mainchain_task_request_tx,

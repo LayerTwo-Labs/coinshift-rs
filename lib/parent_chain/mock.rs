@@ -78,8 +78,9 @@ impl MockParentChainClient {
     }
 }
 
+#[async_trait::async_trait]
 impl ParentChainClient for MockParentChainClient {
-    fn identify(&self) -> Result<ChainIdentity, Error> {
+    async fn identify(&self) -> Result<ChainIdentity, Error> {
         self.record();
         Ok(ChainIdentity {
             chain_name: crate::l1::identity::accepted_network_names(self.chain)
@@ -90,12 +91,12 @@ impl ParentChainClient for MockParentChainClient {
         })
     }
 
-    fn tip(&self) -> Result<u64, Error> {
+    async fn tip(&self) -> Result<u64, Error> {
         self.record();
         Ok(self.tip)
     }
 
-    fn find_payments(
+    async fn find_payments(
         &self,
         query: &PaymentQuery,
     ) -> Result<Vec<L1Payment>, Error> {
@@ -103,7 +104,7 @@ impl ParentChainClient for MockParentChainClient {
         self.payments_for(query)
     }
 
-    fn get_payment(
+    async fn get_payment(
         &self,
         txid: &SwapTxId,
         query: &PaymentQuery,

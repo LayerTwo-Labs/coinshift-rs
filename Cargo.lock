@@ -1304,6 +1304,7 @@ version = "0.14.0-alpha"
 dependencies = [
  "anyhow",
  "async-lock",
+ "async-trait",
  "bincode",
  "bitcoin",
  "blake3",

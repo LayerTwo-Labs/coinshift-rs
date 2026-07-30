@@ -361,210 +361,6 @@ impl App {
         )
     }
 
-    /// Periodic task to check and update swap confirmations dynamically
-    /// This works in both GUI and headless mode
-    async fn swap_confirmation_check_task(
-        node: Arc<Node>,
-    ) -> Result<(), Error> {
-        use coinshift::l1::config as l1_config;
-        use coinshift::types::{ParentChainType, SwapState, SwapTxId};
-        use std::time::Duration;
-
-        const CHECK_INTERVAL: Duration = Duration::from_secs(10);
-
-        tracing::info!(
-            "Swap confirmation check task started, will check every {} seconds",
-            CHECK_INTERVAL.as_secs()
-        );
-
-        fn load_rpc_config(
-            parent_chain: ParentChainType,
-        ) -> Option<l1_config::L1ChainConfig> {
-            l1_config::load_chain_config(
-                &l1_config::default_path(),
-                parent_chain,
-            )
-        }
-
-        loop {
-            tokio::time::sleep(CHECK_INTERVAL).await;
-            tracing::trace!(
-                "Swap confirmation check task: checking for swap confirmations"
-            );
-
-            // Get swaps from database
-            let rotxn = match node.env().read_txn() {
-                Ok(txn) => txn,
-                Err(err) => {
-                    tracing::debug!("Failed to get read transaction: {err:#}");
-                    continue;
-                }
-            };
-
-            let swaps = match node.state().load_all_swaps(&rotxn) {
-                Ok(swaps) => swaps,
-                Err(err) => {
-                    tracing::debug!("Failed to load swaps: {err:#}");
-                    continue;
-                }
-            };
-
-            // Filter swaps that are waiting for confirmations and have an L1 txid
-            let swaps_to_check: Vec<_> = swaps
-                .iter()
-                .filter(|swap| {
-                    matches!(swap.state, SwapState::WaitingConfirmations(..))
-                        && !matches!(swap.l1_txid, SwapTxId::Hash32(h) if h == [0u8; 32])
-                        && !matches!(swap.l1_txid, SwapTxId::Hash(ref v) if v.is_empty() || v.iter().all(|&b| b == 0))
-                })
-                .collect();
-
-            drop(rotxn);
-
-            if swaps_to_check.is_empty() {
-                continue;
-            }
-
-            tracing::debug!(
-                swap_count = swaps_to_check.len(),
-                "Checking confirmations for {} swaps",
-                swaps_to_check.len()
-            );
-
-            let mut updated_count = 0;
-            let mut rwtxn = match node.env().write_txn() {
-                Ok(txn) => txn,
-                Err(err) => {
-                    tracing::debug!("Failed to get write transaction: {err:#}");
-                    continue;
-                }
-            };
-
-            for swap in swaps_to_check {
-                // Get RPC config for this swap's parent chain
-                if let Some(rpc_config) = load_rpc_config(swap.parent_chain) {
-                    let client = coinshift::parent_chain::client_for(
-                        swap.parent_chain,
-                        &rpc_config,
-                    );
-                    let query =
-                        coinshift::parent_chain::PaymentQuery::for_swap(swap);
-                    match client
-                        .get_payment(&swap.l1_txid, &query)
-                        .map(|payment| payment.map(|p| p.confirmations))
-                    {
-                        Ok(Some(new_confirmations)) => {
-                            // Get current confirmations from swap state
-                            let current_confirmations = match swap.state {
-                                SwapState::WaitingConfirmations(current, _) => {
-                                    current
-                                }
-                                _ => 0,
-                            };
-
-                            // Only update if confirmations have increased
-                            if new_confirmations > current_confirmations {
-                                tracing::info!(
-                                    swap_id = %swap.id,
-                                    old_confirmations = %current_confirmations,
-                                    new_confirmations = %new_confirmations,
-                                    required = %swap.required_confirmations,
-                                    "Updating swap confirmations dynamically (headless mode)"
-                                );
-
-                                // Get current block info for reference
-                                let block_hash = match node
-                                    .state()
-                                    .try_get_tip(&rwtxn)
-                                {
-                                    Ok(Some(hash)) => hash,
-                                    Ok(None) | Err(_) => {
-                                        tracing::warn!(
-                                            "Could not get block hash for swap update"
-                                        );
-                                        continue;
-                                    }
-                                };
-                                let block_height = match node
-                                    .state()
-                                    .try_get_height(&rwtxn)
-                                {
-                                    Ok(Some(height)) => height,
-                                    Ok(None) | Err(_) => {
-                                        tracing::warn!(
-                                            "Could not get block height for swap update"
-                                        );
-                                        continue;
-                                    }
-                                };
-
-                                // Update swap with new confirmations
-                                if let Err(err) =
-                                    node.state().update_swap_l1_txid(
-                                        &mut rwtxn,
-                                        &swap.id,
-                                        swap.l1_txid.clone(),
-                                        new_confirmations,
-                                        None, // l1_claimer_address - not needed for confirmation updates
-                                        None, // l2_claimer_address - not changed on confirmation update
-                                        block_hash,
-                                        block_height,
-                                    )
-                                {
-                                    tracing::error!(
-                                        swap_id = %swap.id,
-                                        error = %err,
-                                        "Failed to update swap confirmations"
-                                    );
-                                } else {
-                                    updated_count += 1;
-                                }
-                            }
-                        }
-                        Ok(None) => {
-                            tracing::debug!(
-                                swap_id = %swap.id,
-                                l1_txid = %swap.l1_txid.to_hex(),
-                                "L1 transaction not found on the parent chain"
-                            );
-                        }
-                        Err(err) => {
-                            tracing::debug!(
-                                swap_id = %swap.id,
-                                l1_txid = %swap.l1_txid.to_hex(),
-                                error = %err,
-                                "Failed to fetch confirmations from RPC (this is normal if RPC is unavailable)"
-                            );
-                        }
-                    }
-                }
-            }
-
-            if updated_count > 0 {
-                if let Err(err) = rwtxn.commit() {
-                    tracing::error!("Failed to commit swap updates: {err:#}");
-                } else {
-                    tracing::info!(
-                        updated_swaps = updated_count,
-                        "Dynamically updated confirmations for {} swaps (headless mode)",
-                        updated_count
-                    );
-                }
-            } else {
-                drop(rwtxn);
-            }
-        }
-    }
-
-    fn spawn_swap_confirmation_check_task(node: Arc<Node>) -> JoinHandle<()> {
-        spawn(
-            Self::swap_confirmation_check_task(node).unwrap_or_else(|err| {
-                let err = anyhow::Error::from(err);
-                tracing::error!("Swap confirmation check task error: {err:#}")
-            }),
-        )
-    }
-
     async fn check_status_serving(
         client: &mut HealthClient<tonic::transport::Channel>,
         service_name: &str,
@@ -713,7 +509,7 @@ impl App {
         if config.strict_l1_config {
             // Opt-in fail-fast for supervised deployments and CI: probe once
             // now, and refuse to start if any configured chain is unusable.
-            node.l1().probe_all();
+            runtime.block_on(node.l1().probe_all());
             let unhealthy = node.l1().unhealthy_configured();
             if !unhealthy.is_empty() {
                 let detail = unhealthy
@@ -818,11 +614,9 @@ impl App {
             Self::spawn_l1_sync_task(node.clone(), mainchain_reachable.clone());
         tracing::info!("L1 sync task spawned");
 
-        // Spawn swap confirmation check task to periodically update swap confirmations
-        tracing::info!("Spawning swap confirmation check task");
-        let _swap_confirmation_task =
-            Self::spawn_swap_confirmation_check_task(node.clone());
-        tracing::info!("Swap confirmation check task spawned");
+        // Swap confirmations are refreshed by the node's swap observer, which
+        // owns all parent-chain polling. There used to be a second copy of that
+        // logic here, and two more in the GUI.
 
         tracing::debug!("Dropping runtime guard");
         drop(rt_guard);

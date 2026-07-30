@@ -6,15 +6,12 @@
 //! enough to accept? [`ParentChainClient`] is that question, expressed so a
 //! non-Bitcoin chain can answer it too.
 //!
-//! # Why this is synchronous
+//! # Asynchrony
 //!
-//! The only caller today is `state::two_way_peg_data::query_and_update_swap`,
-//! which runs inside an LMDB write transaction on a synchronous call path, so an
-//! `async` trait could not be awaited there and blocking on the runtime from
-//! inside it would panic. Phase 4 of `docs/PARENT_CHAIN_ROADMAP.md` moves L1
-//! observation into its own task, and the trait becomes `async` with it — a
-//! mechanical change, since no signature other than the `async`/`.await` pair
-//! differs.
+//! The trait is `async` and dyn-compatible via `async_trait`, because L1
+//! observation runs in its own task ([`crate::node::SwapObserver`]) rather than
+//! on the block-connect path. Nothing here may block: an endpoint that takes ten
+//! seconds to answer must not stall the runtime, the GUI, or block processing.
 
 pub mod bitcoin_core;
 #[cfg(any(test, feature = "test-utils"))]
@@ -43,18 +40,19 @@ pub enum Error {
 }
 
 /// Everything the swap logic needs from a parent chain.
+#[async_trait::async_trait]
 pub trait ParentChainClient: Send + Sync {
     /// Which chain this endpoint is actually serving.
-    fn identify(&self) -> Result<ChainIdentity, Error>;
+    async fn identify(&self) -> Result<ChainIdentity, Error>;
 
     /// Current tip, in the chain's own age unit (block height, slot, …).
-    fn tip(&self) -> Result<u64, Error>;
+    async fn tip(&self) -> Result<u64, Error>;
 
     /// Transactions that pay `query`'s address `query`'s amount.
     ///
     /// Callers still apply their own age and finality rules; this only filters
     /// on the payment itself.
-    fn find_payments(
+    async fn find_payments(
         &self,
         query: &PaymentQuery,
     ) -> Result<Vec<L1Payment>, Error>;
@@ -62,7 +60,7 @@ pub trait ParentChainClient: Send + Sync {
     /// Re-read one already-known transaction, cheaply.
     ///
     /// Returns `Ok(None)` when the chain has no record of `txid`.
-    fn get_payment(
+    async fn get_payment(
         &self,
         txid: &crate::types::SwapTxId,
         query: &PaymentQuery,

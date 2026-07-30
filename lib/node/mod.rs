@@ -30,10 +30,12 @@ use crate::{
 
 mod mainchain_task;
 mod net_task;
+mod swap_observer;
 
 use mainchain_task::MainchainTaskHandle;
 
 use self::net_task::NetTaskHandle;
+pub use self::swap_observer::SwapObserver;
 
 #[derive(Debug, thiserror::Error, transitive::Transitive)]
 #[transitive(from(env::error::ReadTxn, EnvError))]
@@ -227,6 +229,12 @@ where
         let l1_registry =
             Arc::new(L1Registry::new(config.l1_rpc_config_path.clone()));
         let () = Self::spawn_l1_health_task(runtime, l1_registry.clone());
+        let () = Self::spawn_swap_observer(
+            runtime,
+            state.clone(),
+            env.clone(),
+            l1_registry.clone(),
+        );
         tracing::info!("Node::new: Creating NetTaskHandle");
         let wallet_clone = config.wallet.clone();
         let net_task = NetTaskHandle::new(
@@ -240,7 +248,6 @@ where
             peer_info_rx,
             state.clone(),
             wallet_clone,
-            Some(l1_registry.clone()),
         );
         tracing::info!("Node::new: NetTaskHandle created");
         let cusf_mainchain_wallet = config
@@ -310,10 +317,8 @@ where
 
     /// Keep every configured parent chain's health up to date.
     ///
-    /// The client is synchronous, so each round runs on a blocking thread
-    /// rather than stalling the runtime. Failures are recorded as health, never
-    /// propagated: one parent chain being down must not affect the node or any
-    /// other chain.
+    /// Failures are recorded as health, never propagated: one parent chain
+    /// being down must not affect the node or any other chain.
     fn spawn_l1_health_task(
         runtime: &tokio::runtime::Runtime,
         registry: Arc<L1Registry>,
@@ -321,20 +326,24 @@ where
         let _guard = runtime.enter();
         tokio::spawn(async move {
             loop {
-                let registry = registry.clone();
-                let probe = tokio::task::spawn_blocking(move || {
-                    // Pick up config edits before probing, so a corrected
-                    // endpoint recovers without a restart.
-                    registry.reload();
-                    registry.probe_all();
-                })
-                .await;
-                if let Err(err) = probe {
-                    tracing::warn!(%err, "L1 health probe round failed");
-                }
+                // Pick up config edits before probing, so a corrected endpoint
+                // recovers without a restart.
+                registry.reload();
+                registry.probe_all().await;
                 tokio::time::sleep(l1::registry::PROBE_INTERVAL).await;
             }
         });
+    }
+
+    /// Watch every healthy parent chain for payments that fill pending swaps.
+    fn spawn_swap_observer(
+        runtime: &tokio::runtime::Runtime,
+        state: State,
+        env: sneed::Env,
+        registry: Arc<L1Registry>,
+    ) {
+        let _guard = runtime.enter();
+        tokio::spawn(SwapObserver::new(state, env, registry).run());
     }
 
     /// Parent-chain clients and their health.

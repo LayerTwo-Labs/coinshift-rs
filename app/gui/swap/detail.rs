@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use coinshift::parent_chain::{PaymentQuery, client_for};
+use coinshift::parent_chain::PaymentQuery;
 use coinshift::types::{Address, Swap, SwapId, SwapState, SwapTxId};
 use eframe::egui::{self, Button, ScrollArea};
 
@@ -766,15 +766,15 @@ impl SwapDetail {
 
     fn fetch_confirmations_from_rpc(
         &mut self,
-        _app: &App,
+        app: &App,
         swap: &Swap,
-        list: &SwapList,
+        _list: &SwapList,
     ) {
         if self.l1_txid_input.is_empty() {
             return;
         }
 
-        if let Some(rpc_config) = list.load_rpc_config(swap.parent_chain) {
+        if let Some(client) = app.node.l1().verified_client(swap.parent_chain) {
             self.fetching_confirmations = true;
             let txid_hex = self.l1_txid_input.clone();
             let Ok(l1_txid) =
@@ -785,8 +785,12 @@ impl SwapDetail {
                 return;
             };
 
-            let client = client_for(swap.parent_chain, &rpc_config);
-            match client.get_payment(&l1_txid, &PaymentQuery::for_swap(swap)) {
+            // Blocking on a user-initiated click, bounded by the endpoint
+            // timeout. Unlike the per-frame polling this replaces, it happens
+            // only when the button is pressed.
+            match app.runtime.block_on(
+                client.get_payment(&l1_txid, &PaymentQuery::for_swap(swap)),
+            ) {
                 Ok(Some(payment)) => {
                     tracing::info!(
                         swap_id = %swap.id,
@@ -861,11 +865,12 @@ impl SwapDetail {
         // Fetch and validate from RPC. The adapter already decides whether the
         // transaction pays this swap's address its amount, so the address and
         // amount matching that used to be duplicated here is gone.
-        let confirmations = if let Some(rpc_config) =
-            list.load_rpc_config(swap.parent_chain)
+        let confirmations = if let Some(client) =
+            app.node.l1().verified_client(swap.parent_chain)
         {
-            let client = client_for(swap.parent_chain, &rpc_config);
-            match client.get_payment(&l1_txid, &PaymentQuery::for_swap(swap)) {
+            match app.runtime.block_on(
+                client.get_payment(&l1_txid, &PaymentQuery::for_swap(swap)),
+            ) {
                 Ok(Some(payment)) if payment.matches_query => {
                     payment.confirmations
                 }

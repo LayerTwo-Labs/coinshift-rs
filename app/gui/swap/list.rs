@@ -1,11 +1,6 @@
-use std::{
-    collections::HashSet,
-    time::{Duration, Instant},
-};
+use std::collections::HashSet;
 
-use coinshift::l1::config::{self as l1_config, L1ChainConfig};
-use coinshift::parent_chain::{PaymentQuery, client_for};
-use coinshift::types::{ParentChainType, Swap, SwapId, SwapState, SwapTxId};
+use coinshift::types::{Swap, SwapId, SwapState};
 use eframe::egui::{self, Button, ScrollArea};
 
 use crate::app::App;
@@ -43,9 +38,6 @@ pub struct SwapList {
     ownership_filter: OwnershipFilter,
     swap_id_search: String,
     search_error: Option<String>,
-    // confirmation checking (kept here since it's background work)
-    last_confirmation_check: Option<Instant>,
-    checking_confirmations: bool,
 }
 
 // Fields all implement Default (Option=None, HashSet=empty, String=empty, bool=false)
@@ -148,18 +140,10 @@ impl SwapList {
         app: Option<&App>,
         ui: &mut egui::Ui,
     ) -> Option<Swap> {
-        // Background confirmation checking
-        let should_check = self
-            .last_confirmation_check
-            .map(|last| last.elapsed() >= Duration::from_secs(10))
-            .unwrap_or(true);
-
-        if should_check
-            && !self.checking_confirmations
-            && let Some(app) = app
-        {
-            self.check_confirmations_dynamically(app);
-        }
+        // Confirmations are refreshed by the node's swap observer; this view
+        // just displays whatever state the node has. It used to poll the
+        // parent chain itself, blocking the UI thread on a join() for up to ten
+        // seconds per pending swap.
 
         let mut navigate_to: Option<Swap> = None;
 
@@ -170,13 +154,6 @@ impl SwapList {
                 && let Some(app) = app
             {
                 self.refresh_swaps(app);
-            }
-            if self.checking_confirmations {
-                ui.label(
-                    egui::RichText::new("Checking confirmations...")
-                        .small()
-                        .color(egui::Color32::GRAY),
-                );
             }
         });
 
@@ -539,161 +516,6 @@ impl SwapList {
     }
 
     // ── background confirmation checking ───────────────────────────
-
-    pub(crate) fn load_rpc_config(
-        &self,
-        parent_chain: ParentChainType,
-    ) -> Option<L1ChainConfig> {
-        // No fallback to a shipped endpoint: an unconfigured chain is
-        // unconfigured. The GUI used to silently poll two hardcoded endpoints
-        // (one of them a third-party IP) for chains the user had never set up.
-        l1_config::load_chain_config(&l1_config::default_path(), parent_chain)
-    }
-
-    fn check_confirmations_dynamically(&mut self, app: &App) {
-        if self.checking_confirmations {
-            return;
-        }
-
-        self.checking_confirmations = true;
-        self.last_confirmation_check = Some(Instant::now());
-
-        let rotxn = match app.node.env().read_txn() {
-            Ok(txn) => txn,
-            Err(err) => {
-                tracing::error!("Failed to get read transaction: {err:#}");
-                self.checking_confirmations = false;
-                return;
-            }
-        };
-
-        let swaps = match app.node.state().load_all_swaps(&rotxn) {
-            Ok(swaps) => swaps,
-            Err(err) => {
-                tracing::error!("Failed to load swaps: {err:#}");
-                self.checking_confirmations = false;
-                return;
-            }
-        };
-
-        let swaps_to_check: Vec<_> = swaps
-            .iter()
-            .filter(|swap| {
-                matches!(swap.state, SwapState::WaitingConfirmations(..))
-                    && !matches!(swap.l1_txid, SwapTxId::Hash32(h) if h == [0u8; 32])
-                    && !matches!(swap.l1_txid, SwapTxId::Hash(ref v) if v.is_empty() || v.iter().all(|&b| b == 0))
-            })
-            .collect();
-
-        drop(rotxn);
-
-        if swaps_to_check.is_empty() {
-            self.checking_confirmations = false;
-            return;
-        }
-
-        let work: Vec<_> = swaps_to_check
-            .iter()
-            .filter_map(|swap| {
-                self.load_rpc_config(swap.parent_chain).map(|rpc_config| {
-                    (
-                        swap.id,
-                        swap.parent_chain,
-                        rpc_config,
-                        swap.l1_txid.clone(),
-                        PaymentQuery::for_swap(swap),
-                    )
-                })
-            })
-            .collect();
-
-        let results: Vec<(SwapId, u32)> = std::thread::spawn(move || {
-            work.into_iter()
-                .filter_map(|(swap_id, chain, rpc_config, l1_txid, query)| {
-                    let client = client_for(chain, &rpc_config);
-                    client
-                        .get_payment(&l1_txid, &query)
-                        .ok()
-                        .flatten()
-                        .map(|payment| (swap_id, payment.confirmations))
-                })
-                .collect()
-        })
-        .join()
-        .unwrap_or_default();
-
-        let mut updated_count = 0;
-        let mut rwtxn = match app.node.env().write_txn() {
-            Ok(txn) => txn,
-            Err(err) => {
-                tracing::error!("Failed to get write transaction: {err:#}");
-                self.checking_confirmations = false;
-                return;
-            }
-        };
-
-        let block_hash = match app.node.state().try_get_tip(&rwtxn) {
-            Ok(Some(hash)) => hash,
-            Ok(None) | Err(_) => {
-                self.checking_confirmations = false;
-                return;
-            }
-        };
-        let block_height = match app.node.state().try_get_height(&rwtxn) {
-            Ok(Some(height)) => height,
-            Ok(None) | Err(_) => {
-                self.checking_confirmations = false;
-                return;
-            }
-        };
-
-        for (swap_id, new_confirmations) in results {
-            let current = swaps_to_check
-                .iter()
-                .find(|s| s.id == swap_id)
-                .and_then(|s| match s.state {
-                    SwapState::WaitingConfirmations(c, _) => Some(c),
-                    _ => None,
-                });
-            let Some(current_confirmations) = current else {
-                continue;
-            };
-            if new_confirmations <= current_confirmations {
-                continue;
-            }
-
-            tracing::info!(
-                swap_id = %swap_id,
-                old = %current_confirmations,
-                new = %new_confirmations,
-                "Updating swap confirmations"
-            );
-
-            if let Err(err) = app.node.state().update_swap_confirmations(
-                &mut rwtxn,
-                &swap_id,
-                new_confirmations,
-                block_hash,
-                block_height,
-            ) {
-                tracing::error!(swap_id = %swap_id, error = %err, "Failed to update confirmations");
-            } else {
-                updated_count += 1;
-            }
-        }
-
-        if updated_count > 0 {
-            if let Err(err) = rwtxn.commit() {
-                tracing::error!("Failed to commit swap updates: {err:#}");
-            } else {
-                self.refresh_swaps(app);
-            }
-        } else {
-            drop(rwtxn);
-        }
-
-        self.checking_confirmations = false;
-    }
 }
 
 // ── helpers ────────────────────────────────────────────────────────
