@@ -4,12 +4,17 @@ use thiserror::Error;
 
 /// Convenience alias to avoid writing out a lengthy trait bound
 pub trait Transport = where
-    Self: tonic::client::GrpcService<tonic::body::BoxBody>,
+    Self: tonic::client::GrpcService<tonic::body::Body>,
     Self::Error: Into<tonic::codegen::StdError>,
     Self::ResponseBody:
         tonic::codegen::Body<Data = tonic::codegen::Bytes> + Send + 'static,
     <Self::ResponseBody as tonic::codegen::Body>::Error:
         Into<tonic::codegen::StdError> + Send;
+
+/// The response future of a transport, named so that `where` clauses bounding
+/// it stay on one line.
+pub type TransportFuture<T> =
+    <T as tonic::client::GrpcService<tonic::body::Body>>::Future;
 
 #[derive(Debug, Error)]
 pub enum Error {

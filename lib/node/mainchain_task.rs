@@ -280,8 +280,7 @@ impl MainchainTaskHandle {
     ) -> (Self, mpsc::UnboundedReceiver<Response>)
     where
         Transport: proto::Transport + Send + 'static,
-        <Transport as tonic::client::GrpcService<tonic::body::BoxBody>>::Future:
-            Send,
+        proto::TransportFuture<Transport>: Send,
     {
         let (request_tx, request_rx) = mpsc::unbounded();
         let (response_tx, response_rx) = mpsc::unbounded();
