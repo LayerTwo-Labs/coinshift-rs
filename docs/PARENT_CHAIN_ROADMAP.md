@@ -572,6 +572,50 @@ Also fixed in passing: `app/gui/swap/create.rs` reset the chain selector to
 selectable — despite the comment claiming it kept the selection. It now preserves
 whatever the user had chosen.
 
+### 3.4 Phase 1 — implementation notes (done)
+
+`lib/l1/config.rs` is now the only definition of an L1 endpoint and the only
+place the config path is computed. Deleted: `parent_chain_rpc::RpcConfig`,
+`parent_chain_rpc::LocalRpcConfigFile`, the private `RpcConfig` in
+`app/gui/l1_config.rs`, and the two private `LocalRpcConfig` copies in
+`app/app.rs` and `app/gui/swap/list.rs`; plus all six path computations and the
+dead `parent_chain_rpc::get_rpc_config` placeholder.
+
+Deliberate choices:
+
+- **`url` stayed a `String`.** `url::Url` normalises on parse — it appends a
+  trailing slash to an empty path — which would silently break the exact-string
+  comparison in `is_supported_l1_config` and lock everyone out at startup. Once
+  Phase 3 removes that allowlist the type can be tightened.
+- **`is_supported_l1_config` compares only url + auth**, not the whole struct, so
+  the new local-only knobs (`enabled`, `timeout_secs`, `poll_interval_secs`)
+  cannot accidentally make a valid endpoint unsupported.
+- **Legacy configs with a blank user become `L1Auth::None`.** The old client
+  skipped basic auth entirely when the user was empty; mapping blank credentials
+  to `Basic { user: "", .. }` would have started sending an empty
+  Authorization header.
+- **`ParentChainType` gained `Ord`/`PartialOrd`** so the config can use a
+  `BTreeMap` and write keys in a stable order. Neither derive affects the Borsh
+  or serde encoding, which the Phase 0 tests still pin.
+
+Behaviour changes worth a release note:
+
+1. **The file is rewritten in v2 form on the next save.** v2 is
+   `{"version": 2, "chains": {…}}`; the old flat `{"Signet": {…}}` is still read
+   and upgraded in memory. An older coinshift binary cannot read a v2 file — it
+   would see no configured chains. Downgrades need the file removed.
+2. **`get-l1-config` output is now the whole file object** (`version` + `chains`)
+   rather than a bare chain map, and each entry carries an `auth` object instead
+   of flat `user`/`password`.
+3. **`set-l1-config` now fails on a malformed config file** instead of silently
+   discarding every other chain's entry, and writes atomically with mode 0600.
+   The file holds RPC passwords and will hold API keys; all three previous
+   writers used plain `fs::write` with default permissions.
+
+Still deliberately unchanged: the startup trap (Phase 3), the four duplicated
+pollers (Phase 4), and the GUI's hardcoded predefined-config fallback in
+`app/gui/swap/list.rs` (risk 3).
+
 ---
 
 ## Verification

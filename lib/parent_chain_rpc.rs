@@ -6,10 +6,13 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::{path::Path, time::Duration};
+use std::path::Path;
 use thiserror::Error;
 
-use crate::types::ParentChainType;
+use crate::{
+    l1::config::{L1Auth, L1ChainConfig, L1ConfigFile},
+    types::ParentChainType,
+};
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -34,13 +37,6 @@ pub enum Error {
     /// L1 config (url/user/password) is not one of the supported predefined configs
     #[error("L1 config is not supported: only predefined networks are allowed")]
     UnsupportedL1Config,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RpcConfig {
-    pub url: String,
-    pub user: String,
-    pub password: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,14 +84,33 @@ pub struct Vin {
 /// This client uses the standard Bitcoin Core JSON-RPC interface, which is compatible
 /// with most Bitcoin-derivative blockchains.
 pub struct ParentChainRpcClient {
-    config: RpcConfig,
+    config: L1ChainConfig,
     client: reqwest::blocking::Client,
 }
 
+/// Apply the configured authentication scheme to an outgoing request.
+///
+/// Kept here rather than on [`L1Auth`] so the config module stays free of any
+/// particular HTTP client.
+fn apply_auth(
+    builder: reqwest::blocking::RequestBuilder,
+    auth: &L1Auth,
+) -> reqwest::blocking::RequestBuilder {
+    match auth {
+        L1Auth::None => builder,
+        L1Auth::Basic { user, password } => {
+            builder.basic_auth(user, Some(password))
+        }
+        L1Auth::Bearer { token } => builder.bearer_auth(token),
+        L1Auth::Header { name, value } => builder.header(name, value),
+        L1Auth::QueryParam { name, value } => builder.query(&[(name, value)]),
+    }
+}
+
 impl ParentChainRpcClient {
-    pub fn new(config: RpcConfig) -> Self {
+    pub fn new(config: L1ChainConfig) -> Self {
         let client = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(10))
+            .timeout(config.timeout())
             .build()
             .expect("Failed to create HTTP client");
 
@@ -122,13 +137,10 @@ impl ParentChainRpcClient {
             "Making RPC call"
         );
 
-        let mut request_builder =
-            self.client.post(&self.config.url).json(&request);
-
-        if !self.config.user.is_empty() {
-            request_builder = request_builder
-                .basic_auth(&self.config.user, Some(&self.config.password));
-        }
+        let request_builder = apply_auth(
+            self.client.post(&self.config.url).json(&request),
+            &self.config.auth,
+        );
 
         let response = match request_builder.send() {
             Ok(resp) => resp,
@@ -413,32 +425,21 @@ impl ParentChainRpcClient {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct LocalRpcConfigFile {
-    url: String,
-    user: String,
-    password: String,
-}
-
 /// Predefined L1 configs that Coinshift supports. Users may only use these;
 /// adding new nodes requires a new Coinshift release.
-pub fn supported_l1_configs() -> Vec<(ParentChainType, RpcConfig)> {
+pub fn supported_l1_configs() -> Vec<(ParentChainType, L1ChainConfig)> {
     vec![
         (
             ParentChainType::Signet,
-            RpcConfig {
-                url: "http://localhost:38332".to_string(),
-                user: "user".to_string(),
-                password: "password".to_string(),
-            },
+            L1ChainConfig::basic("http://localhost:38332", "user", "password"),
         ),
         (
             ParentChainType::BCH,
-            RpcConfig {
-                url: "http://173.230.135.236:28332".to_string(),
-                user: "user".to_string(),
-                password: "password".to_string(),
-            },
+            L1ChainConfig::basic(
+                "http://173.230.135.236:28332",
+                "user",
+                "password",
+            ),
         ),
     ]
 }
@@ -453,7 +454,7 @@ pub fn supported_l1_parent_chain_types() -> &'static [ParentChainType] {
 /// by calling getblockchaininfo and checking the "chain" field.
 /// Returns the detected chain type and the raw "chain" string from the node.
 pub fn detect_chain_type(
-    config: &RpcConfig,
+    config: &L1ChainConfig,
 ) -> Result<(ParentChainType, String), Error> {
     let client = ParentChainRpcClient::new(config.clone());
     let chain = client.get_blockchain_chain_name()?;
@@ -471,17 +472,21 @@ pub fn detect_chain_type(
 }
 
 /// Check that the given (parent_chain, config) is one of the supported predefined configs
-/// (exact match on url, user, password).
+/// (exact match on url and credentials).
+///
+/// Only the endpoint and its credentials are compared; the local knobs
+/// (`enabled`, timeouts, poll interval) are the operator's to set.
 pub fn is_supported_l1_config(
     parent_chain: ParentChainType,
-    config: &RpcConfig,
+    config: &L1ChainConfig,
 ) -> bool {
-    supported_l1_configs().into_iter().any(|(c, rpc)| {
-        c == parent_chain
-            && rpc.url == config.url
-            && rpc.user == config.user
-            && rpc.password == config.password
-    })
+    supported_l1_configs()
+        .into_iter()
+        .any(|(chain, supported)| {
+            chain == parent_chain
+                && supported.url == config.url
+                && supported.auth == config.auth
+        })
 }
 
 /// Write or merge L1 config file with predefined configs for the given chains.
@@ -493,68 +498,34 @@ pub fn write_l1_config_file(
     chains_to_enable: &[ParentChainType],
 ) -> std::io::Result<()> {
     let supported = supported_l1_configs();
-    let mut configs: std::collections::HashMap<
-        ParentChainType,
-        LocalRpcConfigFile,
-    > = std::fs::read_to_string(path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default();
+    let mut config = L1ConfigFile::load_or_default(path);
     // Keep only existing entries that are supported (drop unsupported/custom)
-    configs.retain(|chain, local| {
-        let rpc = RpcConfig {
-            url: local.url.clone(),
-            user: local.user.clone(),
-            password: local.password.clone(),
-        };
-        is_supported_l1_config(*chain, &rpc)
-    });
+    config
+        .chains
+        .retain(|chain, entry| is_supported_l1_config(*chain, entry));
     // Add or overwrite with predefined config for each requested chain
     for chain in chains_to_enable {
-        if let Some((_, rpc)) = supported.iter().find(|(c, _)| c == chain) {
-            configs.insert(
-                *chain,
-                LocalRpcConfigFile {
-                    url: rpc.url.clone(),
-                    user: rpc.user.clone(),
-                    password: rpc.password.clone(),
-                },
-            );
+        if let Some((_, predefined)) =
+            supported.iter().find(|(candidate, _)| candidate == chain)
+        {
+            config.insert(*chain, predefined.clone());
         }
     }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let json = serde_json::to_string_pretty(&configs)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    std::fs::write(path, json)?;
-    Ok(())
+    config
+        .save(path)
+        .map_err(|err| std::io::Error::other(err.to_string()))
 }
 
 /// Validate the L1 config file: every entry must be one of the supported predefined configs,
 /// and each node must report the expected chain (Signet or testnet4). Call before app start.
 pub fn validate_l1_config_file(path: &Path) -> Result<(), Error> {
-    let file_content = match std::fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(_) => return Ok(()), // no file or unreadable: no config to validate
-    };
-    let configs: std::collections::HashMap<
-        ParentChainType,
-        LocalRpcConfigFile,
-    > = match serde_json::from_str(&file_content) {
-        Ok(c) => c,
-        Err(_) => return Ok(()), // invalid JSON: will be overwritten when user saves
-    };
-    for (parent_chain, local) in configs {
-        let rpc = RpcConfig {
-            url: local.url,
-            user: local.user,
-            password: local.password,
-        };
-        if !is_supported_l1_config(parent_chain, &rpc) {
+    // An unreadable or malformed file is treated as "nothing configured": it
+    // will be overwritten the next time the user saves.
+    for (parent_chain, entry) in L1ConfigFile::load_or_default(path).chains {
+        if !is_supported_l1_config(parent_chain, &entry) {
             return Err(Error::UnsupportedL1Config);
         }
-        let (detected, chain_name) = detect_chain_type(&rpc)?;
+        let (detected, chain_name) = detect_chain_type(&entry)?;
         if detected != parent_chain {
             return Err(Error::ChainMismatch {
                 expected: parent_chain,
@@ -565,33 +536,12 @@ pub fn validate_l1_config_file(path: &Path) -> Result<(), Error> {
     Ok(())
 }
 
-/// Load RPC config for a parent chain from a JSON file.
-///
-/// The file format is `{ "<ParentChainType>": { "url": "...", "user": "...", "password": "..." }, ... }`
-/// (e.g. the same format written by the GUI to `l1_rpc_configs.json`).
+/// Load the RPC config for one parent chain from the L1 config file.
 pub fn load_rpc_config_from_path(
     path: &Path,
     parent_chain: ParentChainType,
-) -> Option<RpcConfig> {
-    let file_content = std::fs::read_to_string(path).ok()?;
-    let configs: std::collections::HashMap<
-        ParentChainType,
-        LocalRpcConfigFile,
-    > = serde_json::from_str(&file_content).ok()?;
-    let local = configs.get(&parent_chain)?;
-    Some(RpcConfig {
-        url: local.url.clone(),
-        user: local.user.clone(),
-        password: local.password.clone(),
-    })
-}
-
-/// Get RPC config for a parent chain
-/// This is a placeholder - in practice, this should access the GUI's stored config
-pub fn get_rpc_config(_parent_chain: ParentChainType) -> Option<RpcConfig> {
-    // TODO: Access stored RPC config from GUI/app state
-    // For now, return None to indicate no config available
-    None
+) -> Option<L1ChainConfig> {
+    crate::l1::config::load_chain_config(path, parent_chain)
 }
 
 #[cfg(test)]
@@ -619,8 +569,8 @@ mod tests {
         assert!(cfg.is_some());
         let cfg = cfg.unwrap();
         assert_eq!(cfg.url, "http://127.0.0.1:18443");
-        assert_eq!(cfg.user, "u");
-        assert_eq!(cfg.password, "p");
+        assert_eq!(cfg.auth.basic_user(), "u");
+        assert_eq!(cfg.auth.basic_password(), "p");
     }
 
     #[test]
@@ -647,8 +597,8 @@ mod tests {
         assert!(signet.is_some());
         assert!(bch.is_some());
         assert_eq!(signet.unwrap().1.url, "http://localhost:38332");
-        assert_eq!(signet.unwrap().1.user, "user");
-        assert_eq!(signet.unwrap().1.password, "password");
+        assert_eq!(signet.unwrap().1.auth.basic_user(), "user");
+        assert_eq!(signet.unwrap().1.auth.basic_password(), "password");
         assert_eq!(bch.unwrap().1.url, "http://173.230.135.236:28332");
     }
 
@@ -659,12 +609,28 @@ mod tests {
             .find(|(c, _)| *c == ParentChainType::Signet)
             .unwrap();
         assert!(is_supported_l1_config(ParentChainType::Signet, &signet_rpc));
-        let wrong_url = RpcConfig {
+        let wrong_url = L1ChainConfig {
             url: "http://other:38332".to_string(),
-            user: signet_rpc.user.clone(),
-            password: signet_rpc.password.clone(),
+            ..signet_rpc.clone()
         };
         assert!(!is_supported_l1_config(ParentChainType::Signet, &wrong_url));
+        let wrong_password = L1ChainConfig {
+            auth: L1Auth::basic("user", "hunter2"),
+            ..signet_rpc.clone()
+        };
+        assert!(!is_supported_l1_config(
+            ParentChainType::Signet,
+            &wrong_password
+        ));
+        // Local-only knobs must not affect whether a config is accepted.
+        let custom_timeout = L1ChainConfig {
+            timeout_secs: Some(30),
+            ..signet_rpc
+        };
+        assert!(is_supported_l1_config(
+            ParentChainType::Signet,
+            &custom_timeout
+        ));
     }
 
     #[test]

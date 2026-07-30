@@ -2002,7 +2002,7 @@ impl State {
         rpc_config_getter: Option<
             &dyn Fn(
                 ParentChainType,
-            ) -> Option<crate::parent_chain_rpc::RpcConfig>,
+            ) -> Option<crate::l1::config::L1ChainConfig>,
         >,
         wallet: Option<&crate::wallet::Wallet>,
     ) -> Result<(), Error> {

@@ -1,22 +1,13 @@
-use std::{
-    collections::HashMap,
-    path::PathBuf,
-    sync::{Arc, Mutex},
-};
+use std::sync::{Arc, Mutex};
 
+use coinshift::l1::config::{
+    self as l1_config, L1Auth, L1ChainConfig, L1ConfigFile,
+};
 use coinshift::parent_chain_rpc;
 use coinshift::types::ParentChainType;
 use eframe::egui::{self, Button, Color32, ComboBox, RichText, TextEdit};
 use poll_promise::Promise;
-use serde::{Deserialize, Serialize};
 use serde_json::json;
-
-#[derive(Clone, Default, Deserialize, Serialize)]
-struct RpcConfig {
-    url: String,
-    user: String,
-    password: String,
-}
 
 #[derive(Clone)]
 enum ConnectionStatus {
@@ -31,7 +22,7 @@ pub struct L1Config {
     rpc_url: String,
     rpc_user: String,
     rpc_password: String,
-    configs: HashMap<ParentChainType, RpcConfig>,
+    configs: L1ConfigFile,
     connection_status: Arc<Mutex<ConnectionStatus>>,
     status_promise: Option<Promise<anyhow::Result<u64>>>,
 }
@@ -48,7 +39,7 @@ impl Default for L1Config {
             rpc_url: String::new(),
             rpc_user: String::new(),
             rpc_password: String::new(),
-            configs: HashMap::new(),
+            configs: L1ConfigFile::default(),
             connection_status: Arc::new(Mutex::new(ConnectionStatus::Unknown)),
             status_promise: None,
         }
@@ -62,85 +53,83 @@ impl L1Config {
         config
     }
 
-    fn config_file_path() -> PathBuf {
-        dirs::data_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("coinshift")
-            .join("l1_rpc_configs.json")
-    }
-
     fn load(&mut self, _ctx: &egui::Context) {
-        let config_path = Self::config_file_path();
-        if let Ok(file_content) = std::fs::read_to_string(&config_path)
-            && let Ok(stored_configs) = serde_json::from_str::<
-                HashMap<ParentChainType, RpcConfig>,
-            >(&file_content)
-        {
-            self.configs = stored_configs;
-            if let Some(config) = self.configs.get(&self.selected_parent_chain)
-            {
+        self.configs =
+            L1ConfigFile::load_or_default(&l1_config::default_path());
+        match self.configs.get(self.selected_parent_chain) {
+            Some(config) => {
                 self.rpc_url = config.url.clone();
-                self.rpc_user = config.user.clone();
-                self.rpc_password = config.password.clone();
-            } else {
-                self.load_predefined_for_selected();
+                self.rpc_user = config.auth.basic_user().to_string();
+                self.rpc_password = config.auth.basic_password().to_string();
             }
-        } else {
-            self.load_predefined_for_selected();
+            None => self.load_predefined_for_selected(),
         }
     }
 
     /// Fill URL/user/password from the predefined config for the selected chain.
     fn load_predefined_for_selected(&mut self) {
-        let predefined = parent_chain_rpc::supported_l1_configs();
-        if let Some((_, rpc)) = predefined
+        match parent_chain_rpc::supported_l1_configs()
             .into_iter()
-            .find(|(c, _)| *c == self.selected_parent_chain)
+            .find(|(chain, _)| *chain == self.selected_parent_chain)
         {
-            self.rpc_url = rpc.url;
-            self.rpc_user = rpc.user;
-            self.rpc_password = rpc.password;
-        } else {
-            self.rpc_url.clear();
-            self.rpc_user.clear();
-            self.rpc_password.clear();
+            Some((_, config)) => {
+                self.rpc_url = config.url;
+                self.rpc_user = config.auth.basic_user().to_string();
+                self.rpc_password = config.auth.basic_password().to_string();
+            }
+            None => {
+                self.rpc_url.clear();
+                self.rpc_user.clear();
+                self.rpc_password.clear();
+            }
+        }
+    }
+
+    /// Persist `self.configs`, logging rather than surfacing any write failure.
+    fn persist(&self) {
+        let path = l1_config::default_path();
+        match self.configs.save(&path) {
+            Ok(()) => tracing::info!(
+                path = %path.display(),
+                "L1 Config: configuration persisted to file"
+            ),
+            Err(err) => tracing::error!(
+                path = %path.display(),
+                error = %err,
+                "L1 Config: failed to persist configuration"
+            ),
         }
     }
 
     fn save(&mut self, _ctx: &egui::Context) {
-        // Save the user's current input fields for the selected chain
-        let config = RpcConfig {
+        // Save the user's current input fields for the selected chain, keeping
+        // any non-credential settings the entry already had.
+        let existing = self.configs.get(self.selected_parent_chain).cloned();
+        let config = L1ChainConfig {
             url: self.rpc_url.clone(),
-            user: self.rpc_user.clone(),
-            password: self.rpc_password.clone(),
+            auth: L1Auth::basic(
+                self.rpc_user.clone(),
+                self.rpc_password.clone(),
+            ),
+            ..existing.unwrap_or_else(|| L1ChainConfig::basic("", "", ""))
         };
 
         tracing::info!(
             chain = ?self.selected_parent_chain,
             url = %config.url,
-            user = %config.user,
+            has_auth = config.auth.has_secret(),
             "L1 Config: saving configuration"
         );
 
         self.configs
             .insert(self.selected_parent_chain, config.clone());
-
-        // Persist to file
-        let config_path = Self::config_file_path();
-        if let Some(parent_dir) = config_path.parent() {
-            drop(std::fs::create_dir_all(parent_dir));
-        }
-        if let Ok(json) = serde_json::to_string_pretty(&self.configs) {
-            drop(std::fs::write(&config_path, json));
-        }
-        tracing::info!(
-            path = %config_path.display(),
-            "L1 Config: configuration persisted to file"
-        );
+        self.persist();
 
         // Auto-check connection when saving
         if !config.url.is_empty() {
-            self.check_connection(&config.url, &config.user, &config.password);
+            let user = config.auth.basic_user().to_string();
+            let password = config.auth.basic_password().to_string();
+            self.check_connection(&config.url, &user, &password);
         }
     }
 
@@ -369,8 +358,7 @@ impl L1Config {
         });
 
         // Show current saved configuration
-        if let Some(saved_config) =
-            self.configs.get(&self.selected_parent_chain)
+        if let Some(saved_config) = self.configs.get(self.selected_parent_chain)
         {
             ui.horizontal(|ui| {
                 ui.label("Current saved URL:");
@@ -380,14 +368,12 @@ impl L1Config {
                     saved_config.url.as_str(),
                 );
             });
-            if !saved_config.user.is_empty() {
+            let saved_user = saved_config.auth.basic_user();
+            if !saved_user.is_empty() {
                 ui.horizontal(|ui| {
                     ui.label("Current saved User:");
                     use crate::gui::util::UiExt;
-                    ui.monospace_selectable_singleline(
-                        true,
-                        saved_config.user.as_str(),
-                    );
+                    ui.monospace_selectable_singleline(true, saved_user);
                 });
             }
         } else {
@@ -494,15 +480,8 @@ impl L1Config {
                 self.rpc_url.clear();
                 self.rpc_user.clear();
                 self.rpc_password.clear();
-                self.configs.remove(&self.selected_parent_chain);
-                // Persist the updated configs to file
-                let config_path = Self::config_file_path();
-                if let Some(parent_dir) = config_path.parent() {
-                    drop(std::fs::create_dir_all(parent_dir));
-                }
-                if let Ok(json) = serde_json::to_string_pretty(&self.configs) {
-                    drop(std::fs::write(&config_path, json));
-                }
+                self.configs.remove(self.selected_parent_chain);
+                self.persist();
                 // Reset connection status
                 *self.connection_status.lock().unwrap() =
                     ConnectionStatus::Unknown;

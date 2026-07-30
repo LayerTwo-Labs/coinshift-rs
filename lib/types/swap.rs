@@ -133,7 +133,11 @@ pub enum TxidEncoding {
     Deserialize,
     Eq,
     Hash,
+    // Ord/PartialOrd only give the config file a stable key order; neither
+    // affects the Borsh or serde encoding pinned by the tests below.
+    Ord,
     PartialEq,
+    PartialOrd,
     Serialize,
     strum::Display,
     strum::EnumCount,

@@ -1311,6 +1311,7 @@ dependencies = [
  "byteorder",
  "bytes",
  "clap",
+ "dirs",
  "ed25519-dalek",
  "ed25519-dalek-bip32",
  "educe",

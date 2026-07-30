@@ -27,13 +27,13 @@ use tokio_stream::StreamNotifyClose;
 use super::mainchain_task::{self, MainchainTaskHandle};
 use crate::{
     archive::{self, Archive},
+    l1::config::L1ChainConfig,
     mempool::{self, MemPool},
     net::{
         self, Net, PeerConnectionError, PeerConnectionInfo,
         PeerConnectionMailboxError, PeerConnectionMessage, PeerInfoRx,
         PeerRequest, PeerResponse, PeerStateId, peer_message,
     },
-    parent_chain_rpc::RpcConfig,
     state::{self, State},
     types::{
         BmmResult, Body, Header, MerkleRoot, ParentChainType, Tip,
@@ -94,7 +94,9 @@ fn connect_tip_(
     header: &Header,
     body: &Body,
     two_way_peg_data: &mainchain::TwoWayPegData,
-    rpc_config_getter: Option<&dyn Fn(ParentChainType) -> Option<RpcConfig>>,
+    rpc_config_getter: Option<
+        &dyn Fn(ParentChainType) -> Option<L1ChainConfig>,
+    >,
     wallet: Option<&crate::wallet::Wallet>,
 ) -> Result<(), Error> {
     let block_hash = header.hash();
@@ -416,15 +418,16 @@ fn reorg_to_tip(
             two_way_peg_data
         };
         let rpc_config_getter: Option<
-            Box<dyn Fn(ParentChainType) -> Option<RpcConfig>>,
+            Box<dyn Fn(ParentChainType) -> Option<L1ChainConfig>>,
         > = rpc_config_path.map(|path| {
             let p = path.clone();
             Box::new(move |chain: ParentChainType| {
                 crate::parent_chain_rpc::load_rpc_config_from_path(&p, chain)
-            }) as Box<dyn Fn(ParentChainType) -> Option<RpcConfig>>
+            })
+                as Box<dyn Fn(ParentChainType) -> Option<L1ChainConfig>>
         });
         let rpc_config_getter: Option<
-            &dyn Fn(ParentChainType) -> Option<RpcConfig>,
+            &dyn Fn(ParentChainType) -> Option<L1ChainConfig>,
         > = rpc_config_getter.as_ref().map(|b| b.as_ref());
         let () = connect_tip_(
             &mut rwtxn,

@@ -364,11 +364,9 @@ impl App {
     async fn swap_confirmation_check_task(
         node: Arc<Node>,
     ) -> Result<(), Error> {
-        use coinshift::parent_chain_rpc::{ParentChainRpcClient, RpcConfig};
+        use coinshift::l1::config as l1_config;
+        use coinshift::parent_chain_rpc::ParentChainRpcClient;
         use coinshift::types::{ParentChainType, SwapState, SwapTxId};
-        use serde::{Deserialize, Serialize};
-        use std::collections::HashMap;
-        use std::path::PathBuf;
         use std::time::Duration;
 
         const CHECK_INTERVAL: Duration = Duration::from_secs(10);
@@ -378,33 +376,13 @@ impl App {
             CHECK_INTERVAL.as_secs()
         );
 
-        // Helper to load RPC config (same as in GUI)
-        fn load_rpc_config(parent_chain: ParentChainType) -> Option<RpcConfig> {
-            #[derive(Clone, Serialize, Deserialize)]
-            struct LocalRpcConfig {
-                url: String,
-                user: String,
-                password: String,
-            }
-
-            let config_path = dirs::data_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join("coinshift")
-                .join("l1_rpc_configs.json");
-
-            if let Ok(file_content) = std::fs::read_to_string(&config_path)
-                && let Ok(configs) = serde_json::from_str::<
-                    HashMap<ParentChainType, LocalRpcConfig>,
-                >(&file_content)
-                && let Some(local_config) = configs.get(&parent_chain)
-            {
-                return Some(RpcConfig {
-                    url: local_config.url.clone(),
-                    user: local_config.user.clone(),
-                    password: local_config.password.clone(),
-                });
-            }
-            None
+        fn load_rpc_config(
+            parent_chain: ParentChainType,
+        ) -> Option<l1_config::L1ChainConfig> {
+            l1_config::load_chain_config(
+                &l1_config::default_path(),
+                parent_chain,
+            )
         }
 
         loop {
@@ -653,10 +631,7 @@ impl App {
         );
 
         // Validate L1 config file before start: test all configured networks
-        let l1_rpc_config_path = dirs::data_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join("coinshift")
-            .join("l1_rpc_configs.json");
+        let l1_rpc_config_path = coinshift::l1::config::default_path();
         coinshift::parent_chain_rpc::validate_l1_config_file(
             &l1_rpc_config_path,
         )?;

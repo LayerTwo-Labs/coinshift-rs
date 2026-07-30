@@ -5,8 +5,9 @@ use std::collections::{BTreeMap, HashMap};
 use fallible_iterator::FallibleIterator;
 use sneed::{RoTxn, RwTxn, db::error::Error as DbError};
 
-use crate::parent_chain_rpc::{ParentChainRpcClient, RpcConfig};
 use crate::{
+    l1::config::L1ChainConfig,
+    parent_chain_rpc::ParentChainRpcClient,
     state::{
         Error, State, WITHDRAWAL_BUNDLE_FAILURE_GAP, WithdrawalBundleInfo,
         rollback::RollBack,
@@ -561,7 +562,7 @@ fn connect_event(
 fn query_and_update_swap(
     state: &State,
     rwtxn: &mut RwTxn,
-    rpc_config: &RpcConfig,
+    rpc_config: &L1ChainConfig,
     swap: &mut Swap,
     block_hash: BlockHash,
     block_height: u32,
@@ -702,7 +703,9 @@ fn process_coinshift_transactions(
     rwtxn: &mut RwTxn,
     block_height: u32,
     block_hash: BlockHash,
-    rpc_config_getter: Option<&dyn Fn(ParentChainType) -> Option<RpcConfig>>,
+    rpc_config_getter: Option<
+        &dyn Fn(ParentChainType) -> Option<L1ChainConfig>,
+    >,
 ) -> Result<(), Error> {
     tracing::debug!(%block_height, "Starting to scan enforcer for coinshift transactions");
 
@@ -895,7 +898,9 @@ pub fn connect(
     state: &State,
     rwtxn: &mut RwTxn,
     two_way_peg_data: &TwoWayPegData,
-    rpc_config_getter: Option<&dyn Fn(ParentChainType) -> Option<RpcConfig>>,
+    rpc_config_getter: Option<
+        &dyn Fn(ParentChainType) -> Option<L1ChainConfig>,
+    >,
     wallet: Option<&Wallet>,
 ) -> Result<(), Error> {
     let block_height = state.try_get_height(rwtxn)?.ok_or(Error::NoTip)?;

@@ -1,9 +1,10 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     time::{Duration, Instant},
 };
 
-use coinshift::parent_chain_rpc::{ParentChainRpcClient, RpcConfig};
+use coinshift::l1::config::{self as l1_config, L1ChainConfig};
+use coinshift::parent_chain_rpc::ParentChainRpcClient;
 use coinshift::types::{ParentChainType, Swap, SwapId, SwapState, SwapTxId};
 use eframe::egui::{self, Button, ScrollArea};
 
@@ -542,44 +543,22 @@ impl SwapList {
     pub(crate) fn load_rpc_config(
         &self,
         parent_chain: ParentChainType,
-    ) -> Option<RpcConfig> {
-        use dirs;
-        use serde::{Deserialize, Serialize};
-        use std::path::PathBuf;
-
-        #[derive(Clone, Serialize, Deserialize)]
-        struct LocalRpcConfig {
-            url: String,
-            user: String,
-            password: String,
+    ) -> Option<L1ChainConfig> {
+        if let Some(config) = l1_config::load_chain_config(
+            &l1_config::default_path(),
+            parent_chain,
+        ) {
+            return Some(config);
         }
 
-        let config_path = dirs::data_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("coinshift")
-            .join("l1_rpc_configs.json");
-
-        if let Ok(file_content) = std::fs::read_to_string(&config_path)
-            && let Ok(configs) = serde_json::from_str::<
-                HashMap<ParentChainType, LocalRpcConfig>,
-            >(&file_content)
-            && let Some(local_config) = configs.get(&parent_chain)
-        {
-            return Some(RpcConfig {
-                url: local_config.url.clone(),
-                user: local_config.user.clone(),
-                password: local_config.password.clone(),
-            });
-        }
-
+        // Fall back to the shipped predefined endpoint when the chain has no
+        // entry of its own. Note this differs from the block-connect path,
+        // which returns None instead — see risk 3 in
+        // docs/PARENT_CHAIN_ROADMAP.md.
         coinshift::parent_chain_rpc::supported_l1_configs()
             .into_iter()
-            .find(|(c, _)| *c == parent_chain)
-            .map(|(_, rpc)| RpcConfig {
-                url: rpc.url,
-                user: rpc.user,
-                password: rpc.password,
-            })
+            .find(|(chain, _)| *chain == parent_chain)
+            .map(|(_, config)| config)
     }
 
     fn check_confirmations_dynamically(&mut self, app: &App) {

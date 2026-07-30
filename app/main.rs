@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use clap::Parser as _;
 use coinshift::parent_chain_rpc;
@@ -199,12 +199,7 @@ fn run_egui_app(
     )
 }
 
-fn l1_config_path() -> PathBuf {
-    dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("coinshift")
-        .join("l1_rpc_configs.json")
-}
+use coinshift::l1::config::default_path as l1_config_path;
 
 fn write_l1_config_from_flags(
     l1_signet: bool,

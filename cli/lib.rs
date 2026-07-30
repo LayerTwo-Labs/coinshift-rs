@@ -1,22 +1,13 @@
-use std::{
-    collections::HashMap, net::SocketAddr, path::PathBuf, time::Duration,
-};
+use std::{net::SocketAddr, time::Duration};
 
 use clap::{Parser, Subcommand};
 use http::HeaderMap;
 use jsonrpsee::{core::client::ClientT, http_client::HttpClientBuilder};
 
-use coinshift::parent_chain_rpc::RpcConfig;
+use coinshift::l1::config::{self as l1_config, L1Auth, L1ChainConfig};
 use coinshift::types::{Address, ParentChainType, SwapId, Txid};
 use coinshift_app_rpc_api::RpcClient;
 use tracing_subscriber::{filter::Targets, layer::SubscriberExt as _};
-
-fn l1_config_path() -> PathBuf {
-    dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("coinshift")
-        .join("l1_rpc_configs.json")
-}
 
 fn parse_swap_id(s: &str) -> anyhow::Result<SwapId> {
     let bytes = hex::decode(s)
@@ -307,23 +298,12 @@ where
         }
         Command::GenerateMnemonic => rpc_client.generate_mnemonic().await?,
         Command::GetL1Config { chain } => {
-            let path = l1_config_path();
-            let configs: HashMap<ParentChainType, RpcConfig> = if path.exists()
-            {
-                let s = std::fs::read_to_string(&path).map_err(|e| {
-                    anyhow::anyhow!("read config: {}: {}", path.display(), e)
-                })?;
-                serde_json::from_str(&s).unwrap_or_default()
-            } else {
-                HashMap::new()
-            };
-            let out: HashMap<ParentChainType, RpcConfig> = match chain {
-                Some(c) => {
-                    configs.into_iter().filter(|(k, _)| *k == c).collect()
-                }
-                None => configs,
-            };
-            serde_json::to_string_pretty(&out)?
+            let path = l1_config::default_path();
+            let mut config = l1_config::L1ConfigFile::load(&path)?;
+            if let Some(chain) = chain {
+                config.chains.retain(|candidate, _| *candidate == chain);
+            }
+            serde_json::to_string_pretty(&config)?
         }
         Command::GetNewAddress => {
             let address = rpc_client.get_new_address().await?;
@@ -434,32 +414,22 @@ where
             user,
             password,
         } => {
-            let path = l1_config_path();
-            let mut configs: HashMap<ParentChainType, RpcConfig> = if path
-                .exists()
-            {
-                let s = std::fs::read_to_string(&path).map_err(|e| {
-                    anyhow::anyhow!("read config: {}: {}", path.display(), e)
-                })?;
-                serde_json::from_str(&s).unwrap_or_default()
-            } else {
-                HashMap::new()
-            };
-            configs.insert(
+            let path = l1_config::default_path();
+            // Load strictly: silently defaulting on a parse error would discard
+            // every other chain's entry on the next write.
+            let mut config = l1_config::L1ConfigFile::load(&path)?;
+            config.insert(
                 parent_chain,
-                RpcConfig {
+                L1ChainConfig {
                     url: url.clone(),
-                    user: user.clone(),
-                    password: password.clone(),
+                    auth: L1Auth::basic(user.clone(), password.clone()),
+                    ..config
+                        .get(parent_chain)
+                        .cloned()
+                        .unwrap_or_else(|| L1ChainConfig::basic("", "", ""))
                 },
             );
-            if let Some(parent) = path.parent() {
-                drop(std::fs::create_dir_all(parent));
-            }
-            std::fs::write(&path, serde_json::to_string_pretty(&configs)?)
-                .map_err(|e| {
-                    anyhow::anyhow!("write config: {}: {}", path.display(), e)
-                })?;
+            config.save(&path)?;
             format!(
                 "L1 RPC config saved for {} at {}",
                 parent_chain.coin_name(),

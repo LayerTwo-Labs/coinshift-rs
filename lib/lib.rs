@@ -3,6 +3,7 @@
 
 pub mod archive;
 pub mod authorization;
+pub mod l1;
 pub mod mempool;
 pub mod miner;
 pub mod net;
