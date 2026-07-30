@@ -22,7 +22,7 @@ futures = { version = "0.3.30", default-features = false }
 http = "1.2.0"
 jsonrpsee = { version = "0.25.1", features = ["tracing"] }
 parking_lot = "0.12.1"
-prost = "0.13.3"
+prost = "0.14.4"
 serde = "1.0.179"
 serde_json = "1.0.113"
 strum = { version = "0.26.3", features = ["derive"] }
@@ -30,7 +30,8 @@ thiserror = "2.0.11"
 tiny-bip39 = "2.0.0"
 tokio = { version = "1.48.0", default-features = false, features = ["signal"] }
 tokio-util = "0.7.18"
-tonic = "0.12.3"
+tonic = "0.14.6"
+tonic-prost = "0.14.6"
 tracing = "0.1.40"
 tracing-subscriber = "0.3.20"
 utoipa = { version = "5.2.0", default-features = false }

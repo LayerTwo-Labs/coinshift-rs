@@ -90,6 +90,11 @@ impl WithdrawalBundleInfo {
     }
 }
 
+/// Reversal record for a single swap expired during a 2WPD connect: the swap's
+/// id, its state immediately before expiry, and the outputs the expiry
+/// unlocked.
+pub type ExpiredSwapReversal = (SwapId, SwapState, Vec<OutPoint>);
+
 #[derive(Clone)]
 pub struct State {
     /// Current tip
@@ -140,7 +145,7 @@ pub struct State {
     /// disconnect can restore the pre-expiry (locked + non-`Cancelled`) state.
     pub expired_swaps: DatabaseUnique<
         SerdeBincode<u32>,
-        SerdeBincode<Vec<(SwapId, SwapState, Vec<OutPoint>)>>,
+        SerdeBincode<Vec<ExpiredSwapReversal>>,
     >,
     _version: DatabaseUnique<UnitKey, SerdeBincode<Version>>,
 }

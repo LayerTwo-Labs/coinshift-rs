@@ -187,7 +187,7 @@ mod p2p_validation_bypass_tests {
     use heed::EnvOpenOptions;
 
     use super::MemPool;
-    use crate::authorization::{Authorization, get_address, sign, SigningKey};
+    use crate::authorization::{Authorization, SigningKey, get_address, sign};
     use crate::state::State;
     use crate::types::{
         Accumulator, AccumulatorDiff, Address, OutPoint, OutPointKey, Output,
@@ -233,7 +233,11 @@ mod p2p_validation_bypass_tests {
             let mut rwtxn = env.write_txn().expect("write txn");
             state
                 .utxos
-                .put(&mut rwtxn, &OutPointKey::from(funding_outpoint), &funded_output)
+                .put(
+                    &mut rwtxn,
+                    &OutPointKey::from(funding_outpoint),
+                    &funded_output,
+                )
                 .expect("put utxo");
             let mut acc: Accumulator =
                 state.get_accumulator(&rwtxn).expect("get accumulator");
@@ -269,8 +273,10 @@ mod p2p_validation_bypass_tests {
         {
             let rotxn = env.read_txn().expect("read txn");
             let result = state.validate_transaction(&rotxn, &authd_tx);
-            eprintln!("validate_transaction(forged tx) => {result:?}");
-            assert!(result.is_err(), "validator must reject the forged-sig tx: {result:?}");
+            assert!(
+                result.is_err(),
+                "validator must reject the forged-sig tx: {result:?}"
+            );
             assert!(
                 format!("{result:?}").to_lowercase().contains("authoriz"),
                 "rejection must be an authorization error, got {result:?}"

@@ -140,7 +140,7 @@ where
         mainchain::ValidatorClient<MainchainTransport>: Clone,
         MainchainTransport: Send + 'static,
         <MainchainTransport as tonic::client::GrpcService<
-            tonic::body::BoxBody,
+            tonic::body::Body,
         >>::Future: Send,
     {
         tracing::info!("Node::new: Starting initialization");
