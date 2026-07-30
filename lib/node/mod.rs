@@ -140,9 +140,9 @@ where
         mainchain::ValidatorClient<MainchainTransport>: Clone,
         MainchainTransport: Send + 'static,
         <MainchainTransport as tonic::client::GrpcService<
-            tonic::body::BoxBody,
+            tonic::body::Body,
         >>::Future: Send,
-    {
+{
         tracing::info!("Node::new: Starting initialization");
         let env_path = config.datadir.join("data.mdb");
         tracing::debug!(env_path = %env_path.display(), "Node::new: Setting up database path");
