@@ -196,7 +196,9 @@ fn connect_withdrawal_bundle_submitted(
         .try_get(rwtxn, &m6id)
         .map_err(DbError::from)?
     {
-        // Already applied
+        // Already applied: the m6id is already recorded, so this submission is
+        // a no-op. `disconnect_withdrawal_bundle_submitted` mirrors this by
+        // leaving the stored bundle untouched.
         assert_eq!(
             bundle_status.earliest().value,
             WithdrawalBundleStatus::Submitted
@@ -717,6 +719,11 @@ fn process_coinshift_transactions(
     let mut expired_swaps_count = 0;
     let mut scanned_swaps_count = 0;
 
+    // Reversal data for any swaps expired at this height, so a 2WPD disconnect
+    // can restore each swap's pre-expiry state and re-lock its outputs.
+    let mut expired_swap_reversals: Vec<(SwapId, SwapState, Vec<OutPoint>)> =
+        Vec::new();
+
     for mut swap in swaps {
         // Only process L2 → L1 swaps that are pending or waiting for confirmations
         if !matches!(
@@ -745,7 +752,8 @@ fn process_coinshift_transactions(
             && block_height >= expires_at
         {
             // Unlock all outputs locked to this swap so the creator can spend them again
-            let mut unlocked_count = 0u32;
+            let previous_state = swap.state.clone();
+            let mut unlocked_outpoints: Vec<OutPoint> = Vec::new();
             let locked_outputs: Vec<(OutPointKey, SwapId)> = state
                 .locked_swap_outputs
                 .iter(rwtxn)
@@ -756,7 +764,7 @@ fn process_coinshift_transactions(
                 if locked_swap_id == swap.id {
                     let outpoint: OutPoint = outpoint_key.into();
                     state.unlock_output_from_swap(rwtxn, &outpoint)?;
-                    unlocked_count += 1;
+                    unlocked_outpoints.push(outpoint);
                 }
             }
 
@@ -764,11 +772,16 @@ fn process_coinshift_transactions(
                 swap_id = %swap.id,
                 block_height = %block_height,
                 expires_at = %expires_at,
-                unlocked_outputs = %unlocked_count,
+                unlocked_outputs = %unlocked_outpoints.len(),
                 "Swap expired, unlocking outputs and marking as cancelled"
             );
             swap.state = SwapState::Cancelled;
             state.save_swap(rwtxn, &swap)?;
+            expired_swap_reversals.push((
+                swap.id,
+                previous_state,
+                unlocked_outpoints,
+            ));
             expired_swaps_count += 1;
             continue;
         }
@@ -855,6 +868,15 @@ fn process_coinshift_transactions(
         }
 
         scanned_swaps_count += 1;
+    }
+
+    // Record the expiry reversal data so a 2WPD disconnect of this block can
+    // restore the pre-expiry swap/lock state (see `disconnect`).
+    if !expired_swap_reversals.is_empty() {
+        state
+            .expired_swaps
+            .put(rwtxn, &block_height, &expired_swap_reversals)
+            .map_err(DbError::from)?;
     }
 
     tracing::debug!(
@@ -1004,8 +1026,34 @@ fn disconnect_withdrawal_bundle_submitted(
         }
     };
     let bundle_status = bundle_status.latest();
-    assert_eq!(bundle_status.value, WithdrawalBundleStatus::Submitted);
-    assert_eq!(bundle_status.height, block_height);
+    if bundle_status.height > block_height {
+        // The stored status was recorded by a block later than the one being
+        // disconnected, so it must have been disconnected already.
+        return Err(Error::UnexpectedWithdrawalBundleStatus {
+            m6id,
+            status: bundle_status.value,
+            status_height: bundle_status.height,
+            block_height,
+        });
+    }
+    if bundle_status.value != WithdrawalBundleStatus::Submitted
+        || bundle_status.height != block_height
+    {
+        // The bundle was recorded by an earlier block, so connecting this
+        // event took the "Already applied" branch of
+        // `connect_withdrawal_bundle_submitted` and did not modify any state.
+        // This happens when the parent chain proposes the same m6id again
+        // after it expired or was paid out. Disconnecting must not modify any
+        // state either.
+        tracing::debug!(
+            %block_height,
+            %m6id,
+            status = ?bundle_status.value,
+            status_height = %bundle_status.height,
+            "Withdrawal bundle submission was applied by an earlier block, nothing to disconnect"
+        );
+        return Ok(());
+    }
     match bundle {
         WithdrawalBundleInfo::Unknown
         | WithdrawalBundleInfo::UnknownConfirmed { .. } => (),
@@ -1273,6 +1321,31 @@ pub fn disconnect(
     let mut accumulator_diff = AccumulatorDiff::default();
     let mut latest_deposit_block_hash = None;
     let mut latest_withdrawal_bundle_event_block_hash = None;
+    // Reverse any swap expiries applied by `process_coinshift_transactions`
+    // when this block was connected: restore each swap's pre-expiry state and
+    // re-lock the outputs that were unlocked. Symmetric with the connect path,
+    // which keys the reversal data by the same block height.
+    if let Some(expired_swap_reversals) = state
+        .expired_swaps
+        .try_get(rwtxn, &block_height)
+        .map_err(DbError::from)?
+    {
+        for (swap_id, previous_state, unlocked_outpoints) in
+            expired_swap_reversals
+        {
+            if let Some(mut swap) = state.get_swap(rwtxn, &swap_id)? {
+                swap.state = previous_state;
+                state.save_swap(rwtxn, &swap)?;
+            }
+            for outpoint in unlocked_outpoints {
+                state.lock_output_to_swap(rwtxn, &outpoint, &swap_id)?;
+            }
+        }
+        state
+            .expired_swaps
+            .delete(rwtxn, &block_height)
+            .map_err(DbError::from)?;
+    }
     // Restore pending withdrawal bundle
     for (event_block_hash, event_block_info) in
         two_way_peg_data.block_info.iter().rev()
@@ -1362,4 +1435,248 @@ pub fn disconnect(
         .put(rwtxn, &(), &accumulator)
         .map_err(DbError::from)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod expiry_reversal_tests {
+    use sneed::Env;
+
+    use super::*;
+    use crate::types::{Address, SwapDirection, Txid};
+
+    fn sat(value: u64) -> bitcoin::Amount {
+        bitcoin::Amount::from_sat(value)
+    }
+
+    /// Build a `State` backed by a fresh temporary LMDB environment.
+    fn test_state() -> (temp_dir::TempDir, Env, State) {
+        let dir = temp_dir::TempDir::new().unwrap();
+        let mut opts = heed::EnvOpenOptions::new();
+        opts.map_size(10 * 1024 * 1024).max_dbs(State::NUM_DBS);
+        let env = unsafe { Env::open(&opts, dir.path()) }.unwrap();
+        let state = State::new(&env).unwrap();
+        (dir, env, state)
+    }
+
+    /// Connecting the block that expires a swap unlocks its output and marks it
+    /// `Cancelled`; a 2WPD disconnect of that block must reverse the expiry,
+    /// restoring the swap to `Pending` and re-locking the output, so the
+    /// connect/disconnect of an expiry block is invertible.
+    #[test]
+    fn disconnect_reverses_swap_expiry() {
+        let (_dir, env, state) = test_state();
+        let swap_id = SwapId([42u8; 32]);
+        let outpoint = OutPoint::Regular {
+            txid: Txid([99u8; 32]),
+            vout: 1,
+        };
+        let swap = Swap::new(
+            swap_id,
+            SwapDirection::L2ToL1,
+            ParentChainType::Regtest,
+            SwapTxId::Hash32([0u8; 32]),
+            None,
+            Some(Address([3u8; 20])),
+            sat(50_000),
+            "rbtc-recipient".to_string(),
+            sat(40_000),
+            0,
+            Some(5), // expires_at_height
+            Some(Address([5u8; 20])),
+        );
+
+        let mut rwtxn = env.write_txn().unwrap();
+        state.height.put(&mut rwtxn, &(), &5u32).unwrap();
+        state.save_swap(&mut rwtxn, &swap).unwrap();
+        state
+            .lock_output_to_swap(&mut rwtxn, &outpoint, &swap_id)
+            .unwrap();
+
+        // Sanity: swap is Pending and its output is locked.
+        assert_eq!(
+            state.get_swap(&rwtxn, &swap_id).unwrap().unwrap().state,
+            SwapState::Pending
+        );
+        assert_eq!(
+            state.is_output_locked_to_swap(&rwtxn, &outpoint).unwrap(),
+            Some(swap_id)
+        );
+
+        // Connect: process expiry at the expiry height.
+        process_coinshift_transactions(
+            &state,
+            &mut rwtxn,
+            5,
+            BlockHash([0u8; 32]),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            state.get_swap(&rwtxn, &swap_id).unwrap().unwrap().state,
+            SwapState::Cancelled,
+            "expiry should cancel the swap"
+        );
+        assert_eq!(
+            state.is_output_locked_to_swap(&rwtxn, &outpoint).unwrap(),
+            None,
+            "expiry should unlock the output"
+        );
+
+        // Disconnect: the expiry mutation must be reversed.
+        disconnect(&state, &mut rwtxn, &TwoWayPegData::default()).unwrap();
+        assert_eq!(
+            state.get_swap(&rwtxn, &swap_id).unwrap().unwrap().state,
+            SwapState::Pending,
+            "disconnect must restore the pre-expiry swap state"
+        );
+        assert_eq!(
+            state.is_output_locked_to_swap(&rwtxn, &outpoint).unwrap(),
+            Some(swap_id),
+            "disconnect must re-lock the output to the swap"
+        );
+    }
+}
+
+#[cfg(test)]
+mod withdrawal_bundle_reversal_tests {
+    use bitcoin::hashes::Hash as _;
+    use sneed::Env;
+
+    use super::*;
+    use crate::types::{Address, Txid};
+
+    fn sat(value: u64) -> bitcoin::Amount {
+        bitcoin::Amount::from_sat(value)
+    }
+
+    /// Build a `State` backed by a fresh temporary LMDB environment.
+    fn test_state() -> (temp_dir::TempDir, Env, State) {
+        let dir = temp_dir::TempDir::new().unwrap();
+        let mut opts = heed::EnvOpenOptions::new();
+        opts.map_size(10 * 1024 * 1024).max_dbs(State::NUM_DBS);
+        let env = unsafe { Env::open(&opts, dir.path()) }.unwrap();
+        let state = State::new(&env).unwrap();
+        (dir, env, state)
+    }
+
+    fn bundle_event(
+        m6id: M6id,
+        status: WithdrawalBundleStatus,
+    ) -> WithdrawalBundleEvent {
+        WithdrawalBundleEvent { m6id, status }
+    }
+
+    /// The parent chain only refuses a bundle proposal while its m6id is still
+    /// pending, so once an m6id has expired the very same m6id can be proposed
+    /// again, producing the event sequence `Submitted(X)`, `Failed(X)`,
+    /// `Submitted(X)`. Connecting the repeated `Submitted` leaves the stored
+    /// bundle untouched ("Already applied"), so disconnecting it must leave the
+    /// stored bundle untouched too, instead of assuming that the latest stored
+    /// status is a `Submitted` recorded by the disconnected block.
+    #[test]
+    fn disconnect_repeated_bundle_submission_is_noop() {
+        let (_dir, env, state) = test_state();
+        let outpoint = OutPoint::Regular {
+            txid: Txid([9u8; 32]),
+            vout: 0,
+        };
+        let key = OutPointKey::from(&outpoint);
+        let output = Output {
+            address: Address([1u8; 20]),
+            content: OutputContent::Value(sat(30_000)),
+        };
+        let bundle_output = bitcoin::TxOut {
+            value: sat(29_000),
+            script_pubkey: bitcoin::ScriptBuf::new(),
+        };
+        let bundle = WithdrawalBundle::new(
+            9,
+            sat(1_000),
+            BTreeMap::from([(outpoint, output.clone())]),
+            vec![bundle_output],
+        )
+        .unwrap();
+        let m6id = bundle.compute_m6id();
+        let event_block_hash = bitcoin::BlockHash::all_zeros();
+
+        let mut rwtxn = env.write_txn().unwrap();
+        state.utxos.put(&mut rwtxn, &key, &output).unwrap();
+        state
+            .pending_withdrawal_bundle
+            .put(&mut rwtxn, &(), &(bundle, 9))
+            .unwrap();
+        let mut accumulator_diff = AccumulatorDiff::default();
+
+        // Submitted at height 10, then expired at height 11, which restores the
+        // spent UTXO.
+        connect_withdrawal_bundle_event(
+            &state,
+            &mut rwtxn,
+            10,
+            &mut accumulator_diff,
+            &event_block_hash,
+            &bundle_event(m6id, WithdrawalBundleStatus::Submitted),
+        )
+        .unwrap();
+        connect_withdrawal_bundle_event(
+            &state,
+            &mut rwtxn,
+            11,
+            &mut accumulator_diff,
+            &event_block_hash,
+            &bundle_event(m6id, WithdrawalBundleStatus::Failed),
+        )
+        .unwrap();
+        // The same m6id is proposed again at height 12.
+        connect_withdrawal_bundle_event(
+            &state,
+            &mut rwtxn,
+            12,
+            &mut accumulator_diff,
+            &event_block_hash,
+            &bundle_event(m6id, WithdrawalBundleStatus::Submitted),
+        )
+        .unwrap();
+        let (_bundle, bundle_status) = state
+            .withdrawal_bundles
+            .try_get(&rwtxn, &m6id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            bundle_status.latest().value,
+            WithdrawalBundleStatus::Failed,
+            "connecting the repeated submission should not change the status"
+        );
+
+        // Disconnecting the block that connected the repeated submission must
+        // reverse nothing, since connecting it applied nothing.
+        disconnect_withdrawal_bundle_event(
+            &state,
+            &mut rwtxn,
+            12,
+            &mut accumulator_diff,
+            &bundle_event(m6id, WithdrawalBundleStatus::Submitted),
+        )
+        .unwrap();
+        let (_bundle, bundle_status) = state
+            .withdrawal_bundles
+            .try_get(&rwtxn, &m6id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            bundle_status.latest().value,
+            WithdrawalBundleStatus::Failed,
+            "disconnect must leave the failed bundle in place"
+        );
+        assert_eq!(bundle_status.latest().height, 11);
+        assert_eq!(
+            state.utxos.try_get(&rwtxn, &key).unwrap().as_ref(),
+            Some(&output),
+            "disconnect must not touch the UTXO restored by the expiry"
+        );
+        assert!(
+            state.stxos.try_get(&rwtxn, &key).unwrap().is_none(),
+            "disconnect must not re-spend the UTXO restored by the expiry"
+        );
+    }
 }

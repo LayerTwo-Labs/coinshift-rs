@@ -134,11 +134,19 @@ pub struct State {
         DatabaseUnique<SerdeBincode<Address>, SerdeBincode<Vec<SwapId>>>,
     /// Tracks which outputs are locked to which swap
     pub locked_swap_outputs: DatabaseUnique<OutPointKey, SerdeBincode<SwapId>>,
+    /// Reversal data for swap expiries applied during 2WPD connect, keyed by
+    /// the connect block height. For each swap expired at that height, records
+    /// its state before expiry and the outputs that were unlocked, so a 2WPD
+    /// disconnect can restore the pre-expiry (locked + non-`Cancelled`) state.
+    pub expired_swaps: DatabaseUnique<
+        SerdeBincode<u32>,
+        SerdeBincode<Vec<(SwapId, SwapState, Vec<OutPoint>)>>,
+    >,
     _version: DatabaseUnique<UnitKey, SerdeBincode<Version>>,
 }
 
 impl State {
-    pub const NUM_DBS: u32 = 15;
+    pub const NUM_DBS: u32 = 16;
 
     pub fn new(env: &sneed::Env) -> Result<Self, Error> {
         let mut rwtxn = env.write_txn().map_err(EnvError::from)?;
@@ -188,6 +196,9 @@ impl State {
         let locked_swap_outputs =
             DatabaseUnique::create(env, &mut rwtxn, "locked_swap_outputs")
                 .map_err(EnvError::from)?;
+        let expired_swaps =
+            DatabaseUnique::create(env, &mut rwtxn, "expired_swaps")
+                .map_err(EnvError::from)?;
         let version = DatabaseUnique::create(env, &mut rwtxn, "state_version")
             .map_err(EnvError::from)?;
         if version
@@ -215,6 +226,7 @@ impl State {
             swaps_by_l1_txid,
             swaps_by_recipient,
             locked_swap_outputs,
+            expired_swaps,
             _version: version,
         })
     }
@@ -891,17 +903,6 @@ impl State {
                 }
                 None => return Err(Error::SwapNotCreator),
             }
-        }
-        self.delete_swap_unchecked(rwtxn, swap_id)
-    }
-
-    /// Delete swap without creator check. For internal use only (e.g. block rollback).
-    pub fn delete_swap_unchecked(
-        &self,
-        rwtxn: &mut RwTxn,
-        swap_id: &SwapId,
-    ) -> Result<(), Error> {
-        if let Some(swap) = self.get_swap(rwtxn, swap_id)? {
             // Only Pending or Cancelled swaps can be deleted (not WaitingConfirmations, ReadyToClaim, Completed)
             if !matches!(swap.state, SwapState::Pending | SwapState::Cancelled)
             {
@@ -910,6 +911,19 @@ impl State {
                     swap_id, swap.state
                 )));
             }
+        }
+        self.delete_swap_unchecked(rwtxn, swap_id)
+    }
+
+    /// Delete swap without creator or state check. For internal use only
+    /// (e.g. block rollback), where reversing a swap's creating block must
+    /// always succeed regardless of any local L1-observation state advance.
+    pub fn delete_swap_unchecked(
+        &self,
+        rwtxn: &mut RwTxn,
+        swap_id: &SwapId,
+    ) -> Result<(), Error> {
+        if let Some(swap) = self.get_swap(rwtxn, swap_id)? {
             // Delete from swaps_by_l1_txid
             let l1_txid_key = (swap.parent_chain, swap.l1_txid.clone());
             self.swaps_by_l1_txid
@@ -1831,14 +1845,20 @@ impl State {
                         );
 
                         // Lock outputs for L2 → L1 swaps
-                        // Only lock SwapPending outputs (never change outputs)
+                        // Only lock SwapPending outputs escrowed for this swap
+                        // (never change outputs, never another swap's escrow),
+                        // so a rescan reproduces exactly the set that block
+                        // connection locked.
                         {
                             for (vout, output) in
                                 filled.transaction.outputs.iter().enumerate()
                             {
                                 if matches!(
                                     output.content,
-                                    crate::types::OutputContent::SwapPending { .. }
+                                    crate::types::OutputContent::SwapPending {
+                                        swap_id: output_swap_id,
+                                        ..
+                                    } if output_swap_id == swap_id.0
                                 ) {
                                     let outpoint = OutPoint::Regular {
                                         txid,

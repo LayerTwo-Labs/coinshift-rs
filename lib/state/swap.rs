@@ -5,8 +5,8 @@ use sneed::RoTxn;
 use crate::{
     state::{Error, State},
     types::{
-        Address, FilledTransaction, GetValue, SwapId, SwapState, SwapTxId,
-        Transaction, TxData,
+        Address, FilledTransaction, GetValue, OutputContent, SwapId, SwapState,
+        SwapTxId, Transaction, TxData,
     },
 };
 
@@ -171,6 +171,40 @@ pub fn validate_swap_create(
         return Err(Error::InvalidTransaction(format!(
             "Insufficient funds: need {}, have {}",
             required_amount, total_input_value
+        )));
+    }
+
+    // The declared `l2_amount` becomes a consensus obligation once the swap is
+    // saved: a claim must pay the recipient at least `swap.l2_amount`. Spending
+    // enough inputs is not sufficient, since only the `SwapPending` outputs
+    // carrying this swap's id are locked when the block connects; the rest is
+    // change the creator keeps. Require those outputs to actually escrow the
+    // declared amount, otherwise a creator could declare an inflated
+    // `l2_amount` while locking a token value, leaving the L1 filler unable to
+    // claim after having already paid on L1.
+    let escrowed_value = transaction
+        .outputs
+        .iter()
+        .filter_map(|output| match output.content {
+            OutputContent::SwapPending {
+                value,
+                swap_id: output_swap_id,
+            } if output_swap_id == *swap_id => Some(value),
+            _ => None,
+        })
+        .try_fold(bitcoin::Amount::ZERO, |acc, val| {
+            acc.checked_add(val).ok_or(())
+        })
+        .map_err(|_| {
+            Error::InvalidTransaction(
+                "SwapPending output value overflow".to_string(),
+            )
+        })?;
+
+    if escrowed_value < required_amount {
+        return Err(Error::InvalidTransaction(format!(
+            "SwapCreate must lock at least {} in SwapPending outputs for swap {}, but locks {}",
+            required_amount, computed_swap_id, escrowed_value
         )));
     }
 
@@ -746,6 +780,162 @@ mod tests {
         assert!(
             result.is_ok(),
             "full-amount claim should pass the mempool validator, got {result:?}"
+        );
+    }
+
+    /// Build a `SwapCreate` declaring `l2_amount`, escrowing `escrowed` in a
+    /// `SwapPending` output and keeping `change` as a regular output, funded by
+    /// a single input worth `l2_amount` plus a fee.
+    fn swap_create_tx(
+        l2_amount: u64,
+        escrowed: u64,
+        change: u64,
+    ) -> (Transaction, FilledTransaction) {
+        let sender = Address([12u8; 20]);
+        let recipient = Address([13u8; 20]);
+        let l1_recipient_address = "rbtc-recipient".to_string();
+        let l1_amount = sat(40_000);
+        let swap_id = SwapId::from_l2_to_l1(
+            &l1_recipient_address,
+            l1_amount,
+            &sender,
+            Some(&recipient),
+        );
+        let funding = Output {
+            address: sender,
+            content: OutputContent::Value(sat(l2_amount + 1_000)),
+        };
+        let tx = Transaction {
+            inputs: vec![(
+                OutPoint::Regular {
+                    txid: Txid([3u8; 32]),
+                    vout: 0,
+                },
+                [0u8; 32],
+            )],
+            proof: Default::default(),
+            outputs: vec![
+                Output {
+                    address: recipient,
+                    content: OutputContent::SwapPending {
+                        value: sat(escrowed),
+                        swap_id: swap_id.0,
+                    },
+                },
+                Output {
+                    address: sender,
+                    content: OutputContent::Value(sat(change)),
+                },
+            ],
+            data: TxData::SwapCreate {
+                swap_id: swap_id.0,
+                parent_chain: ParentChainType::Regtest,
+                l1_txid_bytes: vec![0u8; 32],
+                required_confirmations: 1,
+                l2_recipient: Some(recipient),
+                l2_amount,
+                l1_recipient_address,
+                l1_amount: l1_amount.to_sat(),
+            },
+        };
+        let filled = FilledTransaction {
+            spent_utxos: vec![funding],
+            transaction: tx.clone(),
+        };
+        (tx, filled)
+    }
+
+    /// A `SwapCreate` that declares an `l2_amount` larger than the value it
+    /// actually escrows in `SwapPending` outputs must be rejected. Only those
+    /// outputs are locked, so the remainder is change the creator keeps while
+    /// the claim is still obliged to pay the recipient the declared amount.
+    #[test]
+    fn swap_create_rejects_under_escrowed_amount() {
+        let (_dir, env, state) = test_state();
+        let (tx, filled) = swap_create_tx(10_000, 1_000, 9_000);
+
+        let rotxn = env.read_txn().unwrap();
+        let result = validate_swap_create(&state, &rotxn, &tx, &filled);
+        assert!(
+            matches!(result, Err(Error::InvalidTransaction(_))),
+            "under-escrowed SwapCreate should be rejected, got {result:?}"
+        );
+    }
+
+    /// The wallet-shaped `SwapCreate` — the full `l2_amount` in a single
+    /// `SwapPending` output plus a change output — must still be accepted.
+    #[test]
+    fn swap_create_accepts_fully_escrowed_amount() {
+        let (_dir, env, state) = test_state();
+        let (tx, filled) = swap_create_tx(10_000, 10_000, 500);
+
+        let rotxn = env.read_txn().unwrap();
+        let result = validate_swap_create(&state, &rotxn, &tx, &filled);
+        assert!(
+            result.is_ok(),
+            "fully escrowed SwapCreate should be accepted, got {result:?}"
+        );
+    }
+
+    /// `SwapPending` outputs carrying a different swap's id do not count
+    /// towards the escrow, since block connection does not lock them for this
+    /// swap.
+    #[test]
+    fn swap_create_rejects_escrow_tagged_with_other_swap() {
+        let (_dir, env, state) = test_state();
+        let (mut tx, filled) = swap_create_tx(10_000, 10_000, 500);
+        tx.outputs[0].content = OutputContent::SwapPending {
+            value: sat(10_000),
+            swap_id: [42u8; 32],
+        };
+        let filled = FilledTransaction {
+            spent_utxos: filled.spent_utxos,
+            transaction: tx.clone(),
+        };
+
+        let rotxn = env.read_txn().unwrap();
+        let result = validate_swap_create(&state, &rotxn, &tx, &filled);
+        assert!(
+            matches!(result, Err(Error::InvalidTransaction(_))),
+            "escrow tagged with another swap should not count, got {result:?}"
+        );
+    }
+
+    /// Reversing the block that created a swap must always succeed, even when
+    /// local L1 monitoring has already advanced the swap past `Pending` (e.g. to
+    /// `ReadyToClaim`). `disconnect_tip` deletes the swap via
+    /// `delete_swap_unchecked`, so that helper must never refuse based on state;
+    /// otherwise a sidechain reorg that removes the creating block aborts and the
+    /// node is wedged on the losing branch.
+    #[test]
+    fn delete_swap_unchecked_deletes_ready_to_claim_swap() {
+        let (_dir, env, state, swap_id, ..) = ready_swap_state();
+
+        let mut rwtxn = env.write_txn().unwrap();
+        let result = state.delete_swap_unchecked(&mut rwtxn, &swap_id);
+        assert!(
+            result.is_ok(),
+            "rollback deletion of a ReadyToClaim swap must succeed, got {result:?}"
+        );
+        assert!(
+            state.get_swap(&rwtxn, &swap_id).unwrap().is_none(),
+            "swap should be gone after rollback deletion"
+        );
+    }
+
+    /// The user-facing `delete_swap` path keeps its state guard: an active
+    /// (non-Pending/Cancelled) swap must not be manually deletable, even by its
+    /// creator.
+    #[test]
+    fn delete_swap_still_refuses_ready_to_claim_swap() {
+        let (_dir, env, state, swap_id, ..) = ready_swap_state();
+        let creator = Address([5u8; 20]);
+
+        let mut rwtxn = env.write_txn().unwrap();
+        let result = state.delete_swap(&mut rwtxn, &swap_id, Some(&creator));
+        assert!(
+            matches!(result, Err(Error::InvalidTransaction(_))),
+            "user deletion of a ReadyToClaim swap should be refused, got {result:?}"
         );
     }
 }

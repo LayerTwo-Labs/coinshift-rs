@@ -5,7 +5,7 @@ use transitive::Transitive;
 use crate::types::{
     AmountOverflowError, AmountUnderflowError, BlockHash,
     ComputeMerkleRootError, M6id, MerkleRoot, OutPoint, SwapId, Txid,
-    UtreexoError, WithdrawalBundleError,
+    UtreexoError, WithdrawalBundleError, WithdrawalBundleStatus,
 };
 
 #[derive(Debug, Error)]
@@ -87,6 +87,15 @@ pub enum Error {
     UtxoDoubleSpent,
     #[error("too many sigops")]
     TooManySigops,
+    #[error(
+        "Unexpected status for withdrawal bundle {m6id}: {status:?} at height {status_height}, while disconnecting block at height {block_height}"
+    )]
+    UnexpectedWithdrawalBundleStatus {
+        m6id: M6id,
+        status: WithdrawalBundleStatus,
+        status_height: u32,
+        block_height: u32,
+    },
     #[error("Unknown withdrawal bundle: {m6id}")]
     UnknownWithdrawalBundle { m6id: M6id },
     #[error(

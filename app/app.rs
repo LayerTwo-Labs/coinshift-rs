@@ -848,6 +848,35 @@ impl App {
         update(self.node.as_ref(), &mut self.utxos.write(), &self.wallet)
     }
 
+    /// Returns true if an outpoint is locked to a swap, and may therefore only
+    /// be spent by a SwapClaim transaction. A new read transaction is created
+    /// for each check to avoid lifetime issues, so that the latest state is
+    /// always read.
+    pub fn is_output_locked_to_swap(&self, outpoint: &OutPoint) -> bool {
+        let rotxn = match self.node.env().read_txn() {
+            Ok(rotxn) => rotxn,
+            Err(err) => {
+                tracing::warn!(
+                    outpoint = ?outpoint,
+                    error = %err,
+                    "Failed to create read transaction for locked output check"
+                );
+                return false;
+            }
+        };
+        match self.node.state().is_output_locked_to_swap(&rotxn, outpoint) {
+            Ok(locked) => locked.is_some(),
+            Err(err) => {
+                tracing::warn!(
+                    outpoint = ?outpoint,
+                    error = %err,
+                    "Error checking if output is locked"
+                );
+                false
+            }
+        }
+    }
+
     pub fn sign_and_send(&self, tx: Transaction) -> Result<(), Error> {
         let txid = tx.txid();
         tracing::debug!(%txid, "sign_and_send: Starting transaction signing and sending");

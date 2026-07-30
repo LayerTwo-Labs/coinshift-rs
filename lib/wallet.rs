@@ -232,14 +232,20 @@ impl Wallet {
         self.set_seed(&seed_bytes)
     }
 
-    pub fn create_withdrawal(
+    /// `is_locked` is a function that returns true if an outpoint is locked to
+    /// a swap
+    pub fn create_withdrawal<F>(
         &self,
         accumulator: &Accumulator,
         main_address: bitcoin::Address<bitcoin::address::NetworkUnchecked>,
         value: bitcoin::Amount,
         main_fee: bitcoin::Amount,
         fee: bitcoin::Amount,
-    ) -> Result<Transaction, Error> {
+        is_locked: F,
+    ) -> Result<Transaction, Error>
+    where
+        F: Fn(&OutPoint) -> bool,
+    {
         tracing::trace!(
             accumulator = %accumulator.0,
             fee = %fee.display_dynamic(),
@@ -248,12 +254,13 @@ impl Wallet {
             value = %value.display_dynamic(),
             "Creating withdrawal"
         );
-        let (total, coins) = self.select_coins(
+        let (total, coins) = self.select_coins_with_filter(
             value
                 .checked_add(fee)
                 .ok_or(AmountOverflowError)?
                 .checked_add(main_fee)
                 .ok_or(AmountOverflowError)?,
+            is_locked,
         )?;
         let change = total - value - fee;
 
@@ -469,15 +476,23 @@ impl Wallet {
         Ok(tx)
     }
 
-    pub fn create_transaction(
+    /// `is_locked` is a function that returns true if an outpoint is locked to
+    /// a swap
+    pub fn create_transaction<F>(
         &self,
         accumulator: &Accumulator,
         address: Address,
         value: bitcoin::Amount,
         fee: bitcoin::Amount,
-    ) -> Result<Transaction, Error> {
-        let (total, coins) = self
-            .select_coins(value.checked_add(fee).ok_or(AmountOverflowError)?)?;
+        is_locked: F,
+    ) -> Result<Transaction, Error>
+    where
+        F: Fn(&OutPoint) -> bool,
+    {
+        let (total, coins) = self.select_coins_with_filter(
+            value.checked_add(fee).ok_or(AmountOverflowError)?,
+            is_locked,
+        )?;
         let change = total - value - fee;
         let inputs: Vec<_> = coins
             .into_iter()
@@ -567,20 +582,23 @@ impl Wallet {
                 skipped_withdrawal += 1;
                 continue;
             }
-            // Filter out SwapPending outputs - they are locked and should only be spent in SwapClaim transactions
-            if output.content.is_swap_pending() {
-                skipped_swap_pending += 1;
-                continue;
-            }
+            // Filter out outputs that are locked to a swap - they should only
+            // be spent in SwapClaim transactions. A SwapPending output whose
+            // swap was cancelled or expired is no longer locked, and is
+            // spendable again like any other output.
             if is_locked_output {
-                skipped_locked += 1;
-                tracing::warn!(
-                    outpoint = ?outpoint,
-                    "Skipping locked output in select_coins (locked in node state but not filtered by content type)"
-                );
+                if output.content.is_swap_pending() {
+                    skipped_swap_pending += 1;
+                } else {
+                    skipped_locked += 1;
+                    tracing::warn!(
+                        outpoint = ?outpoint,
+                        "Skipping locked output in select_coins (locked in node state but not filtered by content type)"
+                    );
+                }
                 continue;
             }
-            if total > value {
+            if total >= value {
                 break;
             }
             total = total
@@ -1014,5 +1032,109 @@ impl Watchable<()> for Wallet {
             #[allow(clippy::unused_unit)]
             ()
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::Txid;
+
+    fn sat(value: u64) -> bitcoin::Amount {
+        bitcoin::Amount::from_sat(value)
+    }
+
+    fn value_output(value: u64) -> Output {
+        Output {
+            address: Address([0x42; 20]),
+            content: OutputContent::Value(sat(value)),
+        }
+    }
+
+    fn swap_pending_output(value: u64) -> Output {
+        Output {
+            address: Address([0x42; 20]),
+            content: OutputContent::SwapPending {
+                value: sat(value),
+                swap_id: [0x17; 32],
+            },
+        }
+    }
+
+    fn regular_outpoint(vout: u32) -> OutPoint {
+        OutPoint::Regular {
+            txid: Txid([vout as u8; 32]),
+            vout,
+        }
+    }
+
+    /// Build a `Wallet` backed by a fresh temporary LMDB environment.
+    fn test_wallet() -> (temp_dir::TempDir, Wallet) {
+        let dir = temp_dir::TempDir::new().unwrap();
+        let wallet = Wallet::new(dir.path()).unwrap();
+        (dir, wallet)
+    }
+
+    /// When the accumulated total exactly reaches the target, coin selection
+    /// must stop instead of pulling in one extra (larger) UTXO.
+    #[test]
+    fn select_coins_exact_target_does_not_overshoot() {
+        let (_dir, wallet) = test_wallet();
+        let utxos = HashMap::from([
+            (regular_outpoint(0), value_output(1000)),
+            (regular_outpoint(1), value_output(2000)),
+        ]);
+        wallet.put_utxos(&utxos).unwrap();
+
+        let (total, selected) = wallet.select_coins(sat(1000)).unwrap();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(total, sat(1000));
+    }
+
+    /// A target below the smallest UTXO still selects a single input.
+    #[test]
+    fn select_coins_below_smallest_selects_single_input() {
+        let (_dir, wallet) = test_wallet();
+        let utxos = HashMap::from([
+            (regular_outpoint(0), value_output(1000)),
+            (regular_outpoint(1), value_output(2000)),
+        ]);
+        wallet.put_utxos(&utxos).unwrap();
+
+        let (total, selected) = wallet.select_coins(sat(500)).unwrap();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(total, sat(1000));
+    }
+
+    /// A `SwapPending` output whose swap was cancelled or expired is unlocked
+    /// in the node state, and must be spendable again instead of being
+    /// stranded by a content-based filter.
+    #[test]
+    fn select_coins_spends_unlocked_swap_pending_output() {
+        let (_dir, wallet) = test_wallet();
+        let utxos =
+            HashMap::from([(regular_outpoint(0), swap_pending_output(1000))]);
+        wallet.put_utxos(&utxos).unwrap();
+
+        let (total, selected) = wallet
+            .select_coins_with_filter(sat(1000), |_| false)
+            .unwrap();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(total, sat(1000));
+    }
+
+    /// A `SwapPending` output that is still locked to an in-flight swap may
+    /// only be spent by a SwapClaim, so coin selection must skip it.
+    #[test]
+    fn select_coins_skips_locked_swap_pending_output() {
+        let (_dir, wallet) = test_wallet();
+        let utxos =
+            HashMap::from([(regular_outpoint(0), swap_pending_output(1000))]);
+        wallet.put_utxos(&utxos).unwrap();
+
+        assert!(matches!(
+            wallet.select_coins_with_filter(sat(1000), |_| true),
+            Err(Error::NotEnoughFunds)
+        ));
     }
 }

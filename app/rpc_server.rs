@@ -290,6 +290,7 @@ impl RpcServer for RpcServerImpl {
                 dest,
                 Amount::from_sat(value_sats),
                 Amount::from_sat(fee_sats),
+                |outpoint| self.app.is_output_locked_to_swap(outpoint),
             )
             .map_err(custom_err)?;
         let txid = tx.txid();
@@ -315,6 +316,7 @@ impl RpcServer for RpcServerImpl {
                 Amount::from_sat(amount_sats),
                 Amount::from_sat(mainchain_fee_sats),
                 Amount::from_sat(fee_sats),
+                |outpoint| self.app.is_output_locked_to_swap(outpoint),
             )
             .map_err(custom_err)?;
         let txid = tx.txid();
