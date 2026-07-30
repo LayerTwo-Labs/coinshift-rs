@@ -27,22 +27,17 @@ pub fn show_l2_amount(amount: bitcoin::Amount) -> String {
 }
 
 /// Show an L1 amount with the parent-chain abbreviation prefix.
+///
+/// The amount is a count of the chain's base units, so it must be rendered with
+/// that chain's decimals — not with Bitcoin's fixed 8.
 pub fn show_l1_amount(
     amount: bitcoin::Amount,
     chain: coinshift::types::ParentChainType,
 ) -> String {
-    use coinshift::types::ParentChainType;
-    let prefix = match chain {
-        ParentChainType::BTC => "BTC",
-        ParentChainType::BCH => "BCH",
-        ParentChainType::LTC => "LTC",
-        ParentChainType::Signet => "sBTC",
-        ParentChainType::Regtest => "rBTC",
-    };
     format!(
         "{} {}",
-        prefix,
-        amount.to_string_in(bitcoin::Denomination::Bitcoin)
+        chain.ticker(),
+        coinshift::types::format_l1_amount(amount.to_sat(), chain)
     )
 }
 

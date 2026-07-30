@@ -581,7 +581,7 @@ fn query_and_update_swap(
 
     // Only accept transactions that are confirmed and included in a block,
     // and not older than the chain's max L1 tx age
-    let max_age = swap.parent_chain.max_l1_tx_age_blocks();
+    let max_age = swap.parent_chain.max_l1_tx_age();
     let matches: Vec<_> = matches
         .into_iter()
         .filter(|(_, tx_info)| {
@@ -594,7 +594,7 @@ fn query_and_update_swap(
                     l1_txid = %tx_info.txid,
                     confirmations = %tx_info.confirmations,
                     max_age = %max_age,
-                    "Rejecting L1 tx: too old (confirmations exceed max_l1_tx_age_blocks)"
+                    "Rejecting L1 tx: too old (confirmations exceed max_l1_tx_age)"
                 );
                 return false;
             }

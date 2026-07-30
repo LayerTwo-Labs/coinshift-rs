@@ -27,18 +27,19 @@ fn parse_swap_id(s: &str) -> anyhow::Result<SwapId> {
     Ok(SwapId(arr))
 }
 
+/// Parse a `--parent-chain` argument.
+///
+/// Derived from the enum itself (case-insensitively), so a new chain becomes
+/// accepted here — and listed in the error message — without another edit.
 fn parse_parent_chain(s: &str) -> anyhow::Result<ParentChainType> {
-    match s.to_lowercase().as_str() {
-        "btc" => Ok(ParentChainType::BTC),
-        "bch" => Ok(ParentChainType::BCH),
-        "ltc" => Ok(ParentChainType::LTC),
-        "signet" => Ok(ParentChainType::Signet),
-        "regtest" => Ok(ParentChainType::Regtest),
-        _ => Err(anyhow::anyhow!(
-            "unknown parent_chain '{}', use: btc, bch, ltc, signet, regtest",
-            s
-        )),
-    }
+    s.parse::<ParentChainType>().map_err(|_| {
+        let known = ParentChainType::all()
+            .iter()
+            .map(|chain| chain.to_string().to_lowercase())
+            .collect::<Vec<_>>()
+            .join(", ");
+        anyhow::anyhow!("unknown parent_chain '{s}', use one of: {known}")
+    })
 }
 
 #[derive(Clone, Debug, Subcommand)]

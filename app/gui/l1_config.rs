@@ -284,26 +284,14 @@ impl L1Config {
             ui.label("Parent Chain:");
             let previous_chain = self.selected_parent_chain;
             let supported = parent_chain_rpc::supported_l1_parent_chain_types();
-            let label = match self.selected_parent_chain {
-                ParentChainType::Signet => "Bitcoin Signet (sBTC)",
-                ParentChainType::BCH => "Bitcoin Cash Testnet 4 (BCH)",
-                _ => "Select network",
-            };
             ComboBox::from_id_salt("l1_config_parent_chain")
-                .selected_text(label)
+                .selected_text(self.selected_parent_chain.display_name())
                 .show_ui(ui, |ui| {
                     for chain in supported {
-                        let option_label = match chain {
-                            ParentChainType::Signet => "Bitcoin Signet (sBTC)",
-                            ParentChainType::BCH => {
-                                "Bitcoin Cash Testnet 4 (BCH)"
-                            }
-                            _ => continue,
-                        };
                         ui.selectable_value(
                             &mut self.selected_parent_chain,
                             *chain,
-                            option_label,
+                            chain.display_name(),
                         );
                     }
                 });
@@ -545,22 +533,6 @@ impl L1Config {
         // Chain-specific setup hints
         ui.add_space(10.0);
         ui.label(egui::RichText::new("Setup Hints:").strong());
-        match self.selected_parent_chain {
-            ParentChainType::BTC => {
-                ui.label("Use Bitcoin Core with -txindex=1 for full transaction lookup.");
-            }
-            ParentChainType::BCH => {
-                ui.label("Use Bitcoin Cash Node (BCHN) or Bitcoin ABC with -txindex=1.");
-            }
-            ParentChainType::LTC => {
-                ui.label("Use Litecoin Core with -txindex=1 for full transaction lookup.");
-            }
-            ParentChainType::Signet => {
-                ui.label("Use Bitcoin Core with -signet -txindex=1 flags.");
-            }
-            ParentChainType::Regtest => {
-                ui.label("Use Bitcoin Core with -regtest -txindex=1 flags for local testing.");
-            }
-        }
+        ui.label(self.selected_parent_chain.setup_hint());
     }
 }

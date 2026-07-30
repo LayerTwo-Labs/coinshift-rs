@@ -54,26 +54,14 @@ impl CreateSwap {
         ui.horizontal(|ui| {
             ui.label("Parent chain:");
             let supported = parent_chain_rpc::supported_l1_parent_chain_types();
-            let label = match self.parent_chain {
-                ParentChainType::Signet => "Bitcoin Signet (sBTC)",
-                ParentChainType::BCH => "Bitcoin Cash Testnet 4 (BCH)",
-                _ => "Select network",
-            };
             ComboBox::from_id_salt("parent_chain")
-                .selected_text(label)
+                .selected_text(self.parent_chain.display_name())
                 .show_ui(ui, |ui| {
                     for chain in supported {
-                        let option_label = match chain {
-                            ParentChainType::Signet => "Bitcoin Signet (sBTC)",
-                            ParentChainType::BCH => {
-                                "Bitcoin Cash Testnet 4 (BCH)"
-                            }
-                            _ => continue,
-                        };
                         ui.selectable_value(
                             &mut self.parent_chain,
                             *chain,
-                            option_label,
+                            chain.display_name(),
                         );
                     }
                 });
@@ -168,11 +156,17 @@ impl CreateSwap {
             ui.separator();
         }
 
-        // Parse inputs
-        let l1_amount = bitcoin::Amount::from_str_in(
+        // Parse inputs.
+        //
+        // The L1 amount is denominated in the parent chain's own units, which
+        // are not necessarily Bitcoin's 8 decimals — parsing it as BTC would
+        // silently scale the amount for any chain that differs.
+        let l1_amount = coinshift::types::parse_l1_amount(
             &self.l1_amount,
-            bitcoin::Denomination::Bitcoin,
-        );
+            self.parent_chain,
+        )
+        .map(bitcoin::Amount::from_sat);
+        // The L2 side is always the sidechain's own 8-decimal unit.
         let l2_amount = bitcoin::Amount::from_str_in(
             &self.l2_amount,
             bitcoin::Denomination::Bitcoin,
@@ -301,8 +295,10 @@ impl CreateSwap {
 
             app.node.add_created_pending_swap(swap_id);
             tracing::info!("Swap created: swap_id={}, txid={}", swap_id, txid);
+            // Clear the form but keep the chain the user was working with.
+            let parent_chain = self.parent_chain;
             *self = Self::default();
-            self.parent_chain = ParentChainType::BTC; // Keep parent chain selection
+            self.parent_chain = parent_chain;
         }
     }
 }

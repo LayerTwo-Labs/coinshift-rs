@@ -30,8 +30,8 @@ pub use hashes::{
     BlockHash, Hash, M6id, MerkleRoot, Txid, hash, hash_with_scratch_buffer,
 };
 pub use swap::{
-    ParentChainType, Swap, SwapDirection, SwapError, SwapId, SwapState,
-    SwapTxId,
+    ConfirmationModel, ParentChainType, Swap, SwapDirection, SwapError, SwapId,
+    SwapState, SwapTxId, TxidEncoding, format_l1_amount, parse_l1_amount,
 };
 pub use transaction::{
     Authorized, AuthorizedTransaction, Content as OutputContent,
