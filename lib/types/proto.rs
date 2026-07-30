@@ -11,6 +11,11 @@ pub trait Transport = where
     <Self::ResponseBody as tonic::codegen::Body>::Error:
         Into<tonic::codegen::StdError> + Send;
 
+/// The response future of a transport, named so that `where` clauses bounding
+/// it stay on one line.
+pub type TransportFuture<T> =
+    <T as tonic::client::GrpcService<tonic::body::Body>>::Future;
+
 #[derive(Debug, Error)]
 pub enum Error {
     #[error(transparent)]
