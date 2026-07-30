@@ -382,6 +382,10 @@ impl State {
         let mut value_in = bitcoin::Amount::ZERO;
         let mut value_out = bitcoin::Amount::ZERO;
         for utxo in &transaction.spent_utxos {
+            // a withdrawal output is committed to a bundle, not spendable by a tx
+            if utxo.content.is_withdrawal() {
+                return Err(Error::SpendWithdrawalOutput);
+            }
             value_in = value_in
                 .checked_add(utxo.get_value())
                 .ok_or(AmountOverflowError)?;
@@ -2021,5 +2025,55 @@ impl Watchable<()> for State {
     /// Get a signal that notifies whenever the tip changes
     fn watch(&self) -> Self::WatchStream {
         tokio_stream::wrappers::WatchStream::new(self.tip.watch().clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use sneed::Env;
+
+    use super::*;
+    use crate::types::{Address, Output, OutputContent, Transaction};
+
+    fn test_state() -> (temp_dir::TempDir, Env, State) {
+        let dir = temp_dir::TempDir::new().unwrap();
+        let mut opts = heed::EnvOpenOptions::new();
+        opts.map_size(10 * 1024 * 1024).max_dbs(State::NUM_DBS);
+        let env = unsafe { Env::open(&opts, dir.path()) }.unwrap();
+        let state = State::new(&env).unwrap();
+        (dir, env, state)
+    }
+
+    #[test]
+    fn cannot_spend_withdrawal_output() {
+        let (_dir, _env, state) = test_state();
+        let main_address = "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2"
+            .parse::<bitcoin::Address<bitcoin::address::NetworkUnchecked>>()
+            .unwrap();
+        let withdrawal = Output {
+            address: Address([1u8; 20]),
+            content: OutputContent::Withdrawal {
+                value: bitcoin::Amount::from_sat(1000),
+                main_fee: bitcoin::Amount::from_sat(300),
+                main_address,
+            },
+        };
+        let filled = FilledTransaction {
+            spent_utxos: vec![withdrawal],
+            transaction: Transaction {
+                outputs: vec![Output {
+                    address: Address([2u8; 20]),
+                    content: OutputContent::Value(bitcoin::Amount::from_sat(
+                        1300,
+                    )),
+                }],
+                ..Default::default()
+            },
+        };
+        let result = state.validate_filled_transaction(&filled);
+        assert!(
+            matches!(result, Err(Error::SpendWithdrawalOutput)),
+            "spending a withdrawal output should be rejected, got {result:?}"
+        );
     }
 }

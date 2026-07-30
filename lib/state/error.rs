@@ -75,6 +75,8 @@ pub enum Error {
     NotEnoughValueIn,
     #[error("utxo {outpoint} doesn't exist")]
     NoUtxo { outpoint: OutPoint },
+    #[error("withdrawal output cannot be spent by a transaction")]
+    SpendWithdrawalOutput,
     #[error("Withdrawal bundle event block doesn't exist")]
     NoWithdrawalBundleEventBlock,
     #[error(transparent)]
