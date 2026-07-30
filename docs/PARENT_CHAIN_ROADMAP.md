@@ -670,6 +670,68 @@ confirmation threshold, the age cutoff, txid uniqueness, monotonic
 confirmations, an unreachable endpoint, an unconfigured chain, and a wrong
 amount. None of that had any test at all before.
 
+### 3.6 Phase 3 — implementation notes (done)
+
+**The startup trap is gone.** `App::new` performs no L1 network I/O at all.
+`lib/l1/registry.rs` reads the config file, and a background task on `Node`
+probes each endpoint every 30s and records its health.
+`L1Registry::verified_client` is the only way to obtain a client, and returns
+`None` unless the chain last probed healthy within `HEALTH_TTL`. This is
+*stronger* than the check it replaces: it also catches an endpoint that starts
+serving the wrong network after startup, which a boot-time check cannot.
+
+**The allowlist is deleted**, and with it `lib/parent_chain_rpc.rs` entirely.
+`supported_l1_configs`, `is_supported_l1_config`, `detect_chain_type`,
+`validate_l1_config_file`, `write_l1_config_file` and
+`Error::{ChainMismatch, UnsupportedL1Config}` are gone. All five chains are now
+selectable, and the GUI's URL/user/password fields are editable, carrying a
+warning that Coinshift trusts whatever the endpoint says about L1 payments.
+
+**Identity uses computed genesis hashes, not remembered ones.**
+`lib/l1/identity.rs` derives the expected genesis from
+`bitcoin::constants::genesis_block(network)` for the chains the crate models
+(BTC, Signet, Regtest), so there are no hand-copied constants to get wrong.
+`expected_genesis` in the config overrides it, which is how custom signet
+(`-signetchallenge`) and non-default regtest are supported.
+
+Deliberate limitation, tested and documented rather than papered over: **BCH and
+LTC fall back to matching the reported network name.** The `bitcoin` crate cannot
+supply their genesis, and BCH mainnet shares Bitcoin's genesis anyway because it
+forked from it — so genesis could not separate them even if we had the value.
+The plan suggested pinning the BCH fork block as a checkpoint; that needs a
+specific block hash which is not derivable from anything in the tree, and
+shipping one from memory risks marking a working chain `WrongChain`. Operators
+who want the stronger check can set `expected_genesis` themselves. What *is*
+caught conclusively is the realistic mistake: a Signet or Regtest swap pointed at
+a mainnet node.
+
+**Deviation:** `set-l1-config` stayed a CLI-local command rather than becoming a
+node RPC (§3.1 Phase 3 called for the RPC; Phase 6 adds the RPC surface). It now
+probes before writing — refusing a wrong-network endpoint outright, and warning
+but still writing for one that is merely unreachable, since configuring before
+starting a node is normal. That is enough, because with startup no longer fatal
+a bad config can no longer brick anything.
+
+Behaviour changes worth a release note:
+
+1. **A configured-but-down parent chain no longer stops the node from starting.**
+   Detection for that chain pauses and resumes on its own. `--strict-l1-config`
+   restores fail-fast for supervised deployments.
+2. **The GUI no longer silently polls two hardcoded endpoints** for chains the
+   user never configured (one of them a third-party IP). On first run with no
+   config file, those two entries are written out once with a WARN, so existing
+   users keep working and can now see, edit, or delete them.
+3. **`--l1-signet` and `--l1-bch-testnet4` are replaced by `--l1 <chain>=<url>`**,
+   repeatable, with credentials in the URL userinfo.
+4. **`create_swap` now fails** with `SwapError::ChainNotConfigured` (finally
+   constructed, having been dead code since it was written) for a chain that is
+   unconfigured, disabled, or serving the wrong network. A merely unreachable
+   chain is still allowed — the node being briefly down says nothing about a swap
+   that will be filled minutes later.
+
+Risk 3 is resolved by the migration in (2). Risk 7 is handled by the
+`expected_genesis` override plus name-only matching for BCH/LTC.
+
 ---
 
 ## Verification

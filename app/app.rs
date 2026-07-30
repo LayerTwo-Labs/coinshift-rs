@@ -58,8 +58,10 @@ pub enum Error {
     },
     #[error("wallet error")]
     Wallet(#[from] wallet::Error),
-    #[error("L1 config validation failed: {0}")]
-    L1ConfigValidation(#[from] coinshift::parent_chain_rpc::Error),
+    #[error(
+        "--strict-l1-config was given, but these parent chains are not usable: {0}"
+    )]
+    StrictL1Config(String),
 }
 
 impl From<node::Error> for Error {
@@ -640,11 +642,13 @@ impl App {
             config.datadir.display()
         );
 
-        // Validate L1 config file before start: test all configured networks
+        // Startup deliberately does no L1 network I/O. A configured chain whose
+        // node happens to be down used to abort startup here -- while a chain
+        // that was not configured at all was fine -- so an unrelated service
+        // being unavailable could lock an operator out of their own node. The
+        // registry now probes in the background and gates *use* instead; see
+        // `--strict-l1-config` to opt back into failing fast.
         let l1_rpc_config_path = coinshift::l1::config::default_path();
-        coinshift::parent_chain_rpc::validate_l1_config_file(
-            &l1_rpc_config_path,
-        )?;
 
         let wallet = Wallet::new(&config.datadir.join("wallet.mdb"))?;
         if let Some(seed_phrase_path) = &config.mnemonic_seed_phrase_path {
@@ -706,6 +710,20 @@ impl App {
             l1_rpc_config_path: Some(l1_rpc_config_path),
         };
         let node = Node::new(node_config, &runtime)?;
+        if config.strict_l1_config {
+            // Opt-in fail-fast for supervised deployments and CI: probe once
+            // now, and refuse to start if any configured chain is unusable.
+            node.l1().probe_all();
+            let unhealthy = node.l1().unhealthy_configured();
+            if !unhealthy.is_empty() {
+                let detail = unhealthy
+                    .iter()
+                    .map(|(chain, health)| health.summary(*chain))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                return Err(Error::StrictL1Config(detail));
+            }
+        }
         let node_elapsed = node_start.elapsed();
         tracing::info!(
             elapsed_secs = node_elapsed.as_secs_f64(),

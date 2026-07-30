@@ -4,7 +4,6 @@ use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet},
     net::SocketAddr,
-    path::PathBuf,
     sync::Arc,
     time::Duration,
 };
@@ -27,6 +26,7 @@ use tokio_stream::StreamNotifyClose;
 use super::mainchain_task::{self, MainchainTaskHandle};
 use crate::{
     archive::{self, Archive},
+    l1::L1Registry,
     mempool::{self, MemPool},
     net::{
         self, Net, PeerConnectionError, PeerConnectionInfo,
@@ -278,7 +278,7 @@ fn reorg_to_tip(
     mempool: &MemPool,
     state: &State,
     new_tip: Tip,
-    rpc_config_path: Option<&PathBuf>,
+    l1_registry: Option<&Arc<L1Registry>>,
     wallet: Option<&crate::wallet::Wallet>,
 ) -> Result<bool, Error> {
     let mut rwtxn = env.write_txn().map_err(EnvError::from)?;
@@ -416,16 +416,15 @@ fn reorg_to_tip(
             two_way_peg_data
         };
         type BoxedClientGetter =
-            Box<dyn Fn(ParentChainType) -> Option<Box<dyn ParentChainClient>>>;
+            Box<dyn Fn(ParentChainType) -> Option<Arc<dyn ParentChainClient>>>;
+        // Only chains the registry currently vouches for are observed. An
+        // unreachable or wrong-network endpoint yields None, and the swap stays
+        // where it is rather than being advanced on untrusted evidence.
         let client_getter: Option<BoxedClientGetter> =
-            rpc_config_path.map(|path| {
-                let path = path.clone();
+            l1_registry.map(|registry| {
+                let registry = registry.clone();
                 Box::new(move |chain: ParentChainType| {
-                    crate::l1::config::load_chain_config(&path, chain).map(
-                        |config| {
-                            crate::parent_chain::client_for(chain, &config)
-                        },
-                    )
+                    registry.verified_client(chain)
                 }) as BoxedClientGetter
             });
         let client_getter: Option<ClientGetter<'_>> =
@@ -473,9 +472,10 @@ struct NetTaskContext {
     net: Net,
     state: State,
     wallet: Option<Arc<crate::wallet::Wallet>>,
-    /// Path to L1 RPC config JSON (e.g. l1_rpc_configs.json). When set, Coinshift
-    /// will query the swap target chain on each block connect to update swap state.
-    rpc_config_path: Option<PathBuf>,
+    /// Live parent-chain clients and their health. When set, Coinshift queries
+    /// the swap target chain on each block connect to update swap state -- but
+    /// only for chains the registry currently considers healthy.
+    l1_registry: Option<Arc<L1Registry>>,
 }
 
 /// Message indicating a tip that is ready to reorg to, with the address of the
@@ -1105,7 +1105,7 @@ impl NetTask {
                             &self.ctxt.mempool,
                             &self.ctxt.state,
                             new_tip,
-                            self.ctxt.rpc_config_path.as_ref(),
+                            self.ctxt.l1_registry.as_ref(),
                             self.ctxt.wallet.as_deref(),
                         )
                     });
@@ -1340,7 +1340,7 @@ impl NetTaskHandle {
         peer_info_rx: PeerInfoRx,
         state: State,
         wallet: Option<Arc<crate::wallet::Wallet>>,
-        rpc_config_path: Option<PathBuf>,
+        l1_registry: Option<Arc<L1Registry>>,
     ) -> Self {
         let ctxt = NetTaskContext {
             env,
@@ -1350,7 +1350,7 @@ impl NetTaskHandle {
             net,
             state,
             wallet,
-            rpc_config_path,
+            l1_registry,
         };
         let (
             forward_mainchain_task_request_tx,

@@ -1,7 +1,6 @@
 use std::path::Path;
 
 use clap::Parser as _;
-use coinshift::parent_chain_rpc;
 use coinshift::types::ParentChainType;
 use mimalloc::MiMalloc;
 use tokio::{signal::ctrl_c, sync::oneshot};
@@ -199,22 +198,90 @@ fn run_egui_app(
     )
 }
 
-use coinshift::l1::config::default_path as l1_config_path;
+use coinshift::l1::config::{
+    L1Auth, L1ChainConfig, L1ConfigFile, default_path as l1_config_path,
+};
 
-fn write_l1_config_from_flags(
-    l1_signet: bool,
-    l1_bch_testnet4: bool,
-) -> anyhow::Result<()> {
+/// Parse one `--l1 <chain>=<url>` argument.
+///
+/// Credentials ride in the URL's userinfo, which keeps one flag per chain
+/// instead of the three that separate user and password fields would need.
+fn parse_l1_arg(arg: &str) -> anyhow::Result<(ParentChainType, L1ChainConfig)> {
+    let (chain, url) = arg.split_once('=').ok_or_else(|| {
+        anyhow::anyhow!("expected <chain>=<url>, got '{arg}'")
+    })?;
+    let chain: ParentChainType = chain.parse().map_err(|_| {
+        anyhow::anyhow!(
+            "unknown parent chain '{chain}', use one of: {}",
+            ParentChainType::all()
+                .iter()
+                .map(|chain| chain.to_string().to_lowercase())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    })?;
+    let mut parsed = url::Url::parse(url)
+        .map_err(|err| anyhow::anyhow!("invalid URL '{url}': {err}"))?;
+    let auth =
+        L1Auth::basic(parsed.username(), parsed.password().unwrap_or_default());
+    // Strip the credentials back out so they are not duplicated in the URL.
+    let _ = parsed.set_username("");
+    let _ = parsed.set_password(None);
+    Ok((
+        chain,
+        L1ChainConfig {
+            url: parsed.to_string(),
+            auth,
+            ..L1ChainConfig::basic("", "", "")
+        },
+    ))
+}
+
+/// Seed the L1 config with the endpoints that used to be built into the binary.
+///
+/// Until now the GUI silently fell back to two hardcoded endpoints for any
+/// chain the user had not configured, so Signet and BCH appeared to work with
+/// no configuration at all. That fallback is gone. Writing the same two entries
+/// once, when there is no config file yet, keeps those users working — and
+/// makes what was previously invisible into something they can see, edit, or
+/// delete.
+fn seed_legacy_l1_config() -> anyhow::Result<bool> {
+    const LEGACY_ENDPOINTS: [(ParentChainType, &str); 2] = [
+        (
+            ParentChainType::Signet,
+            "http://user:password@localhost:38332",
+        ),
+        (
+            ParentChainType::BCH,
+            "http://user:password@173.230.135.236:28332",
+        ),
+    ];
+
     let path = l1_config_path();
-    let mut chains = Vec::new();
-    if l1_signet {
-        chains.push(ParentChainType::Signet);
+    if path.exists() {
+        return Ok(false);
     }
-    if l1_bch_testnet4 {
-        chains.push(ParentChainType::BCH);
+    let mut config = L1ConfigFile::default();
+    for (chain, url) in LEGACY_ENDPOINTS {
+        let (_, entry) = parse_l1_arg(&format!("{chain}={url}"))?;
+        config.insert(chain, entry);
     }
-    parent_chain_rpc::write_l1_config_file(&path, &chains)?;
-    Ok(())
+    config.save(&path)?;
+    Ok(true)
+}
+
+/// Merge `--l1` arguments into the config file, leaving other chains alone.
+fn write_l1_config_from_flags(args: &[String]) -> anyhow::Result<Vec<String>> {
+    let path = l1_config_path();
+    let mut config = L1ConfigFile::load(&path)?;
+    let mut written = Vec::new();
+    for arg in args {
+        let (chain, chain_config) = parse_l1_arg(arg)?;
+        written.push(format!("{chain} -> {}", chain_config.url));
+        config.insert(chain, chain_config);
+    }
+    config.save(&path)?;
+    Ok(written)
 }
 
 fn main() -> anyhow::Result<()> {
@@ -223,36 +290,28 @@ fn main() -> anyhow::Result<()> {
     let cli = cli::Cli::parse();
 
     // Handle init subcommand: write L1 config and exit
-    if let Some(cli::AppSubcommand::Init {
-        l1_signet,
-        l1_bch_testnet4,
-    }) = &cli.command
-    {
-        let path = l1_config_path();
-        let mut chains = Vec::new();
-        if *l1_signet {
-            chains.push(ParentChainType::Signet);
-        }
-        if *l1_bch_testnet4 {
-            chains.push(ParentChainType::BCH);
-        }
-        parent_chain_rpc::write_l1_config_file(&path, &chains)?;
+    if let Some(cli::AppSubcommand::Init { l1 }) = &cli.command {
+        let written = write_l1_config_from_flags(l1)?;
         tracing_subscriber::fmt()
             .with_writer(std::io::stdout)
             .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
             .with_target(false)
             .init();
         tracing::info!(
-            "L1 config written to {} (Signet: {}, BCH Testnet4: {})",
-            path.display(),
-            l1_signet,
-            l1_bch_testnet4
+            "L1 config written to {}: {}",
+            l1_config_path().display(),
+            if written.is_empty() {
+                "no chains given".to_string()
+            } else {
+                written.join(", ")
+            }
         );
         return Ok(());
     }
 
-    if cli.run.l1_signet || cli.run.l1_bch_testnet4 {
-        write_l1_config_from_flags(cli.run.l1_signet, cli.run.l1_bch_testnet4)?;
+    let seeded_legacy_config = seed_legacy_l1_config()?;
+    if !cli.run.l1.is_empty() {
+        write_l1_config_from_flags(&cli.run.l1)?;
     }
     let config = cli.run.get_config()?;
     let (line_buffer, _rolling_log_guard) = set_tracing_subscriber(
@@ -260,6 +319,16 @@ fn main() -> anyhow::Result<()> {
         config.log_level,
         config.log_level_file,
     )?;
+
+    if seeded_legacy_config {
+        tracing::warn!(
+            path = %l1_config_path().display(),
+            "No L1 config found; wrote the endpoints that were previously built \
+             into the binary (Bitcoin Signet on localhost, Bitcoin Cash \
+             testnet4 on a third-party host). Review or delete them — Coinshift \
+             trusts whatever these endpoints say about L1 payments."
+        );
+    }
 
     let (app_tx, app_rx) = oneshot::channel::<anyhow::Error>();
 

@@ -544,21 +544,10 @@ impl SwapList {
         &self,
         parent_chain: ParentChainType,
     ) -> Option<L1ChainConfig> {
-        if let Some(config) = l1_config::load_chain_config(
-            &l1_config::default_path(),
-            parent_chain,
-        ) {
-            return Some(config);
-        }
-
-        // Fall back to the shipped predefined endpoint when the chain has no
-        // entry of its own. Note this differs from the block-connect path,
-        // which returns None instead — see risk 3 in
-        // docs/PARENT_CHAIN_ROADMAP.md.
-        coinshift::parent_chain_rpc::supported_l1_configs()
-            .into_iter()
-            .find(|(chain, _)| *chain == parent_chain)
-            .map(|(_, config)| config)
+        // No fallback to a shipped endpoint: an unconfigured chain is
+        // unconfigured. The GUI used to silently poll two hardcoded endpoints
+        // (one of them a third-party IP) for chains the user had never set up.
+        l1_config::load_chain_config(&l1_config::default_path(), parent_chain)
     }
 
     fn check_confirmations_dynamically(&mut self, app: &App) {

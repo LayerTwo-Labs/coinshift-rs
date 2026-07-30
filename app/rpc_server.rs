@@ -334,6 +334,17 @@ impl RpcServer for RpcServerImpl {
         required_confirmations: Option<u32>,
         fee_sats: u64,
     ) -> RpcResult<(SwapId, Txid)> {
+        // Refuse a swap on a chain that could never be observed: unconfigured,
+        // switched off, or serving the wrong network. A merely unreachable
+        // endpoint is allowed, since the node being briefly down says nothing
+        // about a swap that will be filled minutes from now.
+        let health = self.app.node.l1().health(parent_chain);
+        if !health.allows_swap_creation() {
+            return Err(custom_err(
+                coinshift::types::SwapError::ChainNotConfigured(parent_chain),
+            ));
+        }
+
         let accumulator =
             self.app.node.get_tip_accumulator().map_err(custom_err)?;
 

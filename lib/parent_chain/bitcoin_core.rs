@@ -286,33 +286,24 @@ impl BitcoinCoreClient {
 
 impl ParentChainClient for BitcoinCoreClient {
     fn identify(&self) -> Result<ChainIdentity, Error> {
-        let raw = self.get_blockchain_chain_name()?;
-        // `main` is reported by Bitcoin, Bitcoin Cash and Litecoin alike, so it
-        // cannot distinguish between them on its own. Phase 3 of
-        // docs/PARENT_CHAIN_ROADMAP.md adds genesis/checkpoint probing; until
-        // then a `main` node is taken at its configured word.
-        let chain = match raw.as_str() {
-            "main"
-                if matches!(
-                    self.chain,
-                    ParentChainType::BTC
-                        | ParentChainType::BCH
-                        | ParentChainType::LTC
-                ) =>
-            {
-                self.chain
-            }
-            "signet" => ParentChainType::Signet,
-            "regtest" => ParentChainType::Regtest,
-            "testnet4" | "test4" => ParentChainType::BCH,
-            _ => {
-                return Err(Error::ChainMismatch {
-                    expected: self.chain,
-                    chain: raw,
-                });
-            }
-        };
-        Ok(ChainIdentity { chain, raw })
+        let chain_name = self.get_blockchain_chain_name()?;
+        // A node that will not answer `getblockhash 0` is unusual but not by
+        // itself a reason to reject it; the caller then matches on the network
+        // name alone.
+        let genesis = self
+            .call::<String>("getblockhash", json!([0]))
+            .inspect_err(|err| {
+                tracing::debug!(
+                    url = %self.config.url,
+                    error = %err,
+                    "Node did not report a genesis hash"
+                );
+            })
+            .ok();
+        Ok(ChainIdentity {
+            chain_name,
+            genesis,
+        })
     }
 
     fn tip(&self) -> Result<u64, Error> {

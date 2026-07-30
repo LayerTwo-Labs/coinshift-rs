@@ -125,5 +125,5 @@ pub enum Error {
         existing_swap_id: SwapId,
     },
     #[error(transparent)]
-    ParentChainRpc(#[from] crate::parent_chain_rpc::Error),
+    ParentChainRpc(#[from] crate::parent_chain::Error),
 }

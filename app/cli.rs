@@ -98,15 +98,14 @@ impl clap::Args for DatadirArg {
 /// Optional subcommand: init writes L1 config and exits.
 #[derive(Clone, Debug, Subcommand)]
 pub(super) enum AppSubcommand {
-    /// Write L1 RPC config (Bitcoin Signet and/or Bitcoin Cash Testnet4) and exit.
-    /// Does not start the app. Use before first run or to update L1 config from CLI.
+    /// Write L1 RPC config and exit, without starting the app.
     Init {
-        /// Enable Bitcoin Signet (predefined: localhost:38332)
-        #[arg(long)]
-        l1_signet: bool,
-        /// Enable Bitcoin Cash Testnet4 (predefined: 173.230.135.236:28332)
-        #[arg(long)]
-        l1_bch_testnet4: bool,
+        /// Parent chain endpoint, as `<chain>=<url>`. Repeatable.
+        ///
+        /// Credentials go in the URL, e.g.
+        /// `--l1 signet=http://user:password@localhost:38332`.
+        #[arg(long = "l1", value_name = "CHAIN=URL")]
+        l1: Vec<String>,
     },
 }
 
@@ -160,12 +159,22 @@ pub(super) struct RunArgs {
     #[arg(default_value_t = DEFAULT_RPC_ADDR, long, short)]
     rpc_addr: SocketAddr,
 
-    /// Enable Bitcoin Signet in L1 config before start (predefined: localhost:38332)
+    /// Parent chain endpoint to write to the L1 config before start, as
+    /// `<chain>=<url>`. Repeatable.
+    ///
+    /// Credentials go in the URL, e.g.
+    /// `--l1 signet=http://user:password@localhost:38332`.
+    #[arg(long = "l1", value_name = "CHAIN=URL")]
+    pub(super) l1: Vec<String>,
+
+    /// Refuse to start if any configured parent chain is unreachable or is
+    /// serving the wrong network.
+    ///
+    /// Off by default: a parent chain being down pauses detection for that
+    /// chain only, and the node stays up. Turn this on for supervised
+    /// deployments that would rather fail fast.
     #[arg(long)]
-    pub(super) l1_signet: bool,
-    /// Enable Bitcoin Cash Testnet4 in L1 config before start (predefined: 173.230.135.236:28332)
-    #[arg(long)]
-    pub(super) l1_bch_testnet4: bool,
+    strict_l1_config: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -181,6 +190,7 @@ pub struct Config {
     pub net_addr: SocketAddr,
     pub network: Network,
     pub rpc_addr: SocketAddr,
+    pub strict_l1_config: bool,
 }
 
 impl RunArgs {
@@ -217,6 +227,7 @@ impl RunArgs {
             net_addr: self.net_addr,
             network: self.network,
             rpc_addr: self.rpc_addr,
+            strict_l1_config: self.strict_l1_config,
         })
     }
 }

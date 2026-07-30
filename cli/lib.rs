@@ -5,6 +5,7 @@ use http::HeaderMap;
 use jsonrpsee::{core::client::ClientT, http_client::HttpClientBuilder};
 
 use coinshift::l1::config::{self as l1_config, L1Auth, L1ChainConfig};
+use coinshift::parent_chain::client_for;
 use coinshift::types::{Address, ParentChainType, SwapId, Txid};
 use coinshift_app_rpc_api::RpcClient;
 use tracing_subscriber::{filter::Targets, layer::SubscriberExt as _};
@@ -418,20 +419,39 @@ where
             // Load strictly: silently defaulting on a parse error would discard
             // every other chain's entry on the next write.
             let mut config = l1_config::L1ConfigFile::load(&path)?;
-            config.insert(
-                parent_chain,
-                L1ChainConfig {
-                    url: url.clone(),
-                    auth: L1Auth::basic(user.clone(), password.clone()),
-                    ..config
-                        .get(parent_chain)
-                        .cloned()
-                        .unwrap_or_else(|| L1ChainConfig::basic("", "", ""))
+            let entry = L1ChainConfig {
+                url: url.clone(),
+                auth: L1Auth::basic(user.clone(), password.clone()),
+                ..config
+                    .get(parent_chain)
+                    .cloned()
+                    .unwrap_or_else(|| L1ChainConfig::basic("", "", ""))
+            };
+
+            // Check the endpoint before writing. A node serving the wrong
+            // network is a definite mistake and is refused; a node that is
+            // merely down is not, since configuring ahead of starting it is
+            // perfectly reasonable.
+            let note = match client_for(parent_chain, &entry).identify() {
+                Ok(identity) => match coinshift::l1::identity::verify(
+                    parent_chain,
+                    &identity,
+                    entry.expected_genesis,
+                ) {
+                    Ok(()) => format!(" (verified: {})", identity.chain_name),
+                    Err(mismatch) => anyhow::bail!(
+                        "refusing to save: {mismatch}. Nothing was written."
+                    ),
                 },
-            );
+                Err(err) => format!(
+                    " (warning: endpoint not reachable yet: {err}. Config saved anyway.)"
+                ),
+            };
+
+            config.insert(parent_chain, entry);
             config.save(&path)?;
             format!(
-                "L1 RPC config saved for {} at {}",
+                "L1 RPC config saved for {} at {}{note}",
                 parent_chain.coin_name(),
                 path.display()
             )

@@ -3,7 +3,6 @@ use std::sync::{Arc, Mutex};
 use coinshift::l1::config::{
     self as l1_config, L1Auth, L1ChainConfig, L1ConfigFile,
 };
-use coinshift::parent_chain_rpc;
 use coinshift::types::ParentChainType;
 use eframe::egui::{self, Button, Color32, ComboBox, RichText, TextEdit};
 use poll_promise::Promise;
@@ -29,13 +28,8 @@ pub struct L1Config {
 
 impl Default for L1Config {
     fn default() -> Self {
-        let supported = parent_chain_rpc::supported_l1_parent_chain_types();
-        let first = supported
-            .first()
-            .copied()
-            .unwrap_or(ParentChainType::Signet);
         Self {
-            selected_parent_chain: first,
+            selected_parent_chain: ParentChainType::Signet,
             rpc_url: String::new(),
             rpc_user: String::new(),
             rpc_password: String::new(),
@@ -62,27 +56,16 @@ impl L1Config {
                 self.rpc_user = config.auth.basic_user().to_string();
                 self.rpc_password = config.auth.basic_password().to_string();
             }
-            None => self.load_predefined_for_selected(),
+            None => self.clear_fields(),
         }
     }
 
-    /// Fill URL/user/password from the predefined config for the selected chain.
-    fn load_predefined_for_selected(&mut self) {
-        match parent_chain_rpc::supported_l1_configs()
-            .into_iter()
-            .find(|(chain, _)| *chain == self.selected_parent_chain)
-        {
-            Some((_, config)) => {
-                self.rpc_url = config.url;
-                self.rpc_user = config.auth.basic_user().to_string();
-                self.rpc_password = config.auth.basic_password().to_string();
-            }
-            None => {
-                self.rpc_url.clear();
-                self.rpc_user.clear();
-                self.rpc_password.clear();
-            }
-        }
+    /// Start from an empty form. There is no predefined endpoint to prefill any
+    /// more; the hint text carries the chain's conventional URL instead.
+    fn clear_fields(&mut self) {
+        self.rpc_url.clear();
+        self.rpc_user.clear();
+        self.rpc_password.clear();
     }
 
     /// Persist `self.configs`, logging rather than surfacing any write failure.
@@ -134,7 +117,14 @@ impl L1Config {
     }
 
     fn load_selected_chain_config(&mut self) {
-        self.load_predefined_for_selected();
+        match self.configs.get(self.selected_parent_chain) {
+            Some(config) => {
+                self.rpc_url = config.url.clone();
+                self.rpc_user = config.auth.basic_user().to_string();
+                self.rpc_password = config.auth.basic_password().to_string();
+            }
+            None => self.clear_fields(),
+        }
         // Reset connection status when switching chains
         *self.connection_status.lock().unwrap() = ConnectionStatus::Unknown;
         self.status_promise = None;
@@ -268,15 +258,14 @@ impl L1Config {
         ui.label("Each parent chain can have its own RPC configuration.");
         ui.add_space(10.0);
 
-        // Parent chain selection (only supported options)
+        // Parent chain selection
         ui.horizontal(|ui| {
             ui.label("Parent Chain:");
             let previous_chain = self.selected_parent_chain;
-            let supported = parent_chain_rpc::supported_l1_parent_chain_types();
             ComboBox::from_id_salt("l1_config_parent_chain")
                 .selected_text(self.selected_parent_chain.display_name())
                 .show_ui(ui, |ui| {
-                    for chain in supported {
+                    for chain in ParentChainType::all() {
                         ui.selectable_value(
                             &mut self.selected_parent_chain,
                             *chain,
@@ -317,8 +306,7 @@ impl L1Config {
 
         ui.horizontal(|ui| {
             ui.label("RPC URL:");
-            ui.add_enabled(
-                false,
+            ui.add(
                 TextEdit::singleline(&mut self.rpc_url)
                     .hint_text(
                         self.selected_parent_chain.default_rpc_url_hint(),
@@ -327,17 +315,19 @@ impl L1Config {
             );
         });
         ui.label(
-            RichText::new("Only predefined networks are supported. URL cannot be changed.")
-                .small()
-                .color(Color32::GRAY),
+            RichText::new(
+                "Coinshift trusts this endpoint's answers about L1 payments. \
+                 Point it only at a node you control or trust.",
+            )
+            .small()
+            .color(Color32::GRAY),
         );
 
         ui.add_space(5.0);
 
         ui.horizontal(|ui| {
             ui.label("RPC User:");
-            ui.add_enabled(
-                false,
+            ui.add(
                 TextEdit::singleline(&mut self.rpc_user)
                     .hint_text("rpcuser")
                     .desired_width(300.0),
@@ -348,8 +338,7 @@ impl L1Config {
 
         ui.horizontal(|ui| {
             ui.label("RPC Password:");
-            ui.add_enabled(
-                false,
+            ui.add(
                 TextEdit::singleline(&mut self.rpc_password)
                     .hint_text("rpcpassword")
                     .password(true)

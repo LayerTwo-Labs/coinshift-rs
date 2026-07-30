@@ -82,8 +82,11 @@ impl ParentChainClient for MockParentChainClient {
     fn identify(&self) -> Result<ChainIdentity, Error> {
         self.record();
         Ok(ChainIdentity {
-            chain: self.chain,
-            raw: "mock".to_string(),
+            chain_name: crate::l1::identity::accepted_network_names(self.chain)
+                [0]
+            .to_string(),
+            genesis: crate::l1::identity::expected_genesis(self.chain)
+                .map(|hash| hash.to_string()),
         })
     }
 

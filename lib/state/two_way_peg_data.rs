@@ -1465,7 +1465,8 @@ mod swap_detection_tests {
         let client = MockParentChainClient::new(CHAIN, behaviour);
         let counter = client.clone();
         let getter = move |_chain: ParentChainType| {
-            Some(Box::new(client.clone()) as Box<dyn ParentChainClient>)
+            Some(std::sync::Arc::new(client.clone())
+                as std::sync::Arc<dyn ParentChainClient>)
         };
         let mut rwtxn = env.write_txn().unwrap();
         process_coinshift_transactions(

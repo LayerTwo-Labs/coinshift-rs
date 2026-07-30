@@ -40,17 +40,6 @@ pub enum Error {
     InvalidResponse,
     #[error("Transaction not found")]
     TransactionNotFound,
-    /// Node's chain type does not match expected (e.g. expected Signet, got main)
-    #[error(
-        "Node chain mismatch: expected {expected:?}, node reported chain \"{chain}\""
-    )]
-    ChainMismatch {
-        expected: ParentChainType,
-        chain: String,
-    },
-    /// L1 config (url/credentials) is not one of the supported predefined configs
-    #[error("L1 config is not supported: only predefined networks are allowed")]
-    UnsupportedL1Config,
 }
 
 /// Everything the swap logic needs from a parent chain.
@@ -80,10 +69,12 @@ pub trait ParentChainClient: Send + Sync {
     ) -> Result<Option<L1Payment>, Error>;
 }
 
-/// Resolves the client to use for a parent chain, or `None` when that chain has
-/// no configuration and so cannot be observed.
+/// Resolves the client to use for a parent chain, or `None` when that chain
+/// cannot currently be observed — see [`crate::l1::L1Registry::verified_client`].
 pub type ClientGetter<'a> =
-    &'a dyn Fn(ParentChainType) -> Option<Box<dyn ParentChainClient>>;
+    &'a dyn Fn(
+        ParentChainType,
+    ) -> Option<std::sync::Arc<dyn ParentChainClient>>;
 
 /// Build the client for `chain`.
 ///
@@ -92,14 +83,14 @@ pub type ClientGetter<'a> =
 pub fn client_for(
     chain: ParentChainType,
     config: &L1ChainConfig,
-) -> Box<dyn ParentChainClient> {
+) -> std::sync::Arc<dyn ParentChainClient> {
     match chain {
         ParentChainType::BTC
         | ParentChainType::BCH
         | ParentChainType::LTC
         | ParentChainType::Signet
         | ParentChainType::Regtest => {
-            Box::new(BitcoinCoreClient::new(chain, config.clone()))
+            std::sync::Arc::new(BitcoinCoreClient::new(chain, config.clone()))
         }
     }
 }

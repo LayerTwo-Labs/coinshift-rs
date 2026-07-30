@@ -14,6 +14,7 @@ use tonic::transport::Channel;
 
 use crate::{
     archive::{self, Archive},
+    l1::{self, L1Registry},
     mempool::{self, MemPool},
     net::{self, Net, Peer},
     state::{self, State},
@@ -124,6 +125,9 @@ pub struct Node<MainchainTransport = Channel> {
     net: Net,
     net_task: NetTaskHandle,
     state: State,
+    /// Parent-chain clients and their health. Owned here so the RPC server, the
+    /// GUI and the block-connect path all read one source of truth.
+    l1_registry: Arc<L1Registry>,
     #[allow(dead_code)]
     wallet: Option<Arc<crate::wallet::Wallet>>,
 }
@@ -217,6 +221,12 @@ where
             config.bind_addr,
         )?;
         tracing::info!("Node::new: Net created");
+        // Reads the config file but performs no network I/O, so a parent chain
+        // being down cannot prevent the node from starting. Health is
+        // established by the background task spawned below.
+        let l1_registry =
+            Arc::new(L1Registry::new(config.l1_rpc_config_path.clone()));
+        let () = Self::spawn_l1_health_task(runtime, l1_registry.clone());
         tracing::info!("Node::new: Creating NetTaskHandle");
         let wallet_clone = config.wallet.clone();
         let net_task = NetTaskHandle::new(
@@ -230,7 +240,7 @@ where
             peer_info_rx,
             state.clone(),
             wallet_clone,
-            config.l1_rpc_config_path,
+            Some(l1_registry.clone()),
         );
         tracing::info!("Node::new: NetTaskHandle created");
         let cusf_mainchain_wallet = config
@@ -293,8 +303,43 @@ where
             net,
             net_task,
             state,
+            l1_registry,
             wallet: config.wallet,
         })
+    }
+
+    /// Keep every configured parent chain's health up to date.
+    ///
+    /// The client is synchronous, so each round runs on a blocking thread
+    /// rather than stalling the runtime. Failures are recorded as health, never
+    /// propagated: one parent chain being down must not affect the node or any
+    /// other chain.
+    fn spawn_l1_health_task(
+        runtime: &tokio::runtime::Runtime,
+        registry: Arc<L1Registry>,
+    ) {
+        let _guard = runtime.enter();
+        tokio::spawn(async move {
+            loop {
+                let registry = registry.clone();
+                let probe = tokio::task::spawn_blocking(move || {
+                    // Pick up config edits before probing, so a corrected
+                    // endpoint recovers without a restart.
+                    registry.reload();
+                    registry.probe_all();
+                })
+                .await;
+                if let Err(err) = probe {
+                    tracing::warn!(%err, "L1 health probe round failed");
+                }
+                tokio::time::sleep(l1::registry::PROBE_INTERVAL).await;
+            }
+        });
+    }
+
+    /// Parent-chain clients and their health.
+    pub fn l1(&self) -> &Arc<L1Registry> {
+        &self.l1_registry
     }
 
     /// Record that we created this swap (pending in mempool). Only the creator can cancel it.

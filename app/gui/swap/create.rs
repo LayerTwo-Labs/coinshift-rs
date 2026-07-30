@@ -1,4 +1,3 @@
-use coinshift::parent_chain_rpc;
 use coinshift::types::{Address, ParentChainType};
 use eframe::egui::{self, Button, Color32, ComboBox, RichText, TextEdit};
 
@@ -18,13 +17,8 @@ pub struct CreateSwap {
 
 impl Default for CreateSwap {
     fn default() -> Self {
-        let supported = parent_chain_rpc::supported_l1_parent_chain_types();
-        let first = supported
-            .first()
-            .copied()
-            .unwrap_or(ParentChainType::Signet);
         Self {
-            parent_chain: first,
+            parent_chain: ParentChainType::Signet,
             l1_recipient_address: String::new(),
             l1_amount: String::new(),
             l2_recipient: None,
@@ -53,11 +47,10 @@ impl CreateSwap {
 
         ui.horizontal(|ui| {
             ui.label("Parent chain:");
-            let supported = parent_chain_rpc::supported_l1_parent_chain_types();
             ComboBox::from_id_salt("parent_chain")
                 .selected_text(self.parent_chain.display_name())
                 .show_ui(ui, |ui| {
-                    for chain in supported {
+                    for chain in ParentChainType::all() {
                         ui.selectable_value(
                             &mut self.parent_chain,
                             *chain,

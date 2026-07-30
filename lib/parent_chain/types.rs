@@ -5,7 +5,7 @@
 //! whatever parent chain it is watching. The swap logic only ever needs to know:
 //! *did address A receive amount N, how final is it, and how old is it?*
 
-use crate::types::{ParentChainType, Swap, SwapTxId};
+use crate::types::{Swap, SwapTxId};
 
 /// What a swap is looking for on its parent chain.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -77,10 +77,17 @@ impl L1Payment {
     }
 }
 
-/// Which chain an endpoint turned out to be serving.
+/// What an endpoint says about the network it is serving.
+///
+/// This is **evidence, not a verdict**: the adapter reports what the node
+/// claims, and `l1::identity` decides whether that is acceptable for the chain
+/// the operator configured. Keeping the two apart matters because the evidence
+/// is often ambiguous — Bitcoin, Bitcoin Cash and Litecoin all call their
+/// mainnet `main`, and Bitcoin Cash shares Bitcoin's genesis block.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ChainIdentity {
-    pub chain: ParentChainType,
-    /// The raw identifier the node reported, for error messages.
-    pub raw: String,
+    /// The node's own name for its network, e.g. `main`, `signet`, `test4`.
+    pub chain_name: String,
+    /// Genesis block hash as the node reports it, when it can.
+    pub genesis: Option<String>,
 }
