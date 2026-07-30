@@ -74,6 +74,8 @@ features = ["quanta", "std"]
 
 [features]
 clap = ["dep:clap"]
+# Exposes parent_chain::mock to downstream test binaries (integration_tests).
+test-utils = []
 
 [dev-dependencies]
 temp-dir = "0.2"

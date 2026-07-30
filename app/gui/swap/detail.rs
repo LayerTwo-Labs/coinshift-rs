@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use coinshift::parent_chain_rpc::ParentChainRpcClient;
+use coinshift::parent_chain::{PaymentQuery, client_for};
 use coinshift::types::{Address, Swap, SwapId, SwapState, SwapTxId};
 use eframe::egui::{self, Button, ScrollArea};
 
@@ -777,20 +777,27 @@ impl SwapDetail {
         if let Some(rpc_config) = list.load_rpc_config(swap.parent_chain) {
             self.fetching_confirmations = true;
             let txid_hex = self.l1_txid_input.clone();
-            let txid_for_rpc = SwapTxId::from_hex(&txid_hex)
-                .map(|t| t.to_hex())
-                .or_else(|_| {
-                    SwapTxId::from_hex_rpc(&txid_hex).map(|t| t.to_hex())
-                })
-                .unwrap_or(txid_hex);
+            let Ok(l1_txid) =
+                SwapTxId::parse_for_chain(swap.parent_chain, &txid_hex)
+                    .or_else(|_| SwapTxId::from_hex_rpc(&txid_hex))
+            else {
+                self.fetching_confirmations = false;
+                return;
+            };
 
-            let client = ParentChainRpcClient::new(rpc_config);
-            match client.get_transaction_confirmations(&txid_for_rpc) {
-                Ok(confirmations) => {
+            let client = client_for(swap.parent_chain, &rpc_config);
+            match client.get_payment(&l1_txid, &PaymentQuery::for_swap(swap)) {
+                Ok(Some(payment)) => {
                     tracing::info!(
                         swap_id = %swap.id,
-                        confirmations = %confirmations,
+                        confirmations = %payment.confirmations,
                         "Fetched confirmations"
+                    );
+                }
+                Ok(None) => {
+                    tracing::warn!(
+                        swap_id = %swap.id,
+                        "L1 transaction not found on the parent chain"
                     );
                 }
                 Err(err) => {
@@ -851,46 +858,27 @@ impl SwapDetail {
             }
         };
 
-        let l1_txid_hex = l1_txid.to_hex();
-
-        // Fetch and validate from RPC
+        // Fetch and validate from RPC. The adapter already decides whether the
+        // transaction pays this swap's address its amount, so the address and
+        // amount matching that used to be duplicated here is gone.
         let confirmations = if let Some(rpc_config) =
             list.load_rpc_config(swap.parent_chain)
         {
-            let client = ParentChainRpcClient::new(rpc_config);
-            match client.get_transaction(&l1_txid_hex) {
-                Ok(tx_info) => {
-                    let conf = tx_info.confirmations;
-
-                    // Validate outputs
-                    let found = tx_info.vout.iter().any(|vout| {
-                        let sats = (vout.value * 100_000_000.0) as u64;
-                        let addr_match = vout
-                            .script_pub_key
-                            .address
-                            .as_ref()
-                            .map(|a| a == &swap.l1_recipient_address)
-                            .unwrap_or(false)
-                            || vout
-                                .script_pub_key
-                                .addresses
-                                .as_ref()
-                                .map(|addrs| {
-                                    addrs.contains(&swap.l1_recipient_address)
-                                })
-                                .unwrap_or(false);
-                        addr_match && sats == swap.l1_amount.to_sat()
-                    });
-
-                    if !found {
-                        self.claim_error = Some(
-                            "L1 tx doesn't match expected recipient/amount"
-                                .into(),
-                        );
-                        return;
-                    }
-
-                    conf
+            let client = client_for(swap.parent_chain, &rpc_config);
+            match client.get_payment(&l1_txid, &PaymentQuery::for_swap(swap)) {
+                Ok(Some(payment)) if payment.matches_query => {
+                    payment.confirmations
+                }
+                Ok(Some(_)) => {
+                    self.claim_error = Some(
+                        "L1 tx doesn't match expected recipient/amount".into(),
+                    );
+                    return;
+                }
+                Ok(None) => {
+                    self.claim_error =
+                        Some("L1 tx not found on the parent chain".into());
+                    return;
                 }
                 Err(err) => {
                     self.claim_error =

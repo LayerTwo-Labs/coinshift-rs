@@ -8,6 +8,7 @@ pub mod mempool;
 pub mod miner;
 pub mod net;
 pub mod node;
+pub mod parent_chain;
 pub mod parent_chain_rpc;
 pub mod state;
 pub mod types;

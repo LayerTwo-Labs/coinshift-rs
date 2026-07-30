@@ -365,7 +365,6 @@ impl App {
         node: Arc<Node>,
     ) -> Result<(), Error> {
         use coinshift::l1::config as l1_config;
-        use coinshift::parent_chain_rpc::ParentChainRpcClient;
         use coinshift::types::{ParentChainType, SwapState, SwapTxId};
         use std::time::Duration;
 
@@ -442,13 +441,17 @@ impl App {
             for swap in swaps_to_check {
                 // Get RPC config for this swap's parent chain
                 if let Some(rpc_config) = load_rpc_config(swap.parent_chain) {
-                    // L1 txid in canonical order for parent chain getrawtransaction
-                    let l1_txid_hex = swap.l1_txid.to_hex();
-
-                    // Fetch current confirmations from RPC
-                    let client = ParentChainRpcClient::new(rpc_config);
-                    match client.get_transaction_confirmations(&l1_txid_hex) {
-                        Ok(new_confirmations) => {
+                    let client = coinshift::parent_chain::client_for(
+                        swap.parent_chain,
+                        &rpc_config,
+                    );
+                    let query =
+                        coinshift::parent_chain::PaymentQuery::for_swap(swap);
+                    match client
+                        .get_payment(&swap.l1_txid, &query)
+                        .map(|payment| payment.map(|p| p.confirmations))
+                    {
+                        Ok(Some(new_confirmations)) => {
                             // Get current confirmations from swap state
                             let current_confirmations = match swap.state {
                                 SwapState::WaitingConfirmations(current, _) => {
@@ -516,10 +519,17 @@ impl App {
                                 }
                             }
                         }
+                        Ok(None) => {
+                            tracing::debug!(
+                                swap_id = %swap.id,
+                                l1_txid = %swap.l1_txid.to_hex(),
+                                "L1 transaction not found on the parent chain"
+                            );
+                        }
                         Err(err) => {
                             tracing::debug!(
                                 swap_id = %swap.id,
-                                l1_txid = %l1_txid_hex,
+                                l1_txid = %swap.l1_txid.to_hex(),
                                 error = %err,
                                 "Failed to fetch confirmations from RPC (this is normal if RPC is unavailable)"
                             );

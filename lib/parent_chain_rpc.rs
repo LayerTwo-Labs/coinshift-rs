@@ -1,429 +1,29 @@
-//! Parent Chain RPC client for querying L1 blockchain transactions
+//! L1 config allowlist and startup validation.
 //!
-//! This module provides a generic RPC client that works with any Bitcoin-compatible
-//! blockchain (Bitcoin, Bitcoin Cash, Litecoin, etc.) that implements the standard
-//! Bitcoin Core JSON-RPC interface.
+//! Transitional module. The RPC client that used to live here now sits behind
+//! [`crate::parent_chain::ParentChainClient`]; what remains is the closed
+//! allowlist of predefined endpoints and the startup check built on it, both of
+//! which Phase 3 of `docs/PARENT_CHAIN_ROADMAP.md` replaces with chain-identity
+//! probing and a per-chain health registry.
+//!
+//! The client is re-exported under its old name so existing call sites keep
+//! working for one release.
 
-use serde::{Deserialize, Serialize};
-use serde_json::json;
 use std::path::Path;
-use thiserror::Error;
 
 use crate::{
-    l1::config::{L1Auth, L1ChainConfig, L1ConfigFile},
+    l1::config::{L1ChainConfig, L1ConfigFile},
+    parent_chain::BitcoinCoreClient,
     types::ParentChainType,
 };
 
-#[derive(Debug, Error)]
-pub enum Error {
-    #[error("HTTP request error: {0}")]
-    Http(#[from] reqwest::Error),
-    #[error("JSON parsing error: {0}")]
-    Json(#[from] serde_json::Error),
-    #[error("RPC error: {0}")]
-    Rpc(String),
-    #[error("Invalid response format")]
-    InvalidResponse,
-    #[error("Transaction not found")]
-    TransactionNotFound,
-    /// Node's chain type does not match expected (e.g. expected Signet, got main)
-    #[error(
-        "Node chain mismatch: expected {expected:?}, node reported chain \"{chain}\""
-    )]
-    ChainMismatch {
-        expected: ParentChainType,
-        chain: String,
-    },
-    /// L1 config (url/user/password) is not one of the supported predefined configs
-    #[error("L1 config is not supported: only predefined networks are allowed")]
-    UnsupportedL1Config,
-}
+pub use crate::parent_chain::{
+    Error,
+    bitcoin_core::{ScriptPubKey, TransactionInfo, Vin, Vout},
+};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct RpcResponse<T> {
-    result: Option<T>,
-    error: Option<RpcError>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct RpcError {
-    code: i32,
-    message: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TransactionInfo {
-    pub txid: String,
-    pub confirmations: u32,
-    pub blockheight: Option<u32>,
-    pub vout: Vec<Vout>,
-    pub vin: Vec<Vin>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Vout {
-    pub value: f64,
-    #[serde(rename = "scriptPubKey")]
-    pub script_pub_key: ScriptPubKey,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ScriptPubKey {
-    pub address: Option<String>,
-    pub addresses: Option<Vec<String>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Vin {
-    pub txid: Option<String>,
-    pub vout: Option<u32>,
-}
-
-/// RPC client for communicating with parent chain nodes (Bitcoin, Bitcoin Cash, Litecoin, etc.)
-///
-/// This client uses the standard Bitcoin Core JSON-RPC interface, which is compatible
-/// with most Bitcoin-derivative blockchains.
-pub struct ParentChainRpcClient {
-    config: L1ChainConfig,
-    client: reqwest::blocking::Client,
-}
-
-/// Apply the configured authentication scheme to an outgoing request.
-///
-/// Kept here rather than on [`L1Auth`] so the config module stays free of any
-/// particular HTTP client.
-fn apply_auth(
-    builder: reqwest::blocking::RequestBuilder,
-    auth: &L1Auth,
-) -> reqwest::blocking::RequestBuilder {
-    match auth {
-        L1Auth::None => builder,
-        L1Auth::Basic { user, password } => {
-            builder.basic_auth(user, Some(password))
-        }
-        L1Auth::Bearer { token } => builder.bearer_auth(token),
-        L1Auth::Header { name, value } => builder.header(name, value),
-        L1Auth::QueryParam { name, value } => builder.query(&[(name, value)]),
-    }
-}
-
-impl ParentChainRpcClient {
-    pub fn new(config: L1ChainConfig) -> Self {
-        let client = reqwest::blocking::Client::builder()
-            .timeout(config.timeout())
-            .build()
-            .expect("Failed to create HTTP client");
-
-        Self { config, client }
-    }
-
-    fn call<T: for<'de> Deserialize<'de>>(
-        &self,
-        method: &str,
-        params: serde_json::Value,
-    ) -> Result<T, Error> {
-        // Use jsonrpc "1.0" for compatibility with nodes that accept curl-style requests (e.g. BCH)
-        let request = json!({
-            "jsonrpc": "1.0",
-            "id": "coinshift",
-            "method": method,
-            "params": params
-        });
-
-        tracing::debug!(
-            url = %self.config.url,
-            method = %method,
-            params = %serde_json::to_string(&params).unwrap_or_else(|_| "invalid json".to_string()),
-            "Making RPC call"
-        );
-
-        let request_builder = apply_auth(
-            self.client.post(&self.config.url).json(&request),
-            &self.config.auth,
-        );
-
-        let response = match request_builder.send() {
-            Ok(resp) => resp,
-            Err(e) => {
-                tracing::error!(
-                    url = %self.config.url,
-                    method = %method,
-                    error = %e,
-                    "Failed to send RPC request"
-                );
-                return Err(Error::Http(e));
-            }
-        };
-
-        let status = response.status();
-        tracing::debug!(
-            url = %self.config.url,
-            method = %method,
-            status = %status,
-            "Received RPC response"
-        );
-
-        // Get response headers
-        let content_type = response
-            .headers()
-            .get("content-type")
-            .and_then(|h| h.to_str().ok())
-            .unwrap_or("unknown");
-        tracing::debug!(
-            url = %self.config.url,
-            method = %method,
-            content_type = %content_type,
-            "Response headers"
-        );
-
-        // Read the raw response body for debugging
-        let response_text = match response.text() {
-            Ok(text) => text,
-            Err(e) => {
-                tracing::error!(
-                    url = %self.config.url,
-                    method = %method,
-                    status = %status,
-                    error = %e,
-                    "Failed to read response body as text"
-                );
-                return Err(Error::Http(e));
-            }
-        };
-
-        tracing::debug!(
-            url = %self.config.url,
-            method = %method,
-            status = %status,
-            response_body = %response_text,
-            "Raw RPC response body"
-        );
-
-        // Try to parse as JSON
-        let json: RpcResponse<T> = match serde_json::from_str(&response_text) {
-            Ok(parsed) => parsed,
-            Err(e) => {
-                tracing::error!(
-                    url = %self.config.url,
-                    method = %method,
-                    status = %status,
-                    response_body = %response_text,
-                    error = %e,
-                    "Failed to parse response as JSON"
-                );
-                return Err(Error::Json(e));
-            }
-        };
-
-        if let Some(error) = json.error {
-            tracing::error!(
-                url = %self.config.url,
-                method = %method,
-                rpc_error_code = %error.code,
-                rpc_error_message = %error.message,
-                "RPC returned error"
-            );
-            return Err(Error::Rpc(format!(
-                "{}: {}",
-                error.code, error.message
-            )));
-        }
-
-        json.result.ok_or(Error::InvalidResponse)
-    }
-
-    /// Get transaction by ID
-    pub fn get_transaction(
-        &self,
-        txid: &str,
-    ) -> Result<TransactionInfo, Error> {
-        tracing::debug!(
-            txid = %txid,
-            "Fetching transaction from RPC"
-        );
-        let result = self
-            .call::<TransactionInfo>("getrawtransaction", json!([txid, true]));
-        match &result {
-            Ok(tx_info) => {
-                tracing::debug!(
-                    txid = %txid,
-                    confirmations = %tx_info.confirmations,
-                    blockheight = ?tx_info.blockheight,
-                    "Successfully fetched transaction"
-                );
-            }
-            Err(e) => {
-                tracing::error!(
-                    txid = %txid,
-                    error = %e,
-                    error_debug = ?e,
-                    "Failed to fetch transaction"
-                );
-            }
-        }
-        result
-    }
-
-    /// Get confirmations for a transaction by ID
-    pub fn get_transaction_confirmations(
-        &self,
-        txid: &str,
-    ) -> Result<u32, Error> {
-        let tx = self.get_transaction(txid)?;
-        Ok(tx.confirmations)
-    }
-
-    /// Get transactions for an address
-    /// Returns list of transaction IDs
-    pub fn list_transactions(
-        &self,
-        address: &str,
-    ) -> Result<Vec<String>, Error> {
-        // Use listunspent to find transactions (works for most cases)
-        // For more comprehensive results, we'd need to use a block explorer API
-        // or maintain our own index
-        let unspent: Vec<serde_json::Value> =
-            self.call("listunspent", json!([0, 999999, [address]]))?;
-
-        let mut txids = std::collections::HashSet::new();
-        for utxo in unspent {
-            if let Some(txid) = utxo.get("txid").and_then(|v| v.as_str()) {
-                txids.insert(txid.to_string());
-            }
-        }
-
-        // Also try to get transactions from getreceivedbyaddress (if available)
-        // This is a fallback, but not all nodes support it
-        // Note: We don't use the result, but calling it may help populate the node's internal index
-        let _result: Result<f64, _> =
-            self.call("getreceivedbyaddress", json!([address, 0]));
-
-        Ok(txids.into_iter().collect())
-    }
-
-    /// Get current block height
-    pub fn get_block_height(&self) -> Result<u32, Error> {
-        let info: serde_json::Value =
-            self.call("getblockchaininfo", json!([]))?;
-        let blocks = info
-            .get("blocks")
-            .and_then(|v| v.as_u64())
-            .ok_or(Error::InvalidResponse)?;
-        Ok(blocks as u32)
-    }
-
-    /// Get the chain name from getblockchaininfo (e.g. "signet", "main", "testnet4", "test4").
-    /// Used to detect if the node is Bitcoin Signet or Bitcoin Cash testnet4.
-    /// Some BCH nodes report "test4" instead of "testnet4".
-    pub fn get_blockchain_chain_name(&self) -> Result<String, Error> {
-        let info: serde_json::Value =
-            self.call("getblockchaininfo", json!([]))?;
-        let chain = info
-            .get("chain")
-            .and_then(|v| v.as_str())
-            .ok_or(Error::InvalidResponse)?;
-        Ok(chain.to_lowercase())
-    }
-
-    /// Find transactions to an address matching a specific amount.
-    /// Returns (sender_address, tx_info).
-    /// Only includes transactions that are in a block (blockheight is Some).
-    pub fn find_transactions_by_address_and_amount(
-        &self,
-        address: &str,
-        amount_sats: u64,
-    ) -> Result<Vec<(String, TransactionInfo)>, Error> {
-        // Get all transactions for this address
-        let txids = self.list_transactions(address)?;
-        let mut matches = Vec::new();
-        let _current_height = self.get_block_height()?;
-
-        for txid in txids {
-            match self.get_transaction(&txid) {
-                Ok(tx) => {
-                    // Check if any output matches the address and amount
-                    for vout in &tx.vout {
-                        let vout_value_sats =
-                            (vout.value * 100_000_000.0) as u64;
-                        let matches_address = vout
-                            .script_pub_key
-                            .address
-                            .as_ref()
-                            .map(|addr| addr == address)
-                            .unwrap_or(false)
-                            || vout
-                                .script_pub_key
-                                .addresses
-                                .as_ref()
-                                .map(|addrs| {
-                                    addrs.contains(&address.to_string())
-                                })
-                                .unwrap_or(false);
-
-                        if matches_address && vout_value_sats == amount_sats {
-                            // Extract sender address from first input
-                            let sender_address = if let Some(vin) =
-                                tx.vin.first()
-                            {
-                                if let (Some(input_txid), Some(input_vout)) =
-                                    (&vin.txid, &vin.vout)
-                                {
-                                    // Get the input transaction to find sender
-                                    match self.get_transaction(input_txid) {
-                                        Ok(input_tx) => {
-                                            if let Some(input_vout_data) =
-                                                input_tx
-                                                    .vout
-                                                    .get(*input_vout as usize)
-                                            {
-                                                input_vout_data
-                                                    .script_pub_key
-                                                    .address
-                                                    .clone()
-                                                    .or_else(|| {
-                                                        input_vout_data
-                                                            .script_pub_key
-                                                            .addresses
-                                                            .as_ref()
-                                                            .and_then(|addrs| {
-                                                                addrs
-                                                                    .first()
-                                                                    .cloned()
-                                                            })
-                                                    })
-                                            } else {
-                                                None
-                                            }
-                                        }
-                                        Err(_) => None,
-                                    }
-                                } else {
-                                    None
-                                }
-                            } else {
-                                None
-                            };
-                            let sender = sender_address
-                                .unwrap_or_else(|| "unknown".to_string());
-                            matches.push((sender, tx));
-                            break; // Found a match, no need to check other outputs
-                        }
-                    }
-                }
-                Err(Error::TransactionNotFound) => {
-                    // Transaction might have been spent, skip it
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!("Error getting transaction {}: {}", txid, e);
-                    continue;
-                }
-            }
-        }
-
-        Ok(matches)
-    }
-}
+/// The Bitcoin Core client, under its historical name.
+pub type ParentChainRpcClient = BitcoinCoreClient;
 
 /// Predefined L1 configs that Coinshift supports. Users may only use these;
 /// adding new nodes requires a new Coinshift release.
@@ -456,7 +56,10 @@ pub fn supported_l1_parent_chain_types() -> &'static [ParentChainType] {
 pub fn detect_chain_type(
     config: &L1ChainConfig,
 ) -> Result<(ParentChainType, String), Error> {
-    let client = ParentChainRpcClient::new(config.clone());
+    // The chain passed here only selects decimals and identity handling, neither
+    // of which affects reading the raw chain name.
+    let client =
+        BitcoinCoreClient::new(ParentChainType::Signet, config.clone());
     let chain = client.get_blockchain_chain_name()?;
     let detected = match chain.as_str() {
         "signet" => ParentChainType::Signet,
@@ -490,9 +93,9 @@ pub fn is_supported_l1_config(
 }
 
 /// Write or merge L1 config file with predefined configs for the given chains.
-/// Creates the parent directory if needed. Merges with existing file: keeps
-/// existing supported configs for chains not in `chains_to_enable`, and
-/// adds/overwrites with predefined config for each chain in `chains_to_enable`.
+/// Merges with the existing file: keeps existing supported configs for chains
+/// not in `chains_to_enable`, and adds/overwrites with the predefined config for
+/// each chain in `chains_to_enable`.
 pub fn write_l1_config_file(
     path: &Path,
     chains_to_enable: &[ParentChainType],
@@ -547,6 +150,7 @@ pub fn load_rpc_config_from_path(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::l1::config::L1Auth;
 
     #[test]
     fn load_rpc_config_from_path_missing_file_returns_none() {

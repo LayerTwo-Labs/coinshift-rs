@@ -4,7 +4,7 @@ use std::{
 };
 
 use coinshift::l1::config::{self as l1_config, L1ChainConfig};
-use coinshift::parent_chain_rpc::ParentChainRpcClient;
+use coinshift::parent_chain::{PaymentQuery, client_for};
 use coinshift::types::{ParentChainType, Swap, SwapId, SwapState, SwapTxId};
 use eframe::egui::{self, Button, ScrollArea};
 
@@ -607,19 +607,26 @@ impl SwapList {
             .iter()
             .filter_map(|swap| {
                 self.load_rpc_config(swap.parent_chain).map(|rpc_config| {
-                    (swap.id, rpc_config, swap.l1_txid.to_hex())
+                    (
+                        swap.id,
+                        swap.parent_chain,
+                        rpc_config,
+                        swap.l1_txid.clone(),
+                        PaymentQuery::for_swap(swap),
+                    )
                 })
             })
             .collect();
 
         let results: Vec<(SwapId, u32)> = std::thread::spawn(move || {
             work.into_iter()
-                .filter_map(|(swap_id, rpc_config, l1_txid_hex)| {
-                    let client = ParentChainRpcClient::new(rpc_config);
+                .filter_map(|(swap_id, chain, rpc_config, l1_txid, query)| {
+                    let client = client_for(chain, &rpc_config);
                     client
-                        .get_transaction_confirmations(&l1_txid_hex)
+                        .get_payment(&l1_txid, &query)
                         .ok()
-                        .map(|c| (swap_id, c))
+                        .flatten()
+                        .map(|payment| (swap_id, payment.confirmations))
                 })
                 .collect()
         })

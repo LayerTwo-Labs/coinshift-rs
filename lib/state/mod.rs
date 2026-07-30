@@ -1999,18 +1999,14 @@ impl State {
         &self,
         rwtxn: &mut RwTxn,
         two_way_peg_data: &TwoWayPegData,
-        rpc_config_getter: Option<
-            &dyn Fn(
-                ParentChainType,
-            ) -> Option<crate::l1::config::L1ChainConfig>,
-        >,
+        client_getter: Option<crate::parent_chain::ClientGetter<'_>>,
         wallet: Option<&crate::wallet::Wallet>,
     ) -> Result<(), Error> {
         two_way_peg_data::connect(
             self,
             rwtxn,
             two_way_peg_data,
-            rpc_config_getter,
+            client_getter,
             wallet,
         )
     }

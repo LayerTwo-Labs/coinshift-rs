@@ -27,13 +27,13 @@ use tokio_stream::StreamNotifyClose;
 use super::mainchain_task::{self, MainchainTaskHandle};
 use crate::{
     archive::{self, Archive},
-    l1::config::L1ChainConfig,
     mempool::{self, MemPool},
     net::{
         self, Net, PeerConnectionError, PeerConnectionInfo,
         PeerConnectionMailboxError, PeerConnectionMessage, PeerInfoRx,
         PeerRequest, PeerResponse, PeerStateId, peer_message,
     },
+    parent_chain::{ClientGetter, ParentChainClient},
     state::{self, State},
     types::{
         BmmResult, Body, Header, MerkleRoot, ParentChainType, Tip,
@@ -94,9 +94,7 @@ fn connect_tip_(
     header: &Header,
     body: &Body,
     two_way_peg_data: &mainchain::TwoWayPegData,
-    rpc_config_getter: Option<
-        &dyn Fn(ParentChainType) -> Option<L1ChainConfig>,
-    >,
+    client_getter: Option<ClientGetter<'_>>,
     wallet: Option<&crate::wallet::Wallet>,
 ) -> Result<(), Error> {
     let block_hash = header.hash();
@@ -121,7 +119,7 @@ fn connect_tip_(
     let () = state.connect_two_way_peg_data(
         rwtxn,
         two_way_peg_data,
-        rpc_config_getter,
+        client_getter,
         wallet,
     )?;
     let accumulator = state.get_accumulator(rwtxn)?;
@@ -417,18 +415,21 @@ fn reorg_to_tip(
             }
             two_way_peg_data
         };
-        let rpc_config_getter: Option<
-            Box<dyn Fn(ParentChainType) -> Option<L1ChainConfig>>,
-        > = rpc_config_path.map(|path| {
-            let p = path.clone();
-            Box::new(move |chain: ParentChainType| {
-                crate::parent_chain_rpc::load_rpc_config_from_path(&p, chain)
-            })
-                as Box<dyn Fn(ParentChainType) -> Option<L1ChainConfig>>
-        });
-        let rpc_config_getter: Option<
-            &dyn Fn(ParentChainType) -> Option<L1ChainConfig>,
-        > = rpc_config_getter.as_ref().map(|b| b.as_ref());
+        type BoxedClientGetter =
+            Box<dyn Fn(ParentChainType) -> Option<Box<dyn ParentChainClient>>>;
+        let client_getter: Option<BoxedClientGetter> =
+            rpc_config_path.map(|path| {
+                let path = path.clone();
+                Box::new(move |chain: ParentChainType| {
+                    crate::l1::config::load_chain_config(&path, chain).map(
+                        |config| {
+                            crate::parent_chain::client_for(chain, &config)
+                        },
+                    )
+                }) as BoxedClientGetter
+            });
+        let client_getter: Option<ClientGetter<'_>> =
+            client_getter.as_ref().map(|getter| getter.as_ref());
         let () = connect_tip_(
             &mut rwtxn,
             archive,
@@ -437,7 +438,7 @@ fn reorg_to_tip(
             &header,
             &body,
             &two_way_peg_data,
-            rpc_config_getter,
+            client_getter,
             wallet,
         )?;
         let new_tip_hash = state.try_get_tip(&rwtxn)?.unwrap();

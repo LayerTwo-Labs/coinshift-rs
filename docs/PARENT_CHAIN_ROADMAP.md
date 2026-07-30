@@ -543,6 +543,18 @@ the (a)/(b)/(c) deployment shapes from §2.5 and a fails-vs-degrades table.
    Replace the literal with a constructed address before that lands — see
    `validate_l1_address_checks_network_where_it_can` in `lib/types/swap.rs` for
    the pattern.
+10. **The two L1-txid ingestion paths store opposite byte orders.** Automatic
+    detection stores the node's txid via `SwapTxId::from_hex_rpc` (which
+    reverses), while the manual `update_swap_l1_txid` RPC stores user input via
+    `SwapTxId::from_hex` (which does not). The same transaction therefore has
+    two different representations depending on how it was recorded, which means
+    the `swaps_by_l1_txid` uniqueness index can be bypassed, and a
+    `getrawtransaction` lookup succeeds for one and fails for the other. The
+    `l1_txid_uniqueness` integration test only exercises the manual path, so it
+    cannot catch this. **Not fixed here**: picking a canonical order rewrites
+    stored swap records, so it needs its own change with a migration. Until
+    then, `BitcoinCoreClient::get_payment` deliberately keeps sending
+    `to_hex()`, matching what the existing pollers already do.
 
 ---
 
@@ -615,6 +627,48 @@ Behaviour changes worth a release note:
 Still deliberately unchanged: the startup trap (Phase 3), the four duplicated
 pollers (Phase 4), and the GUI's hardcoded predefined-config fallback in
 `app/gui/swap/list.rs` (risk 3).
+
+### 3.5 Phase 2 — implementation notes (done)
+
+`lib/parent_chain/` holds the trait, the chain-neutral payment types, the
+Bitcoin Core adapter and the first L1 mock in the repo. `lib/parent_chain_rpc.rs`
+is now only the allowlist plus startup validation, re-exporting the client under
+its old name so call sites did not all have to churn at once.
+
+`L1Payment` replaces `TransactionInfo`/`Vout`/`ScriptPubKey`/`Vin` at the swap
+boundary, and carries **`confirmations` and `age` as separate fields**. They are
+the same quantity for Bitcoin-family chains, which is why the old code could use
+one value for both the finality gate and the `max_l1_tx_age` cutoff, but they are
+unrelated for a chain whose finality is a commitment level. The Bitcoin adapter
+sets `age == confirmations`, so behaviour is unchanged.
+
+**Deviation: the trait is synchronous, not async as §3.0 stated.** Its only
+caller today is `query_and_update_swap`, which runs inside an LMDB write
+transaction on a synchronous path — an `async` trait could not be awaited there,
+and blocking on the runtime from inside it panics. Phase 4 moves observation into
+its own task and flips the trait to `async` with it; no signature other than the
+`async`/`.await` pair differs. `L1Asset` was also left out until Phase 7 rather
+than added speculatively.
+
+**Bug fixed: amounts were truncated, not rounded.** `(vout.value * 100_000_000.0)
+as u64` turned `0.29` into 28_999_999 satoshis, because 0.29 is not representable
+in binary floating point. Any swap for such an amount could never match. The
+conversion now rounds, and takes its scale from `ParentChainType::decimals()`
+rather than a hardcoded 1e8. Pinned by
+`coins_to_base_units_rounds_instead_of_truncating`.
+
+**Bug found and left alone: risk 10**, the two ingestion paths storing opposite
+txid byte orders. Fixing it rewrites stored swap records, so it needs its own
+change.
+
+`app/gui/swap/detail.rs` no longer reimplements address and amount matching with
+its own copy of the 1e8 constant — it asks the adapter via `matches_query`.
+
+New coverage: `swap_detection_tests` in `lib/state/two_way_peg_data.rs` drives
+`query_and_update_swap` through the mock across eight cases — detection, the
+confirmation threshold, the age cutoff, txid uniqueness, monotonic
+confirmations, an unreachable endpoint, an unconfigured chain, and a wrong
+amount. None of that had any test at all before.
 
 ---
 
