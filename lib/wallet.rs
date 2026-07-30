@@ -598,6 +598,10 @@ impl Wallet {
                 }
                 continue;
             }
+            // `>=`, not `>`: stop as soon as the target is covered. With `>`
+            // an exact-target selection takes one more input than it needs,
+            // since the loop only breaks once `total` has already overshot.
+            // Covered by `select_coins_exact_target_does_not_overshoot`.
             if total >= value {
                 break;
             }
