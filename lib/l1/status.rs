@@ -46,15 +46,18 @@ impl L1ChainHealth {
 
     /// Whether swaps may be created against this chain.
     ///
-    /// `Unreachable` is allowed: the node being briefly down is no reason to
-    /// refuse a swap that will be filled minutes later. A chain that is
-    /// unconfigured, switched off, or serving the wrong network is not, since
-    /// no such swap could ever be detected.
+    /// Only [`Self::WrongChain`] is refused: accepting an L1 payment from the
+    /// wrong network would corrupt swap state, and no correct swap could ever
+    /// be filled there.
+    ///
+    /// Everything else is allowed, `Unconfigured` included. A swap on a chain
+    /// with no endpoint simply is not detected automatically — its creator
+    /// fills it with `update_swap_l1_txid` instead, which is a supported and
+    /// tested workflow (see `integration_tests/l1_rpc_dependency.rs`, and the
+    /// "or the user updates via update_swap_l1_txid" behaviour documented in
+    /// `docs/COINSHIFT_HOW_IT_WORKS.md`). Refusing here would delete it.
     pub fn allows_swap_creation(&self) -> bool {
-        matches!(
-            self,
-            Self::Probing | Self::Unreachable { .. } | Self::Healthy { .. }
-        )
+        !matches!(self, Self::WrongChain { .. })
     }
 
     /// Short human-readable summary, for the GUI and CLI.
@@ -83,5 +86,69 @@ impl L1ChainHealth {
                 chain.ticker()
             ),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn unreachable() -> L1ChainHealth {
+        L1ChainHealth::Unreachable {
+            error: "connection refused".to_string(),
+            consecutive_failures: 3,
+        }
+    }
+
+    fn healthy() -> L1ChainHealth {
+        L1ChainHealth::Healthy {
+            chain_name: "regtest".to_string(),
+            block_height: 101,
+        }
+    }
+
+    #[test]
+    fn only_a_wrong_network_blocks_swap_creation() {
+        // An unconfigured chain must still accept swaps: they are filled
+        // manually with update_swap_l1_txid, which is the workflow
+        // integration_tests/l1_rpc_dependency.rs exercises. Refusing here would
+        // delete that workflow, and every swap integration test with it.
+        assert!(L1ChainHealth::Unconfigured.allows_swap_creation());
+        assert!(L1ChainHealth::Disabled.allows_swap_creation());
+        assert!(L1ChainHealth::Probing.allows_swap_creation());
+        assert!(unreachable().allows_swap_creation());
+        assert!(healthy().allows_swap_creation());
+
+        // A node on the wrong network is the one case that must be refused:
+        // accepting its payments would corrupt swap state.
+        assert!(
+            !L1ChainHealth::WrongChain {
+                reason: "reports main, expected signet".to_string(),
+            }
+            .allows_swap_creation()
+        );
+    }
+
+    #[test]
+    fn only_healthy_chains_are_usable_for_detection() {
+        assert!(healthy().is_healthy());
+        for health in [
+            L1ChainHealth::Unconfigured,
+            L1ChainHealth::Disabled,
+            L1ChainHealth::Probing,
+            unreachable(),
+            L1ChainHealth::WrongChain {
+                reason: "x".to_string(),
+            },
+        ] {
+            assert!(!health.is_healthy(), "{health:?}");
+        }
+    }
+
+    #[test]
+    fn unconfigured_is_the_only_state_that_is_not_configured() {
+        assert!(!L1ChainHealth::Unconfigured.is_configured());
+        assert!(L1ChainHealth::Disabled.is_configured());
+        assert!(healthy().is_configured());
     }
 }

@@ -783,6 +783,59 @@ timeout, and no longer per-frame), and `app/gui/l1_config.rs` still has its own
 hand-rolled `getblockchaininfo` call for the "test connection" button. Phase 6
 replaces that panel with a registry-driven status table, which removes it.
 
+### 3.8 Running the integration tests
+
+`scripts/run_integration_tests.sh` sets everything up. Two things had to be
+fixed before it worked, and two bugs in phases 0–4 fell out of it.
+
+**The runner downloaded the wrong enforcer.** It fetched
+`bip300301-enforcer-latest-*` from releases.drivechain.info, but the tests drive
+that binary with the harness from `bip300301_enforcer_integration_tests`, which
+Cargo.toml pins to `a9ca43d`. The two must agree on the CLI and no longer do:
+the pinned rev takes `--serve-json-rpc-addr`, the published latest renamed it to
+`--serve-rpc-addr`, so every test died at enforcer startup with
+`unexpected argument`. The script now reads the rev out of Cargo.toml and builds
+the enforcer from source at exactly that commit, so the two cannot drift again.
+(Only `latest` is published, so pinning a download was never an option.)
+
+Also worth knowing on Apple Silicon: `bitcoin-patched` publishes an
+x86_64-darwin build only, so `bitcoind` runs under Rosetta 2. The script checks
+for it.
+
+**Two bugs in the phases above, both found by thinking about these tests:**
+
+1. **Phase 3's `create_swap` gate was too strict.** It refused swaps on any
+   chain that was not configured — but every swap integration test creates
+   swaps on `Regtest` with no L1 config at all, and more importantly, a swap on
+   an unconfigured chain is a *supported workflow*: the creator fills it with
+   `update_swap_l1_txid`, which is exactly what `l1_rpc_dependency` and
+   `l1_verification_rpc_only` exercise and what
+   `docs/COINSHIFT_HOW_IT_WORKS.md` documents. The gate now refuses only
+   `WrongChain`, where accepting a payment would corrupt state. Pinned by
+   `only_a_wrong_network_blocks_swap_creation`.
+2. **Phase 3's config seeding wrote to a shared location.** The L1 config path
+   is global (`dirs::data_dir()`), not per-datadir, so seeding it on first run
+   meant *any* run of the app — the integration suite included — silently
+   creating a config file on the machine containing a third-party endpoint the
+   operator never asked for. Replaced with a warning that names the exact
+   command to configure each chain. Existing users get a loud pointer instead of
+   silent breakage, and the node no longer configures itself behind their back.
+
+The suite passes with phases 0–4 applied: 10 trials, 0 failures,
+`multi_node_verification` ignored as flaky (issue #76) exactly as on `main`.
+
+The worry that prompted this — that Phase 4 broke `l1_verification_rpc_only` and
+`confirmations_block_inclusion` — was unfounded: both drive swap state through
+the manual `update_swap_l1_txid` RPC, not through detection, so moving detection
+into the observer does not touch them. No `wait_for_swap_state` helper is
+needed. The genuinely detection-dependent assertion,
+`l1_rpc_dependency`'s "stays Pending without RPC config", holds a fortiori now
+that an unconfigured chain yields no client at all.
+
+**Note on the config path.** That it is global rather than per-datadir is a
+pre-existing wart worth fixing on its own: `README.md` documents running several
+instances with separate datadirs, and they all share one L1 config today.
+
 ---
 
 ## Verification

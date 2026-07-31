@@ -237,37 +237,31 @@ fn parse_l1_arg(arg: &str) -> anyhow::Result<(ParentChainType, L1ChainConfig)> {
     ))
 }
 
-/// Seed the L1 config with the endpoints that used to be built into the binary.
+/// Warn when no parent chain is configured.
 ///
-/// Until now the GUI silently fell back to two hardcoded endpoints for any
-/// chain the user had not configured, so Signet and BCH appeared to work with
-/// no configuration at all. That fallback is gone. Writing the same two entries
-/// once, when there is no config file yet, keeps those users working — and
-/// makes what was previously invisible into something they can see, edit, or
-/// delete.
-fn seed_legacy_l1_config() -> anyhow::Result<bool> {
-    const LEGACY_ENDPOINTS: [(ParentChainType, &str); 2] = [
-        (
-            ParentChainType::Signet,
-            "http://user:password@localhost:38332",
-        ),
-        (
-            ParentChainType::BCH,
-            "http://user:password@173.230.135.236:28332",
-        ),
-    ];
-
+/// Until now the GUI silently fell back to two endpoints compiled into the
+/// binary — Bitcoin Signet on localhost and Bitcoin Cash testnet4 on a
+/// third-party host — so those chains appeared to work with no configuration at
+/// all. That fallback is gone.
+///
+/// This deliberately does **not** write those entries back out, as the plan
+/// originally suggested. The config path is global rather than per-datadir, so
+/// seeding it would mean any run of the app — including the integration test
+/// suite — silently creating a config file on the machine, containing a
+/// third-party endpoint the operator never asked for. Naming the exact commands
+/// instead keeps the node from configuring itself behind the operator's back.
+fn warn_if_no_l1_config() {
     let path = l1_config_path();
-    if path.exists() {
-        return Ok(false);
+    if L1ConfigFile::load_or_default(&path).chains.is_empty() {
+        tracing::warn!(
+            path = %path.display(),
+            "No parent chain is configured, so swaps will not be detected \
+             automatically. Earlier versions fell back to endpoints built into \
+             the binary; configure them explicitly with e.g. `coinshift_app \
+             init --l1 signet=http://user:password@localhost:38332`, or fill \
+             swaps manually with `update-swap-l1-txid`."
+        );
     }
-    let mut config = L1ConfigFile::default();
-    for (chain, url) in LEGACY_ENDPOINTS {
-        let (_, entry) = parse_l1_arg(&format!("{chain}={url}"))?;
-        config.insert(chain, entry);
-    }
-    config.save(&path)?;
-    Ok(true)
 }
 
 /// Merge `--l1` arguments into the config file, leaving other chains alone.
@@ -309,7 +303,6 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let seeded_legacy_config = seed_legacy_l1_config()?;
     if !cli.run.l1.is_empty() {
         write_l1_config_from_flags(&cli.run.l1)?;
     }
@@ -320,15 +313,7 @@ fn main() -> anyhow::Result<()> {
         config.log_level_file,
     )?;
 
-    if seeded_legacy_config {
-        tracing::warn!(
-            path = %l1_config_path().display(),
-            "No L1 config found; wrote the endpoints that were previously built \
-             into the binary (Bitcoin Signet on localhost, Bitcoin Cash \
-             testnet4 on a third-party host). Review or delete them — Coinshift \
-             trusts whatever these endpoints say about L1 payments."
-        );
-    }
+    warn_if_no_l1_config();
 
     let (app_tx, app_rx) = oneshot::channel::<anyhow::Error>();
 
