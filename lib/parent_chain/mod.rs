@@ -92,7 +92,10 @@ pub fn client_for(
         | ParentChainType::Regtest => {
             std::sync::Arc::new(BitcoinCoreClient::new(chain, config.clone()))
         }
-        ParentChainType::Solana | ParentChainType::SolanaDevnet => {
+        ParentChainType::Solana
+        | ParentChainType::SolanaDevnet
+        | ParentChainType::SolanaUsdc
+        | ParentChainType::SolanaDevnetUsdc => {
             std::sync::Arc::new(SolanaClient::new(chain, config.clone()))
         }
     }

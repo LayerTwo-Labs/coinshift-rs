@@ -101,6 +101,30 @@ pub enum ConfirmationModel {
     CommitmentLadder,
 }
 
+/// Which asset on a parent chain a swap is denominated in.
+///
+/// Derived from [`ParentChainType`] rather than stored: the variant *is* the
+/// asset. Carrying a user-supplied mint instead would change the Borsh encoding
+/// of every `SwapCreate` — a hard fork — and would let a swap point at a
+/// counterfeit token that merely calls itself USDC.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum L1Asset {
+    /// The chain's own currency.
+    Native,
+    /// An SPL token, identified by its mint.
+    Spl { mint: &'static str, decimals: u8 },
+}
+
+/// USD Coin on Solana mainnet-beta. Verified against the cluster: SPL Token
+/// mint, 6 decimals.
+pub const USDC_MAINNET_MINT: &str =
+    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+
+/// USD Coin on Solana devnet. Verified against the cluster: SPL Token mint,
+/// 6 decimals.
+pub const USDC_DEVNET_MINT: &str =
+    "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
+
 /// How a parent chain encodes transaction IDs at the user-input boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TxidEncoding {
@@ -161,6 +185,10 @@ pub enum ParentChainType {
     Solana,
     /// Solana devnet
     SolanaDevnet,
+    /// USD Coin on Solana mainnet-beta
+    SolanaUsdc,
+    /// USD Coin on Solana devnet
+    SolanaDevnetUsdc,
 }
 
 impl ParentChainType {
@@ -172,7 +200,10 @@ impl ParentChainType {
             // Two, so the synthesized commitment ladder has a rung between
             // "seen" and "final" to report progress with. See
             // `ConfirmationModel::CommitmentLadder`.
-            Self::Solana | Self::SolanaDevnet => 2,
+            Self::Solana
+            | Self::SolanaDevnet
+            | Self::SolanaUsdc
+            | Self::SolanaDevnetUsdc => 2,
         }
     }
 
@@ -186,7 +217,10 @@ impl ParentChainType {
             Self::BTC => 1008,
             // ~3 days for faster chains / testnets
             Self::BCH | Self::LTC | Self::Signet => 432,
-            Self::Solana | Self::SolanaDevnet => 432,
+            Self::Solana
+            | Self::SolanaDevnet
+            | Self::SolanaUsdc
+            | Self::SolanaDevnetUsdc => 432,
             // Short expiration for testing
             Self::Regtest => 50,
         }
@@ -210,7 +244,10 @@ impl ParentChainType {
             Self::LTC => 8064,
             Self::Signet => 2016,
             // Solana's unit is slots, not blocks: ~2 days at 400ms.
-            Self::Solana | Self::SolanaDevnet => 432_000,
+            Self::Solana
+            | Self::SolanaDevnet
+            | Self::SolanaUsdc
+            | Self::SolanaDevnetUsdc => 432_000,
             // Generous for testing
             Self::Regtest => 500,
         }
@@ -226,7 +263,12 @@ impl ParentChainType {
             Self::BTC => Some(bitcoin::Network::Bitcoin),
             Self::Signet => Some(bitcoin::Network::Signet),
             Self::Regtest => Some(bitcoin::Network::Regtest),
-            Self::BCH | Self::LTC | Self::Solana | Self::SolanaDevnet => None,
+            Self::BCH
+            | Self::LTC
+            | Self::Solana
+            | Self::SolanaDevnet
+            | Self::SolanaUsdc
+            | Self::SolanaDevnetUsdc => None,
         }
     }
 
@@ -239,9 +281,10 @@ impl ParentChainType {
             | Self::Signet
             | Self::Regtest => ConfirmationModel::BlockDepth,
             // Solana finality is a commitment level, not a depth.
-            Self::Solana | Self::SolanaDevnet => {
-                ConfirmationModel::CommitmentLadder
-            }
+            Self::Solana
+            | Self::SolanaDevnet
+            | Self::SolanaUsdc
+            | Self::SolanaDevnetUsdc => ConfirmationModel::CommitmentLadder,
         }
     }
 
@@ -254,7 +297,10 @@ impl ParentChainType {
             | Self::Signet
             | Self::Regtest => TxidEncoding::BitcoinHex,
             // A Solana signature is 64 bytes of base58.
-            Self::Solana | Self::SolanaDevnet => TxidEncoding::Base58,
+            Self::Solana
+            | Self::SolanaDevnet
+            | Self::SolanaUsdc
+            | Self::SolanaDevnetUsdc => TxidEncoding::Base58,
         }
     }
 
@@ -269,7 +315,10 @@ impl ParentChainType {
             Self::Signet => 38332, // Bitcoin Signet default
             Self::Regtest => 18443, // Bitcoin Regtest default
             // Solana RPC is HTTPS; there is no conventional local port.
-            Self::Solana | Self::SolanaDevnet => 443,
+            Self::Solana
+            | Self::SolanaDevnet
+            | Self::SolanaUsdc
+            | Self::SolanaDevnetUsdc => 443,
         }
     }
 
@@ -283,6 +332,8 @@ impl ParentChainType {
             Self::Regtest => "Bitcoin Regtest",
             Self::Solana => "Solana",
             Self::SolanaDevnet => "Solana Devnet",
+            Self::SolanaUsdc => "USD Coin (Solana)",
+            Self::SolanaDevnetUsdc => "USD Coin (Solana Devnet)",
         }
     }
 
@@ -301,6 +352,8 @@ impl ParentChainType {
             | Self::Regtest => 8,
             // Lamports.
             Self::Solana | Self::SolanaDevnet => 9,
+            // USDC is a 6-decimal SPL token, not 9 like SOL.
+            Self::SolanaUsdc | Self::SolanaDevnetUsdc => 6,
         }
     }
 
@@ -314,6 +367,8 @@ impl ParentChainType {
             Self::Regtest => "rBTC",
             Self::Solana => "SOL",
             Self::SolanaDevnet => "dSOL",
+            Self::SolanaUsdc => "USDC",
+            Self::SolanaDevnetUsdc => "dUSDC",
         }
     }
 
@@ -326,7 +381,28 @@ impl ParentChainType {
             Self::Signet => "http://localhost:38332",
             Self::Regtest => "http://localhost:18443",
             Self::Solana => "https://api.mainnet-beta.solana.com",
-            Self::SolanaDevnet => "https://api.devnet.solana.com",
+            Self::SolanaDevnet | Self::SolanaDevnetUsdc => {
+                "https://api.devnet.solana.com"
+            }
+            Self::SolanaUsdc => "https://api.mainnet-beta.solana.com",
+        }
+    }
+
+    /// Which asset this chain's swaps are denominated in.
+    ///
+    /// The mint is compiled in, so a swap can never be pointed at a
+    /// counterfeit token that merely calls itself USDC.
+    pub fn asset(&self) -> L1Asset {
+        match self {
+            Self::SolanaUsdc => L1Asset::Spl {
+                mint: USDC_MAINNET_MINT,
+                decimals: 6,
+            },
+            Self::SolanaDevnetUsdc => L1Asset::Spl {
+                mint: USDC_DEVNET_MINT,
+                decimals: 6,
+            },
+            _ => L1Asset::Native,
         }
     }
 
@@ -344,6 +420,8 @@ impl ParentChainType {
             Self::Regtest => "Bitcoin Regtest (rBTC)",
             Self::Solana => "Solana (SOL)",
             Self::SolanaDevnet => "Solana Devnet (dSOL)",
+            Self::SolanaUsdc => "USDC on Solana (USDC)",
+            Self::SolanaDevnetUsdc => "USDC on Solana Devnet (dUSDC)",
         }
     }
 
@@ -363,7 +441,10 @@ impl ParentChainType {
             Self::Regtest => {
                 "Use Bitcoin Core with -regtest -txindex=1 flags for local testing."
             }
-            Self::Solana | Self::SolanaDevnet => {
+            Self::Solana
+            | Self::SolanaDevnet
+            | Self::SolanaUsdc
+            | Self::SolanaDevnetUsdc => {
                 "The public endpoints are heavily rate limited; prefer your own \
                  RPC provider. An endpoint with signature history is required."
             }
@@ -389,7 +470,13 @@ impl ParentChainType {
         }
         // Solana addresses are base58 ed25519 public keys; the Bitcoin crate
         // cannot help, but the length check is exact and worth having.
-        if matches!(self, Self::Solana | Self::SolanaDevnet) {
+        if matches!(
+            self,
+            Self::Solana
+                | Self::SolanaDevnet
+                | Self::SolanaUsdc
+                | Self::SolanaDevnetUsdc
+        ) {
             let bytes = bitcoin::base58::decode(trimmed).map_err(|err| {
                 format!("invalid base58 {} address: {err}", self.ticker())
             })?;
@@ -450,6 +537,8 @@ impl ParentChainType {
             Self::Regtest,
             Self::Solana,
             Self::SolanaDevnet,
+            Self::SolanaUsdc,
+            Self::SolanaDevnetUsdc,
         ]
     }
 }
@@ -899,6 +988,8 @@ mod tests {
             (ParentChainType::Regtest, 4),
             (ParentChainType::Solana, 5),
             (ParentChainType::SolanaDevnet, 6),
+            (ParentChainType::SolanaUsdc, 7),
+            (ParentChainType::SolanaDevnetUsdc, 8),
         ];
         assert_eq!(expected.len(), ParentChainType::all().len());
         for (chain, discriminant) in expected {

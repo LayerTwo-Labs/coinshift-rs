@@ -57,7 +57,10 @@ pub fn accepted_network_names(
         ParentChainType::Regtest => &["regtest"],
         // Solana has no network-name concept; the genesis hash carries the
         // whole identity, and unlike BCH it is exact.
-        ParentChainType::Solana | ParentChainType::SolanaDevnet => {
+        ParentChainType::Solana
+        | ParentChainType::SolanaDevnet
+        | ParentChainType::SolanaUsdc
+        | ParentChainType::SolanaDevnetUsdc => {
             &[crate::parent_chain::solana::SOLANA_NETWORK_NAME]
         }
     }

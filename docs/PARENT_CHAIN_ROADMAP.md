@@ -967,6 +967,46 @@ that a `Solana` (mainnet) swap pointed at devnet is rejected.
 
 Integration suite unchanged: 10 passed, 0 failed.
 
+### 3.12 Phase 8 — implementation notes (done)
+
+`SolanaUsdc` and `SolanaDevnetUsdc` are appended (discriminants 7 and 8). Both
+mints were verified against the live clusters — SPL Token program, 6 decimals:
+mainnet `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v`, devnet
+`4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU`.
+
+**One variant per asset, as planned, and the mint is compiled in.** Adding an
+`asset` field to `TxData::SwapCreate` instead would change the Borsh encoding of
+every SwapCreate — a hard fork — and would make the `(ParentChainType, SwapTxId)`
+uniqueness key wrong, since one Solana transaction can move both SOL and USDC.
+Compiling the mint in also means a swap can never be pointed at a counterfeit
+token. `ParentChainType::asset()` derives `L1Asset` from the variant.
+
+**Mint equality is the anti-spoof check.** `credited_spl_units` sums the
+`pre`/`postTokenBalances` entries where *both* `owner` and `mint` match, and
+returns the increase. Anyone can mint a token that calls itself USDC; only
+balances of the compiled-in mint count. There is a test for exactly that, which
+also asserts the look-alike *does* credit its own mint — so the filter is
+checking identity rather than just rejecting everything.
+
+Summing rather than picking one account is what makes it correct when the
+recipient holds several token accounts, and when the token account is created by
+the very transaction that funds it: there is simply no `preTokenBalances` entry,
+so the pre-total is 0. That is the common case for a first payment. `amount` is
+parsed as a decimal string of base units; `uiAmount` is a lossy float and is
+never used.
+
+Token accounts are **asked for** via `getTokenAccountsByOwner` rather than
+derived — computing an associated token address is a program-derived-address
+search. Signatures are indexed per account, and a token transfer touches the
+token account, not the wallet, so those are the accounts watched.
+
+A Token-2022 transfer fee means the credited amount is legitimately less than
+the amount sent. The delta is what the recipient can actually claim, so that is
+what must match the swap: a swap for 2.5 USDC is not filled by 2.45 arriving.
+Tested.
+
+Integration suite unchanged: 10 passed, 0 failed.
+
 ---
 
 **Running the suite outside a terminal.** The harness draws `tracing-indicatif`

@@ -35,7 +35,7 @@ use tokio::sync::Mutex;
 use super::{ChainIdentity, Error, L1Payment, ParentChainClient, PaymentQuery};
 use crate::{
     l1::config::{L1Auth, L1ChainConfig},
-    types::{ParentChainType, SwapTxId},
+    types::{L1Asset, ParentChainType, SwapTxId},
 };
 
 /// Signatures to ask for per poll. Kept small because the cursor means we only
@@ -96,6 +96,55 @@ fn credited_lamports(tx: &Value, address: &str) -> Option<u64> {
     let pre = meta.get("preBalances")?.as_array()?.get(index)?.as_u64()?;
     let post = meta.get("postBalances")?.as_array()?.get(index)?.as_u64()?;
     post.checked_sub(pre).filter(|credited| *credited > 0)
+}
+
+/// Base units of `mint` credited to `owner` by this transaction.
+///
+/// Sums the balances `owner` holds of `mint` before and after, across every
+/// token account, and returns the increase. Summing rather than picking one
+/// account is what makes this correct when the recipient holds several, and
+/// when the token account is *created by this same transaction* — the common
+/// case for a first payment, where there is simply no `preTokenBalances` entry
+/// and the pre-total is therefore 0.
+///
+/// **The `mint` equality check is the anti-spoof guard.** Anyone can mint a
+/// token that calls itself USDC; only balances of the compiled-in mint count,
+/// so a payment in a look-alike token contributes nothing.
+fn credited_spl_units(tx: &Value, owner: &str, mint: &str) -> Option<u64> {
+    let meta = tx.get("meta")?;
+    if !meta.get("err").is_none_or(Value::is_null) {
+        return None;
+    }
+    let total = |field: &str| -> u128 {
+        meta.get(field)
+            .and_then(Value::as_array)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter(|entry| {
+                        entry.get("owner").and_then(Value::as_str)
+                            == Some(owner)
+                            && entry.get("mint").and_then(Value::as_str)
+                                == Some(mint)
+                    })
+                    .filter_map(|entry| {
+                        // `amount` is a decimal string of base units.
+                        // `uiAmount` is a lossy float and must never be used.
+                        entry
+                            .get("uiTokenAmount")?
+                            .get("amount")?
+                            .as_str()?
+                            .parse::<u128>()
+                            .ok()
+                    })
+                    .sum()
+            })
+            .unwrap_or(0)
+    };
+    let credited = total("postTokenBalances")
+        .checked_sub(total("preTokenBalances"))
+        .filter(|credited| *credited > 0)?;
+    u64::try_from(credited).ok()
 }
 
 /// Best-effort sender: the fee payer, which is `accountKeys[0]`.
@@ -196,6 +245,45 @@ impl SolanaClient {
         serde_json::from_value(result.clone()).map_err(Error::from)
     }
 
+    /// Accounts whose signatures carry payments for `query`.
+    ///
+    /// For a native swap that is the recipient's own account. For an SPL swap
+    /// it is their token accounts for the mint — signatures are indexed per
+    /// account, and a token transfer touches the token account, not the wallet.
+    /// The token accounts are *asked for* rather than derived: computing an
+    /// associated token address is a program-derived-address search, and
+    /// `getTokenAccountsByOwner` is the escape hatch that avoids it.
+    async fn accounts_to_watch(
+        &self,
+        query: &PaymentQuery,
+    ) -> Result<Vec<String>, Error> {
+        let L1Asset::Spl { mint, .. } = self.chain.asset() else {
+            return Ok(vec![query.address.clone()]);
+        };
+        let accounts: Value = self
+            .call(
+                "getTokenAccountsByOwner",
+                json!([
+                    &query.address,
+                    { "mint": mint },
+                    { "encoding": "jsonParsed" }
+                ]),
+            )
+            .await?;
+        Ok(accounts
+            .get("value")
+            .and_then(Value::as_array)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter_map(|entry| {
+                        Some(entry.get("pubkey")?.as_str()?.to_string())
+                    })
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
     /// Signature records for `address` newer than the last poll.
     async fn recent_signatures(
         &self,
@@ -253,7 +341,12 @@ impl SolanaClient {
         tx: &Value,
         query: &PaymentQuery,
     ) -> Option<L1Payment> {
-        let credited = credited_lamports(tx, &query.address);
+        let credited = match self.chain.asset() {
+            L1Asset::Native => credited_lamports(tx, &query.address),
+            L1Asset::Spl { mint, .. } => {
+                credited_spl_units(tx, &query.address, mint)
+            }
+        };
         let txid = SwapTxId::from_base58(signature).ok()?;
         let confirmations = ladder(commitment, query.required_confirmations);
         Some(L1Payment {
@@ -309,7 +402,11 @@ impl ParentChainClient for SolanaClient {
         query: &PaymentQuery,
     ) -> Result<Vec<L1Payment>, Error> {
         let tip = self.tip().await?;
-        let signatures = self.recent_signatures(&query.address).await?;
+        let accounts = self.accounts_to_watch(query).await?;
+        let mut signatures = Vec::new();
+        for account in &accounts {
+            signatures.extend(self.recent_signatures(account).await?);
+        }
         let mut payments = Vec::new();
         for entry in signatures {
             // A failed transaction never paid anyone.
@@ -450,6 +547,166 @@ mod tests {
             .is_err()
         );
         assert!(client.tip().await.unwrap() > 0);
+    }
+
+    const MINT: &str = crate::types::USDC_DEVNET_MINT;
+
+    fn usdc_client() -> SolanaClient {
+        SolanaClient::new(
+            ParentChainType::SolanaDevnetUsdc,
+            L1ChainConfig::basic("https://api.devnet.solana.com", "", ""),
+        )
+    }
+
+    fn token_balance(owner: &str, mint: &str, amount: &str) -> Value {
+        json!({
+            "owner": owner,
+            "mint": mint,
+            "uiTokenAmount": {
+                "amount": amount,
+                "decimals": 6,
+                "uiAmount": 1.0,
+                "uiAmountString": "1"
+            }
+        })
+    }
+
+    /// A USDC transfer to an account `alice` already held.
+    fn spl_tx(pre: &[Value], post: &[Value]) -> Value {
+        json!({
+            "meta": {
+                "err": null,
+                "preTokenBalances": pre,
+                "postTokenBalances": post
+            },
+            "transaction": {
+                "message": { "accountKeys": [{"pubkey": "payer"}] }
+            }
+        })
+    }
+
+    #[test]
+    fn spl_transfer_to_an_existing_token_account() {
+        let tx = spl_tx(
+            &[token_balance("alice", MINT, "1000000")],
+            &[token_balance("alice", MINT, "3500000")],
+        );
+        assert_eq!(credited_spl_units(&tx, "alice", MINT), Some(2_500_000));
+    }
+
+    #[test]
+    fn spl_transfer_that_creates_the_token_account() {
+        // The common first payment: no preTokenBalances entry exists at all,
+        // so the pre-total is 0 rather than missing.
+        let tx = spl_tx(&[], &[token_balance("alice", MINT, "2500000")]);
+        assert_eq!(credited_spl_units(&tx, "alice", MINT), Some(2_500_000));
+    }
+
+    #[test]
+    fn a_look_alike_token_does_not_count() {
+        // Anyone can mint a token calling itself USDC. Only the compiled-in
+        // mint may credit a swap -- this is the anti-spoof check.
+        let counterfeit = "So11111111111111111111111111111111111111112";
+        let tx = spl_tx(
+            &[token_balance("alice", counterfeit, "0")],
+            &[token_balance("alice", counterfeit, "9999000000")],
+        );
+        assert_eq!(credited_spl_units(&tx, "alice", MINT), None);
+        // ...and it does count for its own mint, so the filter is on identity
+        // rather than simply rejecting everything.
+        assert_eq!(
+            credited_spl_units(&tx, "alice", counterfeit),
+            Some(9_999_000_000)
+        );
+    }
+
+    #[test]
+    fn balances_across_several_token_accounts_are_summed() {
+        // A recipient may hold more than one account for a mint.
+        let tx = spl_tx(
+            &[
+                token_balance("alice", MINT, "1000000"),
+                token_balance("alice", MINT, "500000"),
+            ],
+            &[
+                token_balance("alice", MINT, "1000000"),
+                token_balance("alice", MINT, "2500000"),
+            ],
+        );
+        assert_eq!(credited_spl_units(&tx, "alice", MINT), Some(2_000_000));
+    }
+
+    #[test]
+    fn a_transfer_fee_credits_only_what_arrived() {
+        // Token-2022 transfer fees mean the credited amount is legitimately
+        // less than the amount sent. The delta is what the recipient can
+        // actually claim, so that is what must match the swap.
+        let tx = spl_tx(
+            &[token_balance("alice", MINT, "0")],
+            &[token_balance("alice", MINT, "2450000")],
+        );
+        assert_eq!(credited_spl_units(&tx, "alice", MINT), Some(2_450_000));
+        let client = usdc_client();
+        let payment = client
+            .to_payment(
+                &bitcoin::base58::encode(&[8u8; 64]),
+                Some("finalized"),
+                10,
+                20,
+                &tx,
+                &query("alice", 2_500_000),
+            )
+            .unwrap();
+        assert!(
+            !payment.matches_query,
+            "a swap for 2.5 USDC is not filled by 2.45 arriving"
+        );
+    }
+
+    #[test]
+    fn a_failed_spl_transfer_credits_nobody() {
+        let mut tx = spl_tx(&[], &[token_balance("alice", MINT, "2500000")]);
+        tx["meta"]["err"] = json!({"InstructionError": [0, "Custom"]});
+        assert_eq!(credited_spl_units(&tx, "alice", MINT), None);
+    }
+
+    #[test]
+    fn a_debit_of_tokens_is_not_a_payment() {
+        let tx = spl_tx(
+            &[token_balance("alice", MINT, "5000000")],
+            &[token_balance("alice", MINT, "1000000")],
+        );
+        assert_eq!(credited_spl_units(&tx, "alice", MINT), None);
+    }
+
+    #[test]
+    fn usdc_uses_six_decimals_not_nine() {
+        // Reading USDC with SOL's decimals would be wrong by a factor of 1000.
+        assert_eq!(ParentChainType::SolanaDevnetUsdc.decimals(), 6);
+        assert_eq!(ParentChainType::SolanaDevnet.decimals(), 9);
+        assert!(matches!(
+            ParentChainType::SolanaDevnetUsdc.asset(),
+            L1Asset::Spl { mint, decimals: 6 } if mint == MINT
+        ));
+        assert_eq!(ParentChainType::SolanaDevnet.asset(), L1Asset::Native);
+    }
+
+    #[test]
+    fn an_spl_payment_matches_the_exact_amount() {
+        let client = usdc_client();
+        let tx = spl_tx(&[], &[token_balance("alice", MINT, "2500000")]);
+        let payment = client
+            .to_payment(
+                &bitcoin::base58::encode(&[6u8; 64]),
+                Some("finalized"),
+                10,
+                20,
+                &tx,
+                &query("alice", 2_500_000),
+            )
+            .unwrap();
+        assert!(payment.matches_query);
+        assert_eq!(payment.amount, 2_500_000);
     }
 
     #[test]
