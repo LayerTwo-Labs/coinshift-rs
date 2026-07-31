@@ -199,6 +199,38 @@ impl BottomPanel {
         }
     }
 
+    /// Show whether the BIP300 enforcer is reachable.
+    ///
+    /// The node now starts without it and reconnects on its own, so the
+    /// operator needs somewhere to see that mining and deposits are
+    /// unavailable rather than inferring it from a failed action.
+    fn show_mainchain_status(&self, ui: &mut egui::Ui) {
+        use crate::mainchain::MainchainState;
+
+        let Some(initialized) = self.initialized.as_ref() else {
+            return;
+        };
+        let (text, color) = match initialized.app.mainchain.state() {
+            MainchainState::Connected => {
+                if initialized.app.mainchain.has_wallet_service() {
+                    ("mainchain: connected", egui::Color32::GREEN)
+                } else {
+                    // Connected, but no wallet service means no miner.
+                    ("mainchain: no wallet service", egui::Color32::YELLOW)
+                }
+            }
+            MainchainState::Connecting { attempts, .. } => (
+                if attempts == 0 {
+                    "mainchain: connecting"
+                } else {
+                    "mainchain: reconnecting"
+                },
+                egui::Color32::RED,
+            ),
+        };
+        ui.label(egui::RichText::new(text).small().color(color));
+    }
+
     fn show(&mut self, miner: &mut Miner, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             self.update();
@@ -219,6 +251,8 @@ impl BottomPanel {
             let this_target_width = this_init_max_width - last_others_width;
 
             ui.add_space(this_target_width);
+            ui.separator();
+            self.show_mainchain_status(ui);
             ui.separator();
             miner.show(
                 self.initialized

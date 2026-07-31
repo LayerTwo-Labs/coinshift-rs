@@ -12,6 +12,7 @@ mod app;
 mod cli;
 mod gui;
 mod line_buffer;
+mod mainchain;
 mod rpc_server;
 mod util;
 

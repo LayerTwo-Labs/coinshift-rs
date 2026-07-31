@@ -836,6 +836,46 @@ that an unconfigured chain yields no client at all.
 pre-existing wart worth fixing on its own: `README.md` documents running several
 instances with separate datadirs, and they all share one L1 config today.
 
+### 3.9 Phase 5 — implementation notes (done)
+
+**The enforcer is no longer a boot requirement.** `App::new` still probes it,
+but a failure now warns and continues instead of aborting. The node genuinely
+cannot sync or mine without the enforcer, but "cannot mine" is not "cannot run":
+it can still serve wallet and swap RPC, keep peers, and recover by itself. The
+old behaviour turned an enforcer that was merely slow to start into a crash
+loop, and gave no way to express "start me, wait for my dependency" to a
+supervisor. `--require-mainchain` restores it, and
+`--mainchain-connect-timeout` (default 30s, was a hardcoded 5s) controls how
+long startup waits.
+
+**`mainchain_reachable` is deleted.** It was an `Arc<AtomicBool>` documented as
+gating mining, written by the L1 sync task, and **never read anywhere** — it
+carried `#[allow(dead_code)]` from the day it was added. `crate::mainchain::MainchainMonitor`
+replaces it with something that is actually consulted: it drives reconnection
+backoff and is displayed in the GUI's bottom panel, so an operator can see that
+mining is unavailable rather than inferring it from a failed action.
+
+Note what the monitor deliberately does **not** do: gate `mine()`. Mining still
+asks the enforcer and maps the real failure to `MainchainUnreachable`. A cached
+status must never be able to refuse an operation that would have succeeded —
+which is the trap the original boolean was set up for but never sprung, having
+never been read.
+
+**The miner is installable at runtime.** `App.miner` moves from
+`Option<Arc<RwLock<Miner>>>` to `Arc<RwLock<Option<Miner>>>`. The enforcer's
+wallet service is optional, and without it there is no miner; previously that
+was decided once at construction and fixed forever, so an enforcer that gained
+its wallet service later still could not mine until the node restarted. The sync
+task now re-probes while disconnected and installs a miner when one becomes
+possible.
+
+Reconnection rides on the existing `l1_sync_task`, which already polled
+`get_chain_tip` every ten seconds, rather than adding a task; on failure it
+backs off 1s → 30s.
+
+Verified against the integration suite: 10 passed, 0 failed — the enforcer boot
+path is exactly what those tests exercise.
+
 ---
 
 ## Verification

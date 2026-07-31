@@ -3,6 +3,7 @@ use std::{
     ops::Deref,
     path::PathBuf,
     sync::LazyLock,
+    time::Duration,
 };
 
 use clap::{Arg, Parser, Subcommand};
@@ -146,6 +147,18 @@ pub(super) struct RunArgs {
     #[arg(default_value = "http://localhost:50051", long)]
     mainchain_grpc_url: url::Url,
 
+    /// How long to wait for the mainchain enforcer during startup, in seconds.
+    #[arg(default_value_t = 30, long)]
+    mainchain_connect_timeout: u64,
+
+    /// Refuse to start unless the mainchain enforcer answers.
+    ///
+    /// Off by default: the node starts and keeps retrying, so it can be brought
+    /// up alongside the enforcer without ordering the two. Turn this on to
+    /// restore the previous behaviour of exiting when the enforcer is absent.
+    #[arg(long)]
+    require_mainchain: bool,
+
     /// Path to a mnemonic seed phrase
     #[arg(long)]
     mnemonic_seed_phrase_path: Option<PathBuf>,
@@ -191,6 +204,8 @@ pub struct Config {
     pub network: Network,
     pub rpc_addr: SocketAddr,
     pub strict_l1_config: bool,
+    pub mainchain_connect_timeout: Duration,
+    pub require_mainchain: bool,
 }
 
 impl RunArgs {
@@ -228,6 +243,10 @@ impl RunArgs {
             network: self.network,
             rpc_addr: self.rpc_addr,
             strict_l1_config: self.strict_l1_config,
+            mainchain_connect_timeout: Duration::from_secs(
+                self.mainchain_connect_timeout,
+            ),
+            require_mainchain: self.require_mainchain,
         })
     }
 }

@@ -1,10 +1,4 @@
-use std::{
-    collections::HashMap,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
-};
+use std::{collections::HashMap, sync::Arc};
 
 use coinshift::{
     miner::{self, Miner},
@@ -29,7 +23,7 @@ use tonic_health::{
     pb::{HealthCheckRequest, health_client::HealthClient},
 };
 
-use crate::cli::Config;
+use crate::{cli::Config, mainchain::MainchainMonitor};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -124,7 +118,9 @@ fn update(
 pub struct App {
     pub node: Arc<Node>,
     pub wallet: Wallet,
-    pub miner: Option<Arc<TokioRwLock<Miner>>>,
+    /// The miner, installable after startup: the enforcer may come up
+    /// without its wallet service and gain it later.
+    pub miner: Arc<TokioRwLock<Option<Miner>>>,
     /// Separate wallet client for deposits, so deposits don't block on the
     /// miner write lock (which is held for the entire BMM confirmation).
     cusf_mainchain_wallet:
@@ -134,10 +130,9 @@ pub struct App {
     pub transaction: Arc<RwLock<Transaction>>,
     pub runtime: Arc<tokio::runtime::Runtime>,
     pub local_pool: LocalPoolHandle,
-    /// Set by the L1 sync task: true when the mainchain (parentchain for mining) is reachable.
-    /// Mining is only allowed when this is true so we can fetch blocks from the mainchain.
-    #[allow(dead_code)]
-    pub mainchain_reachable: Arc<AtomicBool>,
+    /// Reachability of the mainchain enforcer, for reporting and reconnection.
+    /// Deliberately not consulted before mining -- see `crate::mainchain`.
+    pub mainchain: MainchainMonitor,
 }
 
 impl App {
@@ -188,11 +183,19 @@ impl App {
         }))
     }
 
-    /// Periodic task to sync L1 blocks for deposit scanning.
-    /// Updates mainchain_reachable so the GUI and mine() can require mainchain to be up.
+    /// Periodic task to sync L1 blocks for deposit scanning, and to keep the
+    /// mainchain connection state current.
+    ///
+    /// This already polled the enforcer every ten seconds, so reconnection
+    /// rides along with it rather than needing a task of its own. When the
+    /// enforcer is absent it also re-probes for the wallet service, which is
+    /// the only way a `Miner` can appear after startup -- previously that was
+    /// fixed forever at construction.
     async fn l1_sync_task(
         node: Arc<Node>,
-        mainchain_reachable: Arc<AtomicBool>,
+        mainchain: MainchainMonitor,
+        miner: Arc<TokioRwLock<Option<Miner>>>,
+        transport: tonic::transport::Channel,
     ) -> Result<(), Error> {
         use futures::FutureExt;
         use std::time::Duration;
@@ -221,16 +224,23 @@ impl App {
                 .await
             {
                 Ok(hash) => {
-                    mainchain_reachable.store(true, Ordering::SeqCst);
+                    mainchain.record_connected();
+                    // A late-arriving wallet service means we can finally mine.
+                    if miner.read().await.is_none() {
+                        Self::try_install_miner(&mainchain, &miner, &transport)
+                            .await;
+                    }
                     tracing::trace!(l1_tip = %hash, "L1 sync task: got L1 chain tip");
                     hash
                 }
                 Err(err) => {
-                    mainchain_reachable.store(false, Ordering::SeqCst);
+                    let wait = mainchain.record_failure(err.to_string());
                     tracing::debug!(
                         error = %err,
-                        "L1 sync task: Failed to get L1 chain tip (this is normal if mainchain is not available)"
+                        retry_in = ?wait,
+                        "L1 sync task: failed to get L1 chain tip"
                     );
+                    tokio::time::sleep(wait).await;
                     continue;
                 }
             };
@@ -347,17 +357,54 @@ impl App {
         }
     }
 
+    /// Re-probe the enforcer and install a `Miner` if its wallet service is now
+    /// available.
+    async fn try_install_miner(
+        mainchain: &MainchainMonitor,
+        miner: &Arc<TokioRwLock<Option<Miner>>>,
+        transport: &tonic::transport::Channel,
+    ) {
+        let has_wallet = match Self::check_proto_support(transport.clone())
+            .await
+        {
+            Ok(has_wallet) => has_wallet,
+            Err(err) => {
+                tracing::debug!(error = %err, "Enforcer service check failed");
+                return;
+            }
+        };
+        mainchain.set_wallet_service(has_wallet);
+        if !has_wallet {
+            return;
+        }
+        let validator = mainchain::ValidatorClient::new(transport.clone());
+        let wallet = mainchain::WalletClient::new(transport.clone());
+        match Miner::new(validator, wallet) {
+            Ok(new_miner) => {
+                *miner.write().await = Some(new_miner);
+                tracing::info!(
+                    "Enforcer wallet service is available; mining and deposits \
+                     are now enabled"
+                );
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "Failed to construct miner")
+            }
+        }
+    }
+
     fn spawn_l1_sync_task(
         node: Arc<Node>,
-        mainchain_reachable: Arc<AtomicBool>,
+        mainchain: MainchainMonitor,
+        miner: Arc<TokioRwLock<Option<Miner>>>,
+        transport: tonic::transport::Channel,
     ) -> JoinHandle<()> {
         spawn(
-            Self::l1_sync_task(node, mainchain_reachable).unwrap_or_else(
-                |err| {
+            Self::l1_sync_task(node, mainchain, miner, transport)
+                .unwrap_or_else(|err| {
                     let err = anyhow::Error::from(err);
                     tracing::error!("L1 sync task error: {err:#}")
-                },
-            ),
+                }),
         )
     }
 
@@ -463,31 +510,65 @@ impl App {
         .unwrap()
         .concurrency_limit(256)
         .connect_lazy();
-        // Add a timeout to the connection check so the GUI can start even if mainchain isn't synced
-        const CONNECTION_TIMEOUT: std::time::Duration =
-            std::time::Duration::from_secs(5);
-        let (cusf_mainchain, cusf_mainchain_wallet) = if runtime
-            .block_on(tokio::time::timeout(
-                CONNECTION_TIMEOUT,
-                Self::check_proto_support(transport.clone()),
-            ))
-            .map_err(|_| Error::VerifyMainchainServices {
-                url: Box::new(config.mainchain_grpc_url.clone()),
-                source: Box::new(tonic::Status::deadline_exceeded(
-                    "Connection check timed out after 5 seconds",
-                )),
-            })?
-            .map_err(|err| Error::VerifyMainchainServices {
-                url: Box::new(config.mainchain_grpc_url.clone()),
-                source: Box::new(err),
-            })? {
-            (
-                mainchain::ValidatorClient::new(transport.clone()),
-                Some(mainchain::WalletClient::new(transport)),
-            )
-        } else {
-            (mainchain::ValidatorClient::new(transport), None)
+        // Probe the enforcer once, but do not make startup depend on it. The
+        // node genuinely cannot sync or mine without the enforcer, yet "cannot
+        // mine" is not "cannot run": it can still serve wallet and swap RPC,
+        // keep peers, and recover on its own. Requiring it here turned an
+        // enforcer that was merely slow to start into a crash loop, with no way
+        // to express "start me, wait for my dependency" in a supervisor.
+        // `--require-mainchain` restores the old behaviour.
+        let probe = runtime.block_on(tokio::time::timeout(
+            config.mainchain_connect_timeout,
+            Self::check_proto_support(transport.clone()),
+        ));
+        let wallet_service = match probe {
+            Ok(Ok(has_wallet)) => Some(has_wallet),
+            Ok(Err(err)) => {
+                if config.require_mainchain {
+                    return Err(Error::VerifyMainchainServices {
+                        url: Box::new(config.mainchain_grpc_url.clone()),
+                        source: Box::new(err),
+                    });
+                }
+                tracing::warn!(
+                    url = %config.mainchain_grpc_url,
+                    error = %err,
+                    "Mainchain enforcer did not answer; starting anyway and \
+                     retrying in the background. Mining and deposits are \
+                     unavailable until it responds."
+                );
+                None
+            }
+            Err(_) => {
+                let source = tonic::Status::deadline_exceeded(format!(
+                    "Connection check timed out after {:?}",
+                    config.mainchain_connect_timeout
+                ));
+                if config.require_mainchain {
+                    return Err(Error::VerifyMainchainServices {
+                        url: Box::new(config.mainchain_grpc_url.clone()),
+                        source: Box::new(source),
+                    });
+                }
+                tracing::warn!(
+                    url = %config.mainchain_grpc_url,
+                    timeout = ?config.mainchain_connect_timeout,
+                    "Mainchain enforcer did not answer in time; starting \
+                     anyway and retrying in the background."
+                );
+                None
+            }
         };
+
+        let mainchain_monitor = match wallet_service {
+            Some(has_wallet) => MainchainMonitor::connected(has_wallet),
+            None => MainchainMonitor::new("not reached during startup"),
+        };
+        let transport_for_reconnect = transport.clone();
+        let cusf_mainchain = mainchain::ValidatorClient::new(transport.clone());
+        let cusf_mainchain_wallet = wallet_service
+            .unwrap_or(false)
+            .then(|| mainchain::WalletClient::new(transport));
         let miner = cusf_mainchain_wallet
             .clone()
             .map(|wallet| Miner::new(cusf_mainchain.clone(), wallet))
@@ -601,7 +682,7 @@ impl App {
         );
 
         tracing::debug!("Wrapping miner in Arc and TokioRwLock");
-        let miner = miner.map(|miner| Arc::new(TokioRwLock::new(miner)));
+        let miner = Arc::new(TokioRwLock::new(miner));
         tracing::info!("Spawning wallet update task");
         let task =
             Self::spawn_task(node.clone(), utxos.clone(), wallet.clone());
@@ -609,9 +690,12 @@ impl App {
 
         // Spawn L1 sync task to periodically check for new deposits and mainchain reachability
         tracing::info!("Spawning L1 sync task for deposit scanning");
-        let mainchain_reachable = Arc::new(AtomicBool::new(false));
-        let _l1_sync_task =
-            Self::spawn_l1_sync_task(node.clone(), mainchain_reachable.clone());
+        let _l1_sync_task = Self::spawn_l1_sync_task(
+            node.clone(),
+            mainchain_monitor.clone(),
+            miner.clone(),
+            transport_for_reconnect,
+        );
         tracing::info!("L1 sync task spawned");
 
         // Swap confirmations are refreshed by the node's swap observer, which
@@ -636,7 +720,7 @@ impl App {
             })),
             runtime: Arc::new(runtime),
             local_pool,
-            mainchain_reachable,
+            mainchain: mainchain_monitor,
         })
     }
 
@@ -728,13 +812,12 @@ impl App {
     pub fn get_new_main_address(
         &self,
     ) -> Result<bitcoin::Address<bitcoin::address::NetworkChecked>, Error> {
-        let Some(miner) = self.miner.as_ref() else {
-            return Err(Error::NoCusfMainchainWalletClient);
-        };
         let address = self.runtime.block_on({
-            let miner = miner.clone();
+            let miner = self.miner.clone();
             async move {
-                let mut miner_write = miner.write().await;
+                let mut guard = miner.write().await;
+                let miner_write =
+                    guard.as_mut().ok_or(Error::NoCusfMainchainWalletClient)?;
                 let cusf_mainchain = &mut miner_write.cusf_mainchain;
                 let mainchain_info = cusf_mainchain.get_chain_info().await?;
                 let cusf_mainchain_wallet =
@@ -744,7 +827,7 @@ impl App {
                     .await?
                     .require_network(mainchain_info.network)
                     .unwrap();
-                drop(miner_write);
+                drop(guard);
                 Result::<_, Error>::Ok(res)
             }
         })?;
@@ -758,19 +841,22 @@ impl App {
         &self,
         fee: Option<bitcoin::Amount>,
     ) -> Result<(), Error> {
-        let Some(miner) = self.miner.as_ref() else {
-            return Err(Error::NoCusfMainchainWalletClient);
-        };
-        // Mining requires the mainchain (parentchain) to be up so we can fetch blocks.
+        let miner = self.miner.clone();
+        // Mining requires the mainchain (parentchain) to be up so we can fetch
+        // blocks. Note this asks the enforcer rather than consulting the
+        // connection monitor: a cached status must never refuse a mine that
+        // would have succeeded.
         let prev_main_hash = {
-            let mut miner_write = miner.write().await;
+            let mut guard = miner.write().await;
+            let miner_write =
+                guard.as_mut().ok_or(Error::NoCusfMainchainWalletClient)?;
             let prev_main_hash = miner_write
                 .cusf_mainchain
                 .get_chain_tip()
                 .await
                 .map_err(|e| Error::MainchainUnreachable(Box::new(e)))?
                 .block_hash;
-            drop(miner_write);
+            drop(guard);
             prev_main_hash
         };
         let tip_hash = self.node.try_get_best_hash()?;
@@ -928,7 +1014,9 @@ impl App {
             let bribe = Self::EMPTY_BLOCK_BMM_BRIBE;
             (bribe, header, body)
         };
-        let mut miner_write = miner.write().await;
+        let mut guard = miner.write().await;
+        let miner_write =
+            guard.as_mut().ok_or(Error::NoCusfMainchainWalletClient)?;
         let bmm_txid = miner_write
             .attempt_bmm(bribe.to_sat(), 0, header, body)
             .await?;
