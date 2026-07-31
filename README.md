@@ -7,17 +7,25 @@ Coinshift is a [BIP300](https://en.bitcoin.it/wiki/BIP_0300)-style sidechain nod
 
 ## Supported chains (swaps)
 
-Swaps support the following L1 parent chains (Bitcoin Core-compatible RPC):
+| Chain                  | Ticker | Asset  | Finality        |
+|------------------------|--------|--------|-----------------|
+| Bitcoin                | BTC    | native | 6 blocks        |
+| Bitcoin Cash           | BCH    | native | 3 blocks        |
+| Litecoin               | LTC    | native | 3 blocks        |
+| Bitcoin Signet         | sBTC   | native | 3 blocks        |
+| Bitcoin Regtest        | rBTC   | native | 3 blocks        |
+| Solana                 | SOL    | native | finalized       |
+| Solana Devnet          | dSOL   | native | finalized       |
+| USDC on Solana         | USDC   | SPL    | finalized       |
+| USDC on Solana Devnet  | dUSDC  | SPL    | finalized       |
 
-| Chain            | Ticker | Default RPC port | Confirmations |
-|------------------|--------|------------------|---------------|
-| Bitcoin          | BTC    | 8332             | 6             |
-| Bitcoin Cash     | BCH    | 8332             | 3             |
-| Litecoin         | LTC    | 9332             | 3             |
-| Bitcoin Signet   | sBTC   | 38332            | 3             |
-| Bitcoin Regtest  | rBTC   | 18443            | 3             |
+Every chain can point at any endpoint you run. Configure via the GUI
+(**L1 Config**), the CLI (`set-l1-config`), or `coinshift_app init --l1 <chain>=<url>`.
 
-Configure RPC per chain via the GUI (**L1 Config**) or CLI (`set-l1-config`). See [docs/ADDING_PARENT_CHAINS.md](docs/ADDING_PARENT_CHAINS.md) for adding new chains.
+Parent chains are optional and independent: the node runs without any of them,
+and one being unreachable pauses detection for that chain alone. See
+[docs/OPERATIONS.md](docs/OPERATIONS.md) for what fails versus what degrades, and
+[docs/ADDING_PARENT_CHAINS.md](docs/ADDING_PARENT_CHAINS.md) for adding chains.
 
 ## Building
 
@@ -111,8 +119,9 @@ The CLI talks to the Coinshift RPC server (default `http://localhost:6255`). Use
 
 | Command | Description |
 |---------|-------------|
-| `get-l1-config` | Show L1 RPC config (optional `--chain`) |
-| `set-l1-config` | Set L1 RPC for a chain (`--parent-chain`, `--url`, `--user`, `--password`) |
+| `get-l1-config` | Show L1 RPC config, credentials omitted (optional `--chain`) |
+| `set-l1-config` | Point a chain at an endpoint; verified before saving (`--parent-chain`, `--url`, `--user`, `--password`) |
+| `get-connectivity-status` | Enforcer and per-chain reachability |
 
 ### Chain / blocks / peers
 
@@ -148,6 +157,8 @@ The CLI talks to the Coinshift RPC server (default `http://localhost:6255`). Use
 |-----|-------------|
 | [docs/SETUP_ORDER.md](docs/SETUP_ORDER.md) | Step-by-step regtest setup (mainchain, enforcer, wallets, mining) |
 | [docs/ADDING_PARENT_CHAINS.md](docs/ADDING_PARENT_CHAINS.md) | Supported L1 chains and how to add new ones |
+| [docs/OPERATIONS.md](docs/OPERATIONS.md) | Deployment shapes, and what fails vs. degrades |
+| [docs/PARENT_CHAIN_ROADMAP.md](docs/PARENT_CHAIN_ROADMAP.md) | Parent-chain audit and the plan this work followed |
 | [docs/COINSHIFT_HOW_IT_WORKS.md](docs/COINSHIFT_HOW_IT_WORKS.md) | Architecture and swap flow |
 | [docs/MANUAL_SETUP_SWAP_REGTEST.md](docs/MANUAL_SETUP_SWAP_REGTEST.md) | Manual regtest + swap (Alice & Bob) |
 | [docs/ENFORCER_WALLET_GUIDE.md](docs/ENFORCER_WALLET_GUIDE.md) | Enforcer wallet creation and usage |

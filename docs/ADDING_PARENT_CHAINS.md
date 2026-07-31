@@ -1,373 +1,175 @@
 # Adding Parent Chains (L1 Blockchains)
 
-This guide explains how to add support for new L1 blockchains (parent chains) to Coinshift. Parent chains are the Layer 1 blockchains that users can swap funds from/to via the two-way peg mechanism.
+How to add support for a new L1 blockchain that Coinshift can swap against.
 
-## Currently Supported Parent Chains
+## Currently supported
 
-| Chain | Ticker | Default RPC Port | Confirmations |
-|-------|--------|------------------|---------------|
-| Bitcoin | BTC | 8332 | 6 |
-| Bitcoin Cash | BCH | 8332 | 3 |
-| Litecoin | LTC | 9332 | 3 |
-| Bitcoin Signet | sBTC | 38332 | 3 |
-| Bitcoin Regtest | rBTC | 18443 | 3 |
+| Chain | Ticker | Asset | Finality | Amount unit |
+|-------|--------|-------|----------|-------------|
+| Bitcoin | BTC | native | block depth (6) | sats (8 dp) |
+| Bitcoin Cash | BCH | native | block depth (3) | sats (8 dp) |
+| Litecoin | LTC | native | block depth (3) | litoshis (8 dp) |
+| Bitcoin Signet | sBTC | native | block depth (3) | sats (8 dp) |
+| Bitcoin Regtest | rBTC | native | block depth (3) | sats (8 dp) |
+| Solana | SOL | native | commitment (2) | lamports (9 dp) |
+| Solana Devnet | dSOL | native | commitment (2) | lamports (9 dp) |
+| USDC on Solana | USDC | SPL | commitment (2) | 6 dp |
+| USDC on Solana Devnet | dUSDC | SPL | commitment (2) | 6 dp |
 
-## Architecture Overview
+Every chain is selectable and can point at any endpoint you run. Configure with
+`coinshift-cli set-l1-config`, the GUI's **L1 Config** panel, or
+`coinshift_app init --l1 <chain>=<url>`.
 
-The parent chain integration uses a modular architecture with several key components:
+## What a parent chain has to do
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                         Application Layer                        │
-├─────────────────────────────────────────────────────────────────┤
-│  app/gui/l1_config.rs     │  Per-chain RPC configuration UI     │
-│  app/gui/swap/list.rs     │  Swap management with confirmations │
-│  app/app.rs               │  Headless mode confirmation checks  │
-├─────────────────────────────────────────────────────────────────┤
-│                          Library Layer                           │
-├─────────────────────────────────────────────────────────────────┤
-│  lib/parent_chain_rpc.rs  │  Generic RPC client for all chains  │
-│  lib/types/swap.rs        │  ParentChainType enum & helpers     │
-│  lib/state/two_way_peg_data.rs │  Swap processing logic        │
-└─────────────────────────────────────────────────────────────────┘
-```
+Coinshift never builds, signs or broadcasts an L1 transaction. It only *watches*
+a parent chain, to answer one question per swap:
 
-### Key Components
+> Did address A receive amount N, how final is that payment, and how old is it?
 
-1. **`ParentChainType` enum** (`lib/types/swap.rs`)
-   - Defines all supported parent chains
-   - Provides chain-specific configuration (ports, confirmations, names)
-
-2. **`ParentChainRpcClient`** (`lib/parent_chain_rpc.rs`)
-   - Generic RPC client using Bitcoin Core JSON-RPC interface
-   - Works with any Bitcoin-compatible blockchain
-
-3. **`RpcConfig`** (`lib/parent_chain_rpc.rs`)
-   - Stores RPC connection details (URL, user, password)
-   - One config per parent chain, persisted to disk
-
-4. **L1 Config UI** (`app/gui/l1_config.rs`)
-   - GUI for configuring RPC connections per chain
-   - Shows chain-specific hints and defaults
-
-## RPC Compatibility Requirements
-
-To be supported as a parent chain, a blockchain must implement these Bitcoin Core JSON-RPC methods:
-
-### Required Methods
-
-| Method | Purpose |
-|--------|---------|
-| `getblockchaininfo` | Get current block height and chain info |
-| `getrawtransaction` | Fetch transaction details by txid |
-| `listunspent` | List UTXOs for an address |
-
-### Optional Methods
-
-| Method | Purpose |
-|--------|---------|
-| `getreceivedbyaddress` | Alternative transaction discovery |
-
-### Response Format
-
-The RPC responses must follow Bitcoin Core's JSON-RPC format:
-
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "result": { ... },
-  "error": null
-}
-```
-
-Transaction responses (`getrawtransaction` with verbose=true) must include:
-- `txid`: Transaction hash
-- `confirmations`: Number of confirmations
-- `blockheight`: Block height (optional)
-- `vout`: Array of outputs with `value` and `scriptPubKey.address`
-- `vin`: Array of inputs with `txid` and `vout` references
-
-## Adding a New Parent Chain
-
-Follow these steps to add support for a new blockchain:
-
-### Step 1: Update ParentChainType Enum
-
-Edit `lib/types/swap.rs` to add the new chain variant:
+That is the whole contract, and it is expressed as `ParentChainClient` in
+`lib/parent_chain/mod.rs`:
 
 ```rust
-pub enum ParentChainType {
-    BTC,
-    BCH,
-    LTC,
-    Signet,
-    Regtest,
-    NewChain,  // Add your new chain here
+#[async_trait]
+pub trait ParentChainClient: Send + Sync {
+    async fn identify(&self) -> Result<ChainIdentity, Error>;
+    async fn tip(&self) -> Result<u64, Error>;
+    async fn find_payments(&self, query: &PaymentQuery) -> Result<Vec<L1Payment>, Error>;
+    async fn get_payment(&self, txid: &SwapTxId, query: &PaymentQuery)
+        -> Result<Option<L1Payment>, Error>;
 }
 ```
 
-### Step 2: Implement Helper Methods
+A chain needs **no** scripting, no HTLCs, no SPV and no merkle proofs. L1
+verification is deliberately not part of consensus — see
+`validate_swap_claim_consensus` in `lib/state/swap.rs` — so an adapter is an
+observer and nothing more.
 
-Update all the `impl ParentChainType` methods:
+Two implementations are worth reading as examples:
+`lib/parent_chain/bitcoin_core.rs` (UTXO model, block depth, JSON-RPC 1.0, basic
+auth) and `lib/parent_chain/solana.rs` (account model, commitment levels,
+JSON-RPC 2.0, header or query-param auth). Between them they cover most of the
+ways a chain can differ.
 
-```rust
-impl ParentChainType {
-    pub fn default_confirmations(&self) -> u32 {
-        match self {
-            // ... existing chains ...
-            Self::NewChain => 6,  // Set appropriate confirmations
-        }
-    }
+## Steps
 
-    pub fn to_bitcoin_network(&self) -> bitcoin::Network {
-        match self {
-            // ... existing chains ...
-            Self::NewChain => bitcoin::Network::Bitcoin, // Or appropriate network
-        }
-    }
+### 1. Append the variant
 
-    pub fn default_rpc_port(&self) -> u16 {
-        match self {
-            // ... existing chains ...
-            Self::NewChain => 8555,  // Your chain's default RPC port
-        }
-    }
+In `lib/types/swap.rs`, add to the **end** of `ParentChainType`.
 
-    pub fn coin_name(&self) -> &'static str {
-        match self {
-            // ... existing chains ...
-            Self::NewChain => "New Chain",
-        }
-    }
+> **Append only.** The enum is Borsh-encoded *by variant index* inside
+> `TxData::SwapCreate`, which is part of the block body and therefore of the
+> sidechain merkle root. It is also a bincode database key and a serde map key in
+> `l1_rpc_configs.json`. Inserting or reordering a variant silently changes
+> consensus encoding. `borsh_discriminants_are_stable` fails if you do — add your
+> variant to that test's table.
 
-    pub fn sats_per_coin(&self) -> u64 {
-        match self {
-            // ... existing chains ...
-            Self::NewChain => 100_000_000,  // Satoshis per coin
-        }
-    }
+### 2. Fill in the per-chain facts
 
-    pub fn ticker(&self) -> &'static str {
-        match self {
-            // ... existing chains ...
-            Self::NewChain => "NEW",
-        }
-    }
+The compiler points at every one of these, because they are exhaustive matches.
+That is the design: a new chain cannot be half-added.
 
-    pub fn default_rpc_url_hint(&self) -> &'static str {
-        match self {
-            // ... existing chains ...
-            Self::NewChain => "http://localhost:8555",
-        }
-    }
+| Method | What it means |
+|---|---|
+| `decimals` | base units per coin, as a power of ten |
+| `confirmation_model` | `BlockDepth` or `CommitmentLadder` |
+| `txid_encoding` | `BitcoinHex` or `Base58` |
+| `asset` | `Native`, or `Spl { mint, decimals }` |
+| `default_confirmations` | how final before a swap is claimable |
+| `max_l1_tx_age` | **in the chain's own unit** — blocks, slots, … |
+| `default_swap_expiration_blocks` | in *L2* blocks; consensus-relevant |
+| `bitcoin_network` | `Some` only if `bitcoin::Address` can parse its addresses |
+| `validate_l1_address` | reject a typo before it costs someone a swap |
+| `ticker`, `coin_name`, `display_name`, `setup_hint`, `default_rpc_url_hint` | display |
 
-    pub fn all() -> &'static [ParentChainType] {
-        &[
-            Self::BTC,
-            Self::BCH,
-            Self::LTC,
-            Self::Signet,
-            Self::Regtest,
-            Self::NewChain,  // Add to the list
-        ]
-    }
-}
-```
+Add the variant to `all()` as well.
 
-### Step 3: Update L1 Config UI Hints
+### 3. Teach identity about it
 
-Edit `app/gui/l1_config.rs` to add setup hints for your chain:
+`lib/l1/identity.rs` decides whether an endpoint is serving the network the
+operator configured. Add the network names a node may report, and the expected
+genesis if one can be established.
 
-```rust
-match self.selected_parent_chain {
-    // ... existing chains ...
-    ParentChainType::NewChain => {
-        ui.label("Use NewChain Core with -txindex=1 for full transaction lookup.");
-    }
-}
-```
+Prefer *deriving* the expected genesis over hardcoding it. For the Bitcoin family
+it is computed with `bitcoin::constants::genesis_block`, so there is no constant
+to get wrong. Where nothing in the tree can derive it — Solana — verify the value
+against the live cluster and say so in a comment. Never ship a hash from memory:
+a wrong one marks a working chain `WrongChain` and silently stops its swaps.
 
-### Step 4: Test RPC Compatibility
+If identity cannot be established exactly, say so rather than pretending. Bitcoin
+Cash mainnet shares Bitcoin's genesis because it forked from it, so the two are
+not separable by genesis at all. That is documented and tested rather than papered
+over, and operators who want a stronger check can pin `expected_genesis`
+themselves.
 
-Verify your node's RPC compatibility:
+### 4. Write the adapter
 
-```bash
-# Test getblockchaininfo
-curl -u user:password --data-binary \
-  '{"jsonrpc":"2.0","id":1,"method":"getblockchaininfo","params":[]}' \
-  -H 'content-type: application/json' \
-  http://localhost:PORT/
+Add a module under `lib/parent_chain/` and dispatch to it from `client_for`.
 
-# Test getrawtransaction (replace TXID with a real transaction)
-curl -u user:password --data-binary \
-  '{"jsonrpc":"2.0","id":1,"method":"getrawtransaction","params":["TXID", true]}' \
-  -H 'content-type: application/json' \
-  http://localhost:PORT/
+The two things most likely to be got wrong:
 
-# Test listunspent (replace ADDRESS with a real address)
-curl -u user:password --data-binary \
-  '{"jsonrpc":"2.0","id":1,"method":"listunspent","params":[0, 999999, ["ADDRESS"]]}' \
-  -H 'content-type: application/json' \
-  http://localhost:PORT/
-```
+**Amounts.** Take the scale from `decimals()`, never a constant. If the chain
+reports amounts as JSON floats, *round* rather than truncate: `0.29 * 1e8` is
+`28999999.999999996`, and truncating that silently prevented swaps for that
+amount from ever matching, until it was fixed.
 
-### Step 5: Handle Chain-Specific Quirks (If Needed)
+**Finality versus age.** `L1Payment` carries `confirmations` and `age`
+separately. They are the same quantity for Bitcoin and unrelated for a chain
+whose finality is a commitment level. If your chain is a `CommitmentLadder`,
+synthesize a monotone depth that never reaches `required_confirmations` before
+true finality — including when `required_confirmations` is 1, which is the case
+easiest to get wrong. `SwapState` is Borsh-encoded to the database, so it cannot
+change shape to hold a commitment level directly.
 
-If your chain has RPC differences, you may need to extend `ParentChainRpcClient`:
+### 5. Test it without a node
 
-```rust
-impl ParentChainRpcClient {
-    // Add chain-specific method variants if needed
-    pub fn get_transaction_for_chain(
-        &self,
-        txid: &str,
-        chain: ParentChainType,
-    ) -> Result<TransactionInfo, Error> {
-        match chain {
-            ParentChainType::NewChain => {
-                // Custom handling for NewChain
-            }
-            _ => self.get_transaction(txid),
-        }
-    }
-}
-```
+`lib/parent_chain/mock.rs` scripts payments, so swap detection can be tested with
+no endpoint at all. For the adapter itself, assert against checked-in JSON
+fixtures of real responses — much cheaper than standing up a server, and it
+documents the shapes you depend on.
 
-## Configuration Guide
+Cover the cases that bite: a payment for the wrong amount, one that is too old,
+one that is unconfirmed, and whatever the chain's own trap is. For Solana that is
+the fee payer's balance delta including the transaction fee; for SPL tokens it is
+a look-alike mint.
 
-### Node Setup Requirements
+For a live check, add it `#[ignore]`d — `devnet_identify_and_tip` is the pattern
+— so the suite stays offline by default.
 
-For each parent chain node, ensure:
+### 6. Node and ops requirements
 
-1. **Transaction Index Enabled**: Run with `-txindex=1` flag
-2. **RPC Enabled**: Configure `rpcuser`, `rpcpassword`, and `rpcport`
-3. **Address Indexing** (optional): Some features work better with address index
+Anything a chain needs at runtime that is not obvious — rate limits, an endpoint
+with transaction history, an index that must be enabled — belongs in
+`setup_hint`, so it reaches the operator, and in `docs/OPERATIONS.md`.
 
-### Example Node Configurations
+Bitcoin-family nodes need `-txindex=1` and RPC enabled:
 
-#### Bitcoin Core (`bitcoin.conf`)
 ```ini
 server=1
 txindex=1
 rpcuser=myuser
 rpcpassword=mypassword
-rpcport=8332
 rpcallowip=127.0.0.1
 ```
 
-#### Bitcoin Cash Node (`bitcoin.conf`)
-```ini
-server=1
-txindex=1
-rpcuser=myuser
-rpcpassword=mypassword
-rpcport=8332
-rpcallowip=127.0.0.1
-```
+Solana needs an endpoint that retains signature history. The public clusters are
+heavily rate limited — roughly 100 requests per 10s per IP, with
+`getSignaturesForAddress` among the most throttled — so use your own provider for
+anything beyond testing. API keys go in a header or query parameter via `L1Auth`.
 
-#### Litecoin Core (`litecoin.conf`)
-```ini
-server=1
-txindex=1
-rpcuser=myuser
-rpcpassword=mypassword
-rpcport=9332
-rpcallowip=127.0.0.1
-```
+## Trust model
 
-### Coinshift RPC Configuration
+Coinshift believes whatever a configured endpoint says about L1 payments. There
+is no allowlist and no second opinion: point a chain only at a node you run or
+trust. The blast radius is your own escrow — L1 verification is not part of
+consensus, so a lying endpoint cannot affect anyone else's view of the chain.
 
-Configure the RPC connection in Coinshift:
+## What this guide replaces
 
-1. Open the GUI and navigate to "L1 Config"
-2. Select your parent chain from the dropdown
-3. Enter the RPC URL (e.g., `http://localhost:8332`)
-4. Enter RPC credentials if required
-5. Click "Save" and verify the connection
-
-Configuration is stored at:
-- **Linux**: `~/.local/share/coinshift/l1_rpc_configs.json`
-- **macOS**: `~/Library/Application Support/coinshift/l1_rpc_configs.json`
-- **Windows**: `%APPDATA%\coinshift\l1_rpc_configs.json`
-
-## Testing
-
-### Unit Tests
-
-Add tests for your chain in the existing test suite:
-
-```rust
-#[test]
-fn test_new_chain_config() {
-    let chain = ParentChainType::NewChain;
-    assert_eq!(chain.default_rpc_port(), 8555);
-    assert_eq!(chain.coin_name(), "New Chain");
-    assert_eq!(chain.ticker(), "NEW");
-}
-```
-
-### Integration Tests
-
-For full integration testing:
-
-1. Start your chain node in regtest/testnet mode
-2. Configure RPC in Coinshift
-3. Create a test swap targeting your chain
-4. Verify transaction detection and confirmation tracking
-
-### Regtest Testing
-
-For local development, use regtest mode:
-
-```bash
-# Start node in regtest
-./newchaind -regtest -txindex=1 -rpcuser=test -rpcpassword=test
-
-# Generate some blocks
-./newchain-cli -regtest generatetoaddress 101 <your_address>
-
-# Create transactions for testing
-./newchain-cli -regtest sendtoaddress <swap_address> <amount>
-```
-
-## Troubleshooting
-
-### Common Issues
-
-1. **"RPC error: Method not found"**
-   - Your node may not support a required RPC method
-   - Check if the method needs to be enabled via config
-
-2. **"Transaction not found"**
-   - Ensure `txindex=1` is set in your node config
-   - The node may need to reindex: restart with `-reindex`
-
-3. **"Connection refused"**
-   - Check the node is running and RPC is enabled
-   - Verify the port number matches your configuration
-
-4. **"Invalid response format"**
-   - The node's RPC response differs from Bitcoin Core format
-   - May need custom handling in `ParentChainRpcClient`
-
-### Debug Logging
-
-Enable debug logging to troubleshoot RPC issues:
-
-```bash
-RUST_LOG=coinshift::parent_chain_rpc=debug ./coinshift-gui
-```
-
-## Contributing
-
-When adding a new parent chain:
-
-1. Follow the steps above
-2. Add comprehensive tests
-3. Update this documentation with chain-specific notes
-4. Submit a pull request with:
-   - Changes to `lib/types/swap.rs`
-   - Changes to `app/gui/l1_config.rs`
-   - Test cases
-   - Documentation updates
+An earlier version told you to add an arm to seven `match` statements and edit
+the GUI. That worked while every chain was a Bitcoin fork. It also omitted the
+files that actually gated which chains could be used, so following it produced a
+chain that compiled and then could not be selected. Both problems are gone: the
+per-chain facts live in one place, the compiler finds them for you, and there is
+no allowlist to update.
