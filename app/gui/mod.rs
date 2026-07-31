@@ -417,7 +417,7 @@ impl eframe::App for EguiApp {
                         self.withdrawals.show(self.app.as_ref(), ui);
                     }
                     Tab::L1Config => {
-                        self.l1_config.show(ctx, ui);
+                        self.l1_config.show(self.app.as_ref(), ctx, ui);
                     }
                     Tab::ConsoleLogs => {
                         self.console_logs.show(self.app.as_ref(), ui);

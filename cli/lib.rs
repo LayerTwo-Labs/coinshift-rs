@@ -4,8 +4,6 @@ use clap::{Parser, Subcommand};
 use http::HeaderMap;
 use jsonrpsee::{core::client::ClientT, http_client::HttpClientBuilder};
 
-use coinshift::l1::config::{self as l1_config, L1Auth, L1ChainConfig};
-use coinshift::parent_chain::client_for;
 use coinshift::types::{Address, ParentChainType, SwapId, Txid};
 use coinshift_app_rpc_api::RpcClient;
 use tracing_subscriber::{filter::Targets, layer::SubscriberExt as _};
@@ -73,11 +71,14 @@ pub enum Command {
     ForgetPeer { addr: SocketAddr },
     /// Generate a mnemonic seed phrase
     GenerateMnemonic,
-    /// Show L1 RPC config (all chains or one if --chain is set)
+    /// Show L1 RPC config (all chains or one if --chain is set).
+    /// Credentials are never returned.
     GetL1Config {
         #[arg(long, value_parser = parse_parent_chain)]
         chain: Option<ParentChainType>,
     },
+    /// Report reachability of the enforcer and every parent chain
+    GetConnectivityStatus,
     /// Get the best mainchain block hash
     GetBestMainchainBlockHash,
     /// Get the best sidechain block hash
@@ -299,12 +300,12 @@ where
         }
         Command::GenerateMnemonic => rpc_client.generate_mnemonic().await?,
         Command::GetL1Config { chain } => {
-            let path = l1_config::default_path();
-            let mut config = l1_config::L1ConfigFile::load(&path)?;
-            if let Some(chain) = chain {
-                config.chains.retain(|candidate, _| *candidate == chain);
-            }
-            serde_json::to_string_pretty(&config)?
+            let configs = rpc_client.get_l1_config(chain).await?;
+            serde_json::to_string_pretty(&configs)?
+        }
+        Command::GetConnectivityStatus => {
+            let status = rpc_client.get_connectivity_status().await?;
+            serde_json::to_string_pretty(&status)?
         }
         Command::GetNewAddress => {
             let address = rpc_client.get_new_address().await?;
@@ -415,46 +416,18 @@ where
             user,
             password,
         } => {
-            let path = l1_config::default_path();
-            // Load strictly: silently defaulting on a parse error would discard
-            // every other chain's entry on the next write.
-            let mut config = l1_config::L1ConfigFile::load(&path)?;
-            let entry = L1ChainConfig {
-                url: url.clone(),
-                auth: L1Auth::basic(user.clone(), password.clone()),
-                ..config
-                    .get(parent_chain)
-                    .cloned()
-                    .unwrap_or_else(|| L1ChainConfig::basic("", "", ""))
-            };
-
-            // Check the endpoint before writing. A node serving the wrong
-            // network is a definite mistake and is refused; a node that is
-            // merely down is not, since configuring ahead of starting it is
-            // perfectly reasonable.
-            let note = match client_for(parent_chain, &entry).identify().await {
-                Ok(identity) => match coinshift::l1::identity::verify(
+            // Goes through the node so it can verify the endpoint before
+            // writing and pick the change up without a restart. The CLI used to
+            // write this file itself, with no validation at all.
+            let status = rpc_client
+                .set_l1_config(
                     parent_chain,
-                    &identity,
-                    entry.expected_genesis,
-                ) {
-                    Ok(()) => format!(" (verified: {})", identity.chain_name),
-                    Err(mismatch) => anyhow::bail!(
-                        "refusing to save: {mismatch}. Nothing was written."
-                    ),
-                },
-                Err(err) => format!(
-                    " (warning: endpoint not reachable yet: {err}. Config saved anyway.)"
-                ),
-            };
-
-            config.insert(parent_chain, entry);
-            config.save(&path)?;
-            format!(
-                "L1 RPC config saved for {} at {}{note}",
-                parent_chain.coin_name(),
-                path.display()
-            )
+                    url,
+                    Some(user).filter(|user| !user.is_empty()),
+                    Some(password).filter(|password| !password.is_empty()),
+                )
+                .await?;
+            serde_json::to_string_pretty(&status)?
         }
         Command::SidechainWealth => {
             let sidechain_wealth = rpc_client.sidechain_wealth_sats().await?;

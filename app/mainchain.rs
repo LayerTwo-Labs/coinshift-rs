@@ -40,6 +40,8 @@ impl MainchainState {
 /// Shared, observable connection state for the enforcer.
 #[derive(Clone, Debug)]
 pub struct MainchainMonitor {
+    /// The endpoint being monitored, for reporting.
+    grpc_url: Arc<url::Url>,
     state: Arc<RwLock<MainchainState>>,
     /// Whether the enforcer's optional wallet service was present when last
     /// checked. Without it there is no miner, so no mining or deposits.
@@ -48,8 +50,9 @@ pub struct MainchainMonitor {
 
 impl MainchainMonitor {
     /// A monitor that has not yet reached the enforcer.
-    pub fn new(initial_error: impl Into<String>) -> Self {
+    pub fn new(grpc_url: url::Url, initial_error: impl Into<String>) -> Self {
         Self {
+            grpc_url: Arc::new(grpc_url),
             state: Arc::new(RwLock::new(MainchainState::Connecting {
                 attempts: 0,
                 last_error: initial_error.into(),
@@ -59,11 +62,17 @@ impl MainchainMonitor {
     }
 
     /// A monitor that reached the enforcer during startup.
-    pub fn connected(wallet_service: bool) -> Self {
+    pub fn connected(grpc_url: url::Url, wallet_service: bool) -> Self {
         Self {
+            grpc_url: Arc::new(grpc_url),
             state: Arc::new(RwLock::new(MainchainState::Connected)),
             wallet_service: Arc::new(RwLock::new(wallet_service)),
         }
+    }
+
+    /// The enforcer endpoint this monitor watches.
+    pub fn grpc_url(&self) -> &url::Url {
+        &self.grpc_url
     }
 
     pub fn state(&self) -> MainchainState {
@@ -127,6 +136,10 @@ fn backoff(attempts: u32) -> Duration {
 mod tests {
     use super::*;
 
+    fn test_url() -> url::Url {
+        url::Url::parse("http://localhost:50051").unwrap()
+    }
+
     #[test]
     fn backoff_grows_then_flattens() {
         assert_eq!(backoff(1), RECONNECT_MIN);
@@ -140,7 +153,7 @@ mod tests {
 
     #[test]
     fn failures_accumulate_and_success_resets_them() {
-        let monitor = MainchainMonitor::new("not tried yet");
+        let monitor = MainchainMonitor::new(test_url(), "not tried yet");
         assert!(!monitor.state().is_connected());
 
         assert_eq!(monitor.record_failure("refused"), RECONNECT_MIN);
@@ -166,7 +179,7 @@ mod tests {
     fn wallet_service_can_appear_after_startup() {
         // The enforcer may come up without its wallet service and gain it
         // later; the node must be able to notice.
-        let monitor = MainchainMonitor::connected(false);
+        let monitor = MainchainMonitor::connected(test_url(), false);
         assert!(!monitor.has_wallet_service());
         monitor.set_wallet_service(true);
         assert!(monitor.has_wallet_service());

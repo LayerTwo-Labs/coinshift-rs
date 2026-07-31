@@ -64,7 +64,7 @@ async fn l1_rpc_dependency_task(
     )
     .await?;
 
-    let l1_recipient = "bcrt1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh";
+    let l1_recipient = "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080";
 
     let (swap_id, txid) = sidechain
         .rpc_client

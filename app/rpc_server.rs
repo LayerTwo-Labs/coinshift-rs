@@ -1,8 +1,10 @@
-use std::net::SocketAddr;
+use std::{collections::HashMap, net::SocketAddr};
 
 use bitcoin::Amount;
 use coinshift::{
+    l1::config::{L1Auth, L1ChainConfig, L1ConfigFile},
     net::Peer,
+    parent_chain::client_for,
     state,
     types::{
         Address, ParentChainType, PointedOutput, Swap, SwapId, SwapState,
@@ -10,7 +12,10 @@ use coinshift::{
     },
     wallet::Balance,
 };
-use coinshift_app_rpc_api::RpcServer;
+use coinshift_app_rpc_api::{
+    ConnectivityStatus, L1ChainConfigPublic, L1ChainStatus, MainchainStatus,
+    RpcServer,
+};
 use jsonrpsee::{
     core::{RpcResult, async_trait, middleware::RpcServiceBuilder},
     server::Server,
@@ -23,7 +28,7 @@ use tower_http::{
     trace::{DefaultOnFailure, DefaultOnResponse, TraceLayer},
 };
 
-use crate::app::App;
+use crate::{app::App, mainchain::MainchainState};
 
 pub struct RpcServerImpl {
     app: App,
@@ -56,6 +61,36 @@ impl RpcServerImpl {
         } else {
             Err(state::Error::SwapNotCreator)
         }
+    }
+}
+
+/// Render an endpoint URL without its credentials.
+///
+/// The status and config APIs are read by anyone with RPC access, so a password
+/// embedded in the URL must never leave the node.
+fn sanitize_url(raw: &str) -> String {
+    match url::Url::parse(raw) {
+        Ok(mut parsed) => {
+            if parsed.username().is_empty() && parsed.password().is_none() {
+                return raw.to_string();
+            }
+            let _ = parsed.set_username("");
+            let _ = parsed.set_password(None);
+            parsed.to_string()
+        }
+        // Unparseable: return nothing rather than risk echoing a secret.
+        Err(_) => "<unparseable url>".to_string(),
+    }
+}
+
+/// Name of an auth scheme, without the secret.
+fn auth_scheme(auth: &L1Auth) -> &'static str {
+    match auth {
+        L1Auth::None => "none",
+        L1Auth::Basic { .. } => "basic",
+        L1Auth::Bearer { .. } => "bearer",
+        L1Auth::Header { .. } => "header",
+        L1Auth::QueryParam { .. } => "query_param",
     }
 }
 
@@ -143,6 +178,151 @@ impl RpcServer for RpcServerImpl {
         &self,
     ) -> RpcResult<Option<coinshift::types::BlockHash>> {
         self.app.node.try_get_tip().map_err(custom_err)
+    }
+
+    async fn get_connectivity_status(&self) -> RpcResult<ConnectivityStatus> {
+        let app = &self.app;
+        let (connected, last_error, reconnect_attempts) =
+            match app.mainchain.state() {
+                MainchainState::Connected => (true, None, 0),
+                MainchainState::Connecting {
+                    attempts,
+                    last_error,
+                } => (false, Some(last_error), attempts),
+            };
+        let wallet_service = app.mainchain.has_wallet_service();
+        let mainchain = MainchainStatus {
+            grpc_url: app.mainchain.grpc_url().to_string(),
+            connected,
+            last_error,
+            reconnect_attempts,
+            wallet_service,
+            // Mining needs both a reachable enforcer and its wallet service.
+            can_mine: connected && wallet_service,
+        };
+
+        // Count swaps still waiting per chain, so an operator can tell whether
+        // an unhealthy chain actually matters right now.
+        let mut awaiting: HashMap<ParentChainType, u32> = HashMap::new();
+        if let Ok(rotxn) = app.node.env().read_txn()
+            && let Ok(swaps) = app.node.state().load_all_swaps(&rotxn)
+        {
+            for swap in swaps {
+                if matches!(
+                    swap.state,
+                    SwapState::Pending | SwapState::WaitingConfirmations(..)
+                ) {
+                    *awaiting.entry(swap.parent_chain).or_default() += 1;
+                }
+            }
+        }
+
+        let config = L1ConfigFile::load_or_default(
+            &coinshift::l1::config::default_path(),
+        );
+        let l1_chains = app
+            .node
+            .l1()
+            .statuses()
+            .into_iter()
+            .map(|(parent_chain, health)| L1ChainStatus {
+                url: config
+                    .get(parent_chain)
+                    .map(|entry| sanitize_url(&entry.url)),
+                swaps_awaiting: awaiting
+                    .get(&parent_chain)
+                    .copied()
+                    .unwrap_or(0),
+                parent_chain,
+                health,
+            })
+            .collect();
+        Ok(ConnectivityStatus {
+            mainchain,
+            l1_chains,
+        })
+    }
+
+    async fn get_l1_config(
+        &self,
+        chain: Option<ParentChainType>,
+    ) -> RpcResult<Vec<L1ChainConfigPublic>> {
+        let path = coinshift::l1::config::default_path();
+        let config = L1ConfigFile::load(&path).map_err(custom_err)?;
+        Ok(config
+            .chains
+            .into_iter()
+            .filter(|(candidate, _)| {
+                chain.is_none_or(|wanted| *candidate == wanted)
+            })
+            .map(|(parent_chain, entry)| L1ChainConfigPublic {
+                parent_chain,
+                url: sanitize_url(&entry.url),
+                auth: auth_scheme(&entry.auth).to_string(),
+                enabled: entry.enabled,
+                poll_interval_secs: entry.poll_interval_secs,
+                timeout_secs: entry.timeout_secs,
+            })
+            .collect())
+    }
+
+    async fn set_l1_config(
+        &self,
+        chain: ParentChainType,
+        url: String,
+        user: Option<String>,
+        password: Option<String>,
+    ) -> RpcResult<L1ChainStatus> {
+        let path = coinshift::l1::config::default_path();
+        // Load strictly: silently defaulting on a parse error would discard
+        // every other chain's entry on the next write.
+        let mut config = L1ConfigFile::load(&path).map_err(custom_err)?;
+        let entry = L1ChainConfig {
+            url: url.clone(),
+            auth: L1Auth::basic(
+                user.unwrap_or_default(),
+                password.unwrap_or_default(),
+            ),
+            ..config
+                .get(chain)
+                .cloned()
+                .unwrap_or_else(|| L1ChainConfig::basic("", "", ""))
+        };
+
+        // Verify before writing. A node on the wrong network is a definite
+        // mistake and is refused; one that is merely down is not, since
+        // configuring ahead of starting it is reasonable.
+        let client = client_for(chain, &entry);
+        match client.identify().await {
+            Ok(identity) => {
+                if let Err(mismatch) = coinshift::l1::identity::verify(
+                    chain,
+                    &identity,
+                    entry.expected_genesis,
+                ) {
+                    return Err(custom_err_msg(format!(
+                        "refusing to save: {mismatch}. Nothing was written."
+                    )));
+                }
+            }
+            Err(err) => tracing::warn!(
+                ?chain,
+                error = %err,
+                "Saving L1 config for an endpoint that is not reachable yet"
+            ),
+        }
+
+        config.insert(chain, entry);
+        config.save(&path).map_err(custom_err)?;
+        // Pick the new endpoint up immediately rather than at the next probe.
+        self.app.node.l1().reload();
+        self.app.node.l1().probe_all().await;
+        Ok(L1ChainStatus {
+            parent_chain: chain,
+            url: Some(sanitize_url(&url)),
+            health: self.app.node.l1().health(chain),
+            swaps_awaiting: 0,
+        })
     }
 
     async fn get_best_mainchain_block_hash(
@@ -343,6 +523,16 @@ impl RpcServer for RpcServerImpl {
             return Err(custom_err(
                 coinshift::types::SwapError::ChainNotConfigured(parent_chain),
             ));
+        }
+
+        // A typo'd recipient makes a swap unfillable until it expires, and the
+        // address was previously carried end to end as an unchecked string.
+        if let Err(err) =
+            parent_chain.validate_l1_address(&l1_recipient_address)
+        {
+            return Err(custom_err_msg(format!(
+                "invalid L1 recipient address: {err}"
+            )));
         }
 
         let accumulator =

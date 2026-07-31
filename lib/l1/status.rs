@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 use crate::types::ParentChainType;
 
 /// Why a parent chain can or cannot currently be used.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(
+    Clone, Debug, Deserialize, Eq, PartialEq, Serialize, utoipa::ToSchema,
+)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum L1ChainHealth {
     /// No entry in the config file. Swaps on this chain stay `Pending`.

@@ -5,6 +5,7 @@
 use std::net::SocketAddr;
 
 use coinshift::{
+    l1::L1ChainHealth,
     net::Peer,
     types::{
         Address, MerkleRoot, OutPoint, Output, OutputContent, ParentChainType,
@@ -19,8 +20,8 @@ use l2l_openapi::open_api;
 mod schema;
 
 #[open_api(ref_schemas[
-    Address, MerkleRoot, OutPoint, Output, OutputContent, ParentChainType,
-    Swap, SwapId, SwapState, Txid, schema::BitcoinTxid,
+    Address, L1ChainHealth, MerkleRoot, OutPoint, Output, OutputContent,
+    ParentChainType, Swap, SwapId, SwapState, Txid, schema::BitcoinTxid,
     coinshift_schema::BitcoinAddr, coinshift_schema::BitcoinOutPoint,
 ])]
 #[rpc(client, server)]
@@ -89,6 +90,36 @@ pub trait Rpc {
         &self,
         block_hash: coinshift::types::BlockHash,
     ) -> RpcResult<Vec<bitcoin::BlockHash>>;
+
+    /// Report reachability of the enforcer and every parent chain.
+    ///
+    /// Never includes credentials.
+    #[open_api_method(output_schema(ToSchema))]
+    #[method(name = "get_connectivity_status")]
+    async fn get_connectivity_status(&self) -> RpcResult<ConnectivityStatus>;
+
+    /// Show the L1 RPC config, with credentials removed.
+    #[open_api_method(output_schema(ToSchema))]
+    #[method(name = "get_l1_config")]
+    async fn get_l1_config(
+        &self,
+        chain: Option<ParentChainType>,
+    ) -> RpcResult<Vec<L1ChainConfigPublic>>;
+
+    /// Point a parent chain at an endpoint, verifying it before saving.
+    ///
+    /// An endpoint serving a different network is refused and nothing is
+    /// written; one that is merely unreachable is accepted, since configuring
+    /// before starting a node is normal.
+    #[open_api_method(output_schema(ToSchema))]
+    #[method(name = "set_l1_config")]
+    async fn set_l1_config(
+        &self,
+        chain: ParentChainType,
+        url: String,
+        user: Option<String>,
+        password: Option<String>,
+    ) -> RpcResult<L1ChainStatus>;
 
     /// Get the best mainchain block hash known by Coinshift
     #[open_api_method(output_schema(
@@ -268,4 +299,58 @@ pub trait Rpc {
     /// Only allowed for Pending or Cancelled swaps.
     #[method(name = "delete_swap")]
     async fn delete_swap(&self, swap_id: SwapId) -> RpcResult<()>;
+}
+
+/// Reachability of the BIP300 enforcer.
+#[derive(
+    Clone, Debug, serde::Deserialize, serde::Serialize, utoipa::ToSchema,
+)]
+pub struct MainchainStatus {
+    pub grpc_url: String,
+    pub connected: bool,
+    /// Why the last attempt failed. Absent while connected.
+    pub last_error: Option<String>,
+    /// Consecutive failed attempts; 0 while connected.
+    pub reconnect_attempts: u32,
+    /// Whether the enforcer offers its optional wallet service.
+    pub wallet_service: bool,
+    /// Whether mining and deposits are currently possible.
+    pub can_mine: bool,
+}
+
+/// Reachability of one parent chain.
+#[derive(
+    Clone, Debug, serde::Deserialize, serde::Serialize, utoipa::ToSchema,
+)]
+pub struct L1ChainStatus {
+    pub parent_chain: ParentChainType,
+    /// Endpoint, with any credentials stripped. Absent when unconfigured.
+    pub url: Option<String>,
+    pub health: L1ChainHealth,
+    /// Swaps on this chain still waiting for an L1 payment.
+    pub swaps_awaiting: u32,
+}
+
+/// Everything the node knows about its external dependencies.
+#[derive(
+    Clone, Debug, serde::Deserialize, serde::Serialize, utoipa::ToSchema,
+)]
+pub struct ConnectivityStatus {
+    pub mainchain: MainchainStatus,
+    pub l1_chains: Vec<L1ChainStatus>,
+}
+
+/// A parent chain's configuration with its credentials removed.
+#[derive(
+    Clone, Debug, serde::Deserialize, serde::Serialize, utoipa::ToSchema,
+)]
+pub struct L1ChainConfigPublic {
+    pub parent_chain: ParentChainType,
+    pub url: String,
+    /// Authentication scheme in use: `none`, `basic`, `bearer`, `header` or
+    /// `query_param`. The secret itself is never returned.
+    pub auth: String,
+    pub enabled: bool,
+    pub poll_interval_secs: Option<u64>,
+    pub timeout_secs: Option<u64>,
 }

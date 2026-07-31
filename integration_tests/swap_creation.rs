@@ -265,7 +265,7 @@ async fn swap_creation_fixed_task(
     let l2_recipient_address = sidechain.rpc_client.get_new_address().await?;
 
     // Generate a regtest address for L1 recipient
-    let l1_recipient_address = "bcrt1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh";
+    let l1_recipient_address = "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080";
 
     // Create a pre-specified swap (with l2_recipient)
     tracing::info!("Creating pre-specified swap");
@@ -353,7 +353,7 @@ async fn swap_creation_open_task(
     .await?;
     tracing::info!("Deposited to sidechain successfully");
 
-    let l1_recipient_address = "bcrt1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh";
+    let l1_recipient_address = "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080";
 
     // Create an open swap (without l2_recipient)
     tracing::info!("Creating open swap");
@@ -444,7 +444,7 @@ async fn swap_creation_open_fill_task(
     .await?;
     tracing::info!("Deposited to sidechain successfully");
 
-    let l1_recipient_address = "bcrt1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh";
+    let l1_recipient_address = "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080";
 
     // Create an open swap (without l2_recipient)
     tracing::info!("Creating open swap to later fill");

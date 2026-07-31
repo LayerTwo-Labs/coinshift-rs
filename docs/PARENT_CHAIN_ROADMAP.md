@@ -876,6 +876,54 @@ backs off 1s → 30s.
 Verified against the integration suite: 10 passed, 0 failed — the enforcer boot
 path is exactly what those tests exercise.
 
+### 3.10 Phase 6 — implementation notes (done)
+
+Three new RPC methods in `rpc-api/lib.rs`, implemented in `app/rpc_server.rs`:
+
+- `get_connectivity_status` — the enforcer's reachability (with `can_mine`,
+  which is `connected && wallet_service`) and every parent chain's health, plus
+  `swaps_awaiting` per chain so an operator can tell whether an unhealthy chain
+  actually matters right now.
+- `get_l1_config` — the config with credentials removed.
+- `set_l1_config` — verifies the endpoint before writing, then reloads and
+  re-probes so the change takes effect without a restart.
+
+**Credentials never leave the node.** `sanitize_url` strips userinfo from any
+endpoint before it is returned, and an unparseable URL renders as
+`<unparseable url>` rather than being echoed verbatim — the config file can
+contain a password in the URL, and both of these APIs are readable by anyone
+with RPC access. `auth` is reported as a scheme name only.
+
+**This closes the Phase 3 deviation.** `set-l1-config` was left as a CLI-local
+file write there; it now goes through the node, which is what lets it validate
+and hot-reload. `get-l1-config` follows, and `get-connectivity-status` is new.
+
+**The last duplicate RPC implementation is gone.** `app/gui/l1_config.rs` had
+its own hand-rolled `getblockchaininfo` with a blocking `reqwest` client — a
+fourth copy of the call — that only ran when a button was pressed. The panel now
+renders a table of every chain's live health from the registry. `reqwest` is no
+longer a dependency of `app` at all.
+
+**Also closed here: risk 9.** `validate_l1_address` was added in Phase 0 but
+never wired up, because doing so would have failed the integration tests, whose
+L1 address literal is the mainnet BIP173 example with its HRP rewritten to
+`bcrt` — which breaks the bech32 checksum. Those literals are now a genuinely
+valid regtest address (`bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080`, derived
+with the `bitcoin` crate rather than typed from memory), and `create_swap`
+validates the recipient. A typo'd address previously made a swap unfillable
+until it expired.
+
+Suite: 10 passed, 0 failed.
+
+**Running the suite outside a terminal.** The harness draws `tracing-indicatif`
+progress bars and panics if stdout is not a TTY. `scripts/run_integration_tests.sh`
+handles that with `script -q /dev/null`, but that fails in a nested background
+context (`tcgetattr/ioctl: Operation not supported on socket`). Driving
+`cargo run … --example integration_tests` through Python's `pty.spawn` works and
+gives the same result; without a pty exactly one test dies with "footer progress
+bar was hidden despite there being pending progress bars", which is the harness,
+not the code under test.
+
 ---
 
 ## Verification

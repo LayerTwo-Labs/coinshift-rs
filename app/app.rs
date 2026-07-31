@@ -561,8 +561,14 @@ impl App {
         };
 
         let mainchain_monitor = match wallet_service {
-            Some(has_wallet) => MainchainMonitor::connected(has_wallet),
-            None => MainchainMonitor::new("not reached during startup"),
+            Some(has_wallet) => MainchainMonitor::connected(
+                config.mainchain_grpc_url.clone(),
+                has_wallet,
+            ),
+            None => MainchainMonitor::new(
+                config.mainchain_grpc_url.clone(),
+                "not reached during startup",
+            ),
         };
         let transport_for_reconnect = transport.clone();
         let cusf_mainchain = mainchain::ValidatorClient::new(transport.clone());
@@ -1054,7 +1060,6 @@ impl App {
             }
         }
 
-        drop(miner_write);
         let () = self.update()?;
 
         self.node

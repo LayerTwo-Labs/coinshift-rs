@@ -1,20 +1,11 @@
-use std::sync::{Arc, Mutex};
-
 use coinshift::l1::config::{
     self as l1_config, L1Auth, L1ChainConfig, L1ConfigFile,
 };
+use coinshift::l1::status::L1ChainHealth;
 use coinshift::types::ParentChainType;
 use eframe::egui::{self, Button, Color32, ComboBox, RichText, TextEdit};
-use poll_promise::Promise;
-use serde_json::json;
 
-#[derive(Clone)]
-enum ConnectionStatus {
-    Unknown,
-    Connected { block_height: u64 },
-    Disconnected { error: String },
-    Checking,
-}
+use crate::app::App;
 
 pub struct L1Config {
     selected_parent_chain: ParentChainType,
@@ -22,8 +13,8 @@ pub struct L1Config {
     rpc_user: String,
     rpc_password: String,
     configs: L1ConfigFile,
-    connection_status: Arc<Mutex<ConnectionStatus>>,
-    status_promise: Option<Promise<anyhow::Result<u64>>>,
+    /// Set when the config changed and the node has yet to re-read it.
+    registry_reload_needed: bool,
 }
 
 impl Default for L1Config {
@@ -34,8 +25,7 @@ impl Default for L1Config {
             rpc_user: String::new(),
             rpc_password: String::new(),
             configs: L1ConfigFile::default(),
-            connection_status: Arc::new(Mutex::new(ConnectionStatus::Unknown)),
-            status_promise: None,
+            registry_reload_needed: false,
         }
     }
 }
@@ -108,12 +98,9 @@ impl L1Config {
             .insert(self.selected_parent_chain, config.clone());
         self.persist();
 
-        // Auto-check connection when saving
-        if !config.url.is_empty() {
-            let user = config.auth.basic_user().to_string();
-            let password = config.auth.basic_password().to_string();
-            self.check_connection(&config.url, &user, &password);
-        }
+        // Have the node re-read the config and re-probe on the next frame,
+        // rather than testing the endpoint from the GUI ourselves.
+        self.registry_reload_needed = true;
     }
 
     fn load_selected_chain_config(&mut self) {
@@ -125,125 +112,20 @@ impl L1Config {
             }
             None => self.clear_fields(),
         }
-        // Reset connection status when switching chains
-        *self.connection_status.lock().unwrap() = ConnectionStatus::Unknown;
-        self.status_promise = None;
     }
-
-    fn check_connection(&mut self, url: &str, user: &str, password: &str) {
-        if url.is_empty() {
-            return;
-        }
-
-        tracing::info!(
-            url = %url,
-            has_auth = !user.is_empty(),
-            "L1 Config: testing connection"
-        );
-
-        let url = url.to_string();
-        let user = user.to_string();
-        let password = password.to_string();
-        let status = self.connection_status.clone();
-
-        *status.lock().unwrap() = ConnectionStatus::Checking;
-
-        let promise = Promise::spawn_thread("l1_rpc_check", move || {
-            Self::fetch_block_height(&url, &user, &password)
-        });
-
-        self.status_promise = Some(promise);
-    }
-
-    fn fetch_block_height(
-        url: &str,
-        user: &str,
-        password: &str,
-    ) -> anyhow::Result<u64> {
-        use std::time::Duration;
-
-        // Use jsonrpc "1.0" to match nodes that accept curl-style requests (e.g. BCH test4)
-        let request = json!({
-            "jsonrpc": "1.0",
-            "id": "coinshift",
-            "method": "getblockchaininfo",
-            "params": []
-        });
-
-        tracing::info!(
-            url = %url,
-            request = %serde_json::to_string(&request).unwrap_or_default(),
-            "L1 Config: connection test request"
-        );
-
-        let client = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(10))
-            .build()?;
-
-        let mut request_builder = client.post(url).json(&request);
-
-        // Add HTTP basic authentication if user and password are provided
-        if !user.is_empty() {
-            request_builder = request_builder.basic_auth(user, Some(password));
-        }
-
-        let response = request_builder.send()?;
-        let status = response.status();
-        let json: serde_json::Value = response.json()?;
-
-        tracing::info!(
-            status = %status,
-            response = %serde_json::to_string_pretty(&json).unwrap_or_else(|_| json.to_string()),
-            "L1 Config: connection test response"
-        );
-
-        if let Some(error) = json.get("error")
-            && !error.is_null()
+    pub fn show(
+        &mut self,
+        app: Option<&App>,
+        ctx: &egui::Context,
+        ui: &mut egui::Ui,
+    ) {
+        // A save or clear happened last frame: make the node pick it up.
+        if self.registry_reload_needed
+            && let Some(app) = app
         {
-            anyhow::bail!("RPC error: {}", error);
+            app.node.l1().reload();
+            self.registry_reload_needed = false;
         }
-
-        let result = json
-            .get("result")
-            .ok_or_else(|| anyhow::anyhow!("No result in response"))?;
-
-        let blocks = result
-            .get("blocks")
-            .and_then(|v| v.as_u64())
-            .ok_or_else(|| anyhow::anyhow!("No blocks field in response"))?;
-
-        tracing::info!(block_height = blocks, "L1 Config: connection test OK");
-        Ok(blocks)
-    }
-
-    fn update_status(&mut self) {
-        if let Some(promise) = &self.status_promise
-            && let Some(result) = promise.ready()
-        {
-            match result {
-                Ok(block_height) => {
-                    tracing::info!(
-                        block_height = block_height,
-                        "L1 Config: connection test succeeded"
-                    );
-                    *self.connection_status.lock().unwrap() =
-                        ConnectionStatus::Connected {
-                            block_height: *block_height,
-                        };
-                }
-                Err(err) => {
-                    tracing::info!(error = %err, "L1 Config: connection test failed");
-                    *self.connection_status.lock().unwrap() =
-                        ConnectionStatus::Disconnected {
-                            error: format!("{err:#}"),
-                        };
-                }
-            }
-            self.status_promise = None;
-        }
-    }
-
-    pub fn show(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
         ui.heading(format!(
             "{} Node RPC Configuration",
             self.selected_parent_chain.coin_name()
@@ -371,78 +253,42 @@ impl L1Config {
 
         ui.add_space(10.0);
 
-        // Connection status
-        self.update_status();
-
-        let status = {
-            let lock = self.connection_status.lock().unwrap();
-            lock.clone()
-        };
-
-        match status {
-            ConnectionStatus::Unknown => {
-                // Allow check using current URL (predefined when chain selected) even if not saved yet
-                if !self.rpc_url.is_empty() {
-                    let url = self.rpc_url.clone();
-                    let user = self.rpc_user.clone();
-                    let password = self.rpc_password.clone();
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("●").color(Color32::GRAY));
-                        ui.label("Status: Unknown");
-                        if ui.button("Check Connection").clicked() {
-                            self.check_connection(&url, &user, &password);
-                        }
-                    });
-                }
-            }
-            ConnectionStatus::Checking => {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("●").color(Color32::YELLOW));
-                    ui.label(
-                        RichText::new("Checking connection...")
-                            .color(Color32::YELLOW),
-                    );
-                });
-            }
-            ConnectionStatus::Connected { block_height } => {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("●").color(Color32::GREEN));
-                    ui.label(
-                        RichText::new("Connected")
-                            .color(Color32::GREEN)
-                            .strong(),
-                    );
-                    ui.label(format!("Latest Block Height: {}", block_height));
-                });
-                if !self.rpc_url.is_empty() {
-                    let url = self.rpc_url.clone();
-                    let user = self.rpc_user.clone();
-                    let password = self.rpc_password.clone();
-                    if ui.button("Refresh").clicked() {
-                        self.check_connection(&url, &user, &password);
+        // Live health, straight from the node's registry. This panel used to
+        // issue its own getblockchaininfo with a hand-rolled reqwest client --
+        // a fourth copy of the RPC call -- and only when a button was pressed.
+        ui.separator();
+        ui.label(RichText::new("Parent chain status").strong());
+        if let Some(app) = app {
+            egui::Grid::new("l1_status_grid")
+                .num_columns(3)
+                .spacing([16.0, 4.0])
+                .show(ui, |ui| {
+                    ui.label(RichText::new("Chain").strong());
+                    ui.label(RichText::new("Status").strong());
+                    ui.label(RichText::new("Detail").strong());
+                    ui.end_row();
+                    for (chain, health) in app.node.l1().statuses() {
+                        let (dot, color) = health_indicator(&health);
+                        ui.label(chain.display_name());
+                        ui.label(RichText::new(dot).color(color));
+                        ui.label(RichText::new(health.summary(chain)).small());
+                        ui.end_row();
                     }
-                }
-            }
-            ConnectionStatus::Disconnected { error } => {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("●").color(Color32::RED));
-                    ui.label(
-                        RichText::new("Disconnected")
-                            .color(Color32::RED)
-                            .strong(),
-                    );
                 });
-                let error_msg = format!("Error: {}", error);
-                ui.label(RichText::new(error_msg).small().color(Color32::RED));
-                if !self.rpc_url.is_empty() {
-                    let url = self.rpc_url.clone();
-                    let user = self.rpc_user.clone();
-                    let password = self.rpc_password.clone();
-                    if ui.button("Retry").clicked() {
-                        self.check_connection(&url, &user, &password);
-                    }
-                }
-            }
+            ui.label(
+                RichText::new(
+                    "Health is re-checked in the background; saving a change \
+                     applies it without a restart.",
+                )
+                .small()
+                .color(Color32::GRAY),
+            );
+        } else {
+            ui.label(
+                RichText::new("Node is not running yet.")
+                    .small()
+                    .color(Color32::GRAY),
+            );
         }
 
         ui.add_space(10.0);
@@ -471,10 +317,7 @@ impl L1Config {
                 self.rpc_password.clear();
                 self.configs.remove(self.selected_parent_chain);
                 self.persist();
-                // Reset connection status
-                *self.connection_status.lock().unwrap() =
-                    ConnectionStatus::Unknown;
-                self.status_promise = None;
+                self.registry_reload_needed = true;
             }
         });
 
@@ -502,5 +345,18 @@ impl L1Config {
         ui.add_space(10.0);
         ui.label(egui::RichText::new("Setup Hints:").strong());
         ui.label(self.selected_parent_chain.setup_hint());
+    }
+}
+
+/// A coloured dot summarising a chain's health.
+fn health_indicator(health: &L1ChainHealth) -> (&'static str, Color32) {
+    match health {
+        L1ChainHealth::Healthy { .. } => ("connected", Color32::GREEN),
+        L1ChainHealth::Probing => ("checking", Color32::YELLOW),
+        L1ChainHealth::Unreachable { .. } => ("unreachable", Color32::RED),
+        // Not transient: this endpoint will never be used for swaps.
+        L1ChainHealth::WrongChain { .. } => ("wrong network", Color32::RED),
+        L1ChainHealth::Disabled => ("disabled", Color32::GRAY),
+        L1ChainHealth::Unconfigured => ("not configured", Color32::GRAY),
     }
 }
