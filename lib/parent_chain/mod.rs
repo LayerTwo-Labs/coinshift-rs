@@ -16,6 +16,7 @@
 pub mod bitcoin_core;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod mock;
+pub mod solana;
 pub mod types;
 
 use thiserror::Error;
@@ -23,6 +24,7 @@ use thiserror::Error;
 use crate::{l1::config::L1ChainConfig, types::ParentChainType};
 
 pub use bitcoin_core::BitcoinCoreClient;
+pub use solana::SolanaClient;
 pub use types::{ChainIdentity, L1Payment, PaymentQuery};
 
 #[derive(Debug, Error)]
@@ -89,6 +91,9 @@ pub fn client_for(
         | ParentChainType::Signet
         | ParentChainType::Regtest => {
             std::sync::Arc::new(BitcoinCoreClient::new(chain, config.clone()))
+        }
+        ParentChainType::Solana | ParentChainType::SolanaDevnet => {
+            std::sync::Arc::new(SolanaClient::new(chain, config.clone()))
         }
     }
 }

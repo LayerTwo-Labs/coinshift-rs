@@ -298,7 +298,7 @@ impl RpcServer for RpcServerImpl {
                 if let Err(mismatch) = coinshift::l1::identity::verify(
                     chain,
                     &identity,
-                    entry.expected_genesis,
+                    entry.expected_genesis.clone(),
                 ) {
                     return Err(custom_err_msg(format!(
                         "refusing to save: {mismatch}. Nothing was written."

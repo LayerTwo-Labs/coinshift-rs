@@ -157,6 +157,10 @@ pub enum ParentChainType {
     Signet,
     /// Bitcoin Regtest (for testing)
     Regtest,
+    /// Solana mainnet-beta
+    Solana,
+    /// Solana devnet
+    SolanaDevnet,
 }
 
 impl ParentChainType {
@@ -165,6 +169,10 @@ impl ParentChainType {
         match self {
             Self::BTC => 6,
             Self::BCH | Self::LTC | Self::Signet | Self::Regtest => 3,
+            // Two, so the synthesized commitment ladder has a rung between
+            // "seen" and "final" to report progress with. See
+            // `ConfirmationModel::CommitmentLadder`.
+            Self::Solana | Self::SolanaDevnet => 2,
         }
     }
 
@@ -178,6 +186,7 @@ impl ParentChainType {
             Self::BTC => 1008,
             // ~3 days for faster chains / testnets
             Self::BCH | Self::LTC | Self::Signet => 432,
+            Self::Solana | Self::SolanaDevnet => 432,
             // Short expiration for testing
             Self::Regtest => 50,
         }
@@ -200,6 +209,8 @@ impl ParentChainType {
             Self::BCH => 2016,
             Self::LTC => 8064,
             Self::Signet => 2016,
+            // Solana's unit is slots, not blocks: ~2 days at 400ms.
+            Self::Solana | Self::SolanaDevnet => 432_000,
             // Generous for testing
             Self::Regtest => 500,
         }
@@ -215,7 +226,7 @@ impl ParentChainType {
             Self::BTC => Some(bitcoin::Network::Bitcoin),
             Self::Signet => Some(bitcoin::Network::Signet),
             Self::Regtest => Some(bitcoin::Network::Regtest),
-            Self::BCH | Self::LTC => None,
+            Self::BCH | Self::LTC | Self::Solana | Self::SolanaDevnet => None,
         }
     }
 
@@ -227,6 +238,10 @@ impl ParentChainType {
             | Self::LTC
             | Self::Signet
             | Self::Regtest => ConfirmationModel::BlockDepth,
+            // Solana finality is a commitment level, not a depth.
+            Self::Solana | Self::SolanaDevnet => {
+                ConfirmationModel::CommitmentLadder
+            }
         }
     }
 
@@ -238,6 +253,8 @@ impl ParentChainType {
             | Self::LTC
             | Self::Signet
             | Self::Regtest => TxidEncoding::BitcoinHex,
+            // A Solana signature is 64 bytes of base58.
+            Self::Solana | Self::SolanaDevnet => TxidEncoding::Base58,
         }
     }
 
@@ -251,6 +268,8 @@ impl ParentChainType {
             Self::LTC => 9332, // Litecoin Core default
             Self::Signet => 38332, // Bitcoin Signet default
             Self::Regtest => 18443, // Bitcoin Regtest default
+            // Solana RPC is HTTPS; there is no conventional local port.
+            Self::Solana | Self::SolanaDevnet => 443,
         }
     }
 
@@ -262,6 +281,8 @@ impl ParentChainType {
             Self::LTC => "Litecoin",
             Self::Signet => "Bitcoin Signet",
             Self::Regtest => "Bitcoin Regtest",
+            Self::Solana => "Solana",
+            Self::SolanaDevnet => "Solana Devnet",
         }
     }
 
@@ -278,6 +299,8 @@ impl ParentChainType {
             | Self::LTC
             | Self::Signet
             | Self::Regtest => 8,
+            // Lamports.
+            Self::Solana | Self::SolanaDevnet => 9,
         }
     }
 
@@ -289,6 +312,8 @@ impl ParentChainType {
             Self::LTC => "LTC",
             Self::Signet => "sBTC",
             Self::Regtest => "rBTC",
+            Self::Solana => "SOL",
+            Self::SolanaDevnet => "dSOL",
         }
     }
 
@@ -300,6 +325,8 @@ impl ParentChainType {
             Self::LTC => "http://localhost:9332",
             Self::Signet => "http://localhost:38332",
             Self::Regtest => "http://localhost:18443",
+            Self::Solana => "https://api.mainnet-beta.solana.com",
+            Self::SolanaDevnet => "https://api.devnet.solana.com",
         }
     }
 
@@ -315,6 +342,8 @@ impl ParentChainType {
             Self::LTC => "Litecoin (LTC)",
             Self::Signet => "Bitcoin Signet (sBTC)",
             Self::Regtest => "Bitcoin Regtest (rBTC)",
+            Self::Solana => "Solana (SOL)",
+            Self::SolanaDevnet => "Solana Devnet (dSOL)",
         }
     }
 
@@ -333,6 +362,10 @@ impl ParentChainType {
             Self::Signet => "Use Bitcoin Core with -signet -txindex=1 flags.",
             Self::Regtest => {
                 "Use Bitcoin Core with -regtest -txindex=1 flags for local testing."
+            }
+            Self::Solana | Self::SolanaDevnet => {
+                "The public endpoints are heavily rate limited; prefer your own \
+                 RPC provider. An endpoint with signature history is required."
             }
         }
     }
@@ -353,6 +386,21 @@ impl ParentChainType {
             return Err(
                 "L1 address has leading or trailing whitespace".to_string()
             );
+        }
+        // Solana addresses are base58 ed25519 public keys; the Bitcoin crate
+        // cannot help, but the length check is exact and worth having.
+        if matches!(self, Self::Solana | Self::SolanaDevnet) {
+            let bytes = bitcoin::base58::decode(trimmed).map_err(|err| {
+                format!("invalid base58 {} address: {err}", self.ticker())
+            })?;
+            if bytes.len() != SOLANA_PUBKEY_LEN {
+                return Err(format!(
+                    "{} address must decode to {SOLANA_PUBKEY_LEN} bytes, got {}",
+                    self.ticker(),
+                    bytes.len()
+                ));
+            }
+            return Ok(());
         }
         match self.bitcoin_network() {
             Some(network) => {
@@ -394,7 +442,15 @@ impl ParentChainType {
     /// Kept as a slice for callers that need one. `all_variants_are_listed` in
     /// the tests below fails if this drifts from the enum.
     pub fn all() -> &'static [ParentChainType] {
-        &[Self::BTC, Self::BCH, Self::LTC, Self::Signet, Self::Regtest]
+        &[
+            Self::BTC,
+            Self::BCH,
+            Self::LTC,
+            Self::Signet,
+            Self::Regtest,
+            Self::Solana,
+            Self::SolanaDevnet,
+        ]
     }
 }
 
@@ -532,6 +588,9 @@ pub enum SwapTxId {
     /// Variable-length transaction ID (for other chains)
     Hash(Vec<u8>),
 }
+
+/// Byte length of a Solana account address (an ed25519 public key).
+const SOLANA_PUBKEY_LEN: usize = 32;
 
 /// Byte length of a base58-encoded transaction ID (a Solana signature).
 const BASE58_TXID_LEN: usize = 64;
@@ -838,6 +897,8 @@ mod tests {
             (ParentChainType::LTC, 2),
             (ParentChainType::Signet, 3),
             (ParentChainType::Regtest, 4),
+            (ParentChainType::Solana, 5),
+            (ParentChainType::SolanaDevnet, 6),
         ];
         assert_eq!(expected.len(), ParentChainType::all().len());
         for (chain, discriminant) in expected {
@@ -872,8 +933,8 @@ mod tests {
 
     #[test]
     fn format_l1_amount_matches_bitcoin_for_8_decimals() {
-        // Pin the new formatter against the behaviour it replaces, so display
-        // for existing chains is unchanged.
+        // Pin the formatter against the behaviour it replaces, so display for
+        // the Bitcoin-family chains is unchanged.
         for sats in [
             0u64,
             1,
@@ -883,8 +944,10 @@ mod tests {
             123_456_789,
             2_100_000_000_000,
         ] {
-            for chain in ParentChainType::all() {
-                assert_eq!(chain.decimals(), 8);
+            for chain in ParentChainType::all()
+                .iter()
+                .filter(|chain| chain.decimals() == 8)
+            {
                 assert_eq!(
                     format_l1_amount(sats, *chain),
                     bitcoin::Amount::from_sat(sats)
@@ -893,6 +956,27 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn nine_decimal_chains_format_as_lamports() {
+        // The reason format/parse had to stop hardcoding 1e8: rendering
+        // lamports with Bitcoin's decimals would be off by a factor of ten.
+        let sol = ParentChainType::SolanaDevnet;
+        assert_eq!(sol.decimals(), 9);
+        assert_eq!(format_l1_amount(1_500_000_000, sol), "1.5");
+        assert_eq!(format_l1_amount(1, sol), "0.000000001");
+        assert_eq!(parse_l1_amount("1.5", sol), Ok(1_500_000_000));
+        assert_eq!(parse_l1_amount("0.000000001", sol), Ok(1));
+        // One decimal place further than the chain has base units for.
+        assert!(parse_l1_amount("0.0000000001", sol).is_err());
+
+        // The same text means different amounts on different chains, which is
+        // exactly why the chain has to be threaded through.
+        assert_ne!(
+            parse_l1_amount("1.5", sol),
+            parse_l1_amount("1.5", ParentChainType::BTC)
+        );
     }
 
     #[test]
@@ -951,14 +1035,50 @@ mod tests {
     #[test]
     fn parse_for_chain_uses_the_chain_encoding() {
         let hex = "aa".repeat(32);
+        let sig = bitcoin::base58::encode(&[7u8; BASE58_TXID_LEN]);
+
         for chain in ParentChainType::all() {
-            assert_eq!(chain.txid_encoding(), TxidEncoding::BitcoinHex);
-            let txid = SwapTxId::parse_for_chain(*chain, &hex).unwrap();
-            assert_eq!(txid.display_for_chain(*chain), hex);
-            // A base58 signature must NOT be accepted on a hex chain.
-            let sig = bitcoin::base58::encode(&[7u8; BASE58_TXID_LEN]);
-            assert!(SwapTxId::parse_for_chain(*chain, &sig).is_err());
+            match chain.txid_encoding() {
+                TxidEncoding::BitcoinHex => {
+                    let txid = SwapTxId::parse_for_chain(*chain, &hex).unwrap();
+                    assert_eq!(txid.display_for_chain(*chain), hex);
+                    // A base58 signature must NOT be accepted on a hex chain.
+                    assert!(
+                        SwapTxId::parse_for_chain(*chain, &sig).is_err(),
+                        "{chain:?} accepted a base58 signature"
+                    );
+                }
+                TxidEncoding::Base58 => {
+                    let txid = SwapTxId::parse_for_chain(*chain, &sig).unwrap();
+                    assert_eq!(txid.display_for_chain(*chain), sig);
+                    // ...and a 32-byte hex txid must not be accepted here.
+                    assert!(
+                        SwapTxId::parse_for_chain(*chain, &hex).is_err(),
+                        "{chain:?} accepted a Bitcoin hex txid"
+                    );
+                }
+            }
         }
+    }
+
+    #[test]
+    fn solana_addresses_are_validated_as_base58_pubkeys() {
+        let sol = ParentChainType::SolanaDevnet;
+        let valid = bitcoin::base58::encode(&[9u8; 32]);
+        assert_eq!(sol.validate_l1_address(&valid), Ok(()));
+
+        // Wrong length: a signature is 64 bytes, an address is 32.
+        assert!(
+            sol.validate_l1_address(&bitcoin::base58::encode(&[9u8; 64]))
+                .is_err()
+        );
+        assert!(sol.validate_l1_address("not base58 !!").is_err());
+        assert!(sol.validate_l1_address("").is_err());
+        // A Bitcoin address is not a Solana address.
+        assert!(
+            sol.validate_l1_address("1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2")
+                .is_err()
+        );
     }
 
     #[test]

@@ -118,17 +118,18 @@ impl L1Registry {
     /// Chains that are configured and enabled, with the client to probe them.
     fn probe_targets(
         &self,
-    ) -> Vec<(
-        ParentChainType,
-        Arc<dyn ParentChainClient>,
-        Option<bitcoin::BlockHash>,
-    )> {
+    ) -> Vec<(ParentChainType, Arc<dyn ParentChainClient>, Option<String>)>
+    {
         self.entries
             .read()
             .iter()
             .filter(|(_, entry)| entry.config.enabled)
             .map(|(chain, entry)| {
-                (*chain, entry.client.clone(), entry.config.expected_genesis)
+                (
+                    *chain,
+                    entry.client.clone(),
+                    entry.config.expected_genesis.clone(),
+                )
             })
             .collect()
     }

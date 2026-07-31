@@ -55,6 +55,11 @@ pub fn accepted_network_names(
         ParentChainType::BCH => &["main", "testnet4", "test4"],
         ParentChainType::Signet => &["signet"],
         ParentChainType::Regtest => &["regtest"],
+        // Solana has no network-name concept; the genesis hash carries the
+        // whole identity, and unlike BCH it is exact.
+        ParentChainType::Solana | ParentChainType::SolanaDevnet => {
+            &[crate::parent_chain::solana::SOLANA_NETWORK_NAME]
+        }
     }
 }
 
@@ -63,11 +68,33 @@ pub fn accepted_network_names(
 /// Computed from the `bitcoin` crate for the networks it models, so there are no
 /// hand-copied constants to get wrong. Returns `None` for BCH and LTC, whose
 /// genesis the crate cannot supply.
-pub fn expected_genesis(chain: ParentChainType) -> Option<bitcoin::BlockHash> {
-    chain
-        .bitcoin_network()
-        .map(|network| bitcoin::constants::genesis_block(network).block_hash())
+pub fn expected_genesis(chain: ParentChainType) -> Option<String> {
+    // Bitcoin-family: computed from the crate, so there is no constant to get
+    // wrong. Solana: verified against the public cluster endpoints, since
+    // nothing in the tree can derive them.
+    if let Some(network) = chain.bitcoin_network() {
+        return Some(
+            bitcoin::constants::genesis_block(network)
+                .block_hash()
+                .to_string(),
+        );
+    }
+    match chain {
+        ParentChainType::Solana => Some(SOLANA_MAINNET_GENESIS.to_string()),
+        ParentChainType::SolanaDevnet => {
+            Some(SOLANA_DEVNET_GENESIS.to_string())
+        }
+        _ => None,
+    }
 }
+
+/// Genesis hash of Solana mainnet-beta.
+pub const SOLANA_MAINNET_GENESIS: &str =
+    "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d";
+
+/// Genesis hash of Solana devnet.
+pub const SOLANA_DEVNET_GENESIS: &str =
+    "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG";
 
 /// Check the evidence an endpoint gave against what `chain` requires.
 ///
@@ -77,7 +104,7 @@ pub fn expected_genesis(chain: ParentChainType) -> Option<bitcoin::BlockHash> {
 pub fn verify(
     chain: ParentChainType,
     identity: &ChainIdentity,
-    configured_genesis: Option<bitcoin::BlockHash>,
+    configured_genesis: Option<String>,
 ) -> Result<(), IdentityMismatch> {
     let accepted = accepted_network_names(chain);
     if !accepted.contains(&identity.chain_name.as_str()) {
@@ -89,15 +116,14 @@ pub fn verify(
     }
 
     let expected = configured_genesis.or_else(|| expected_genesis(chain));
-    if let (Some(expected), Some(reported)) = (expected, &identity.genesis) {
-        let expected = expected.to_string();
-        if *reported != expected {
-            return Err(IdentityMismatch::Genesis {
-                chain,
-                reported: reported.clone(),
-                expected,
-            });
-        }
+    if let (Some(expected), Some(reported)) = (expected, &identity.genesis)
+        && *reported != expected
+    {
+        return Err(IdentityMismatch::Genesis {
+            chain,
+            reported: reported.clone(),
+            expected,
+        });
     }
     Ok(())
 }
@@ -114,7 +140,7 @@ mod tests {
     }
 
     fn genesis_of(chain: ParentChainType) -> String {
-        expected_genesis(chain).unwrap().to_string()
+        expected_genesis(chain).unwrap()
     }
 
     #[test]
@@ -165,8 +191,10 @@ mod tests {
             verify(ParentChainType::Signet, &id, None),
             Err(IdentityMismatch::Genesis { .. })
         ));
-        let pinned: bitcoin::BlockHash = custom.parse().unwrap();
-        assert_eq!(verify(ParentChainType::Signet, &id, Some(pinned)), Ok(()));
+        assert_eq!(
+            verify(ParentChainType::Signet, &id, Some(custom.clone())),
+            Ok(())
+        );
     }
 
     #[test]

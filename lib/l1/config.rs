@@ -140,9 +140,15 @@ pub struct L1ChainConfig {
     /// Whether to use this chain. A disabled entry is kept but not polled.
     #[serde(default = "default_enabled")]
     pub enabled: bool,
-    /// Overrides the expected genesis hash for custom signet/regtest networks.
+    /// Overrides the expected genesis hash, for custom signet/regtest networks
+    /// or a Solana cluster we do not know about.
+    ///
+    /// A string rather than a `bitcoin::BlockHash`: Solana genesis hashes are
+    /// base58, not Bitcoin block hashes, and identity comparison is textual
+    /// anyway. Existing configs are unaffected, since `BlockHash` already
+    /// serialized as a hex string.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expected_genesis: Option<bitcoin::BlockHash>,
+    pub expected_genesis: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub poll_interval_secs: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

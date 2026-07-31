@@ -915,6 +915,60 @@ until it expired.
 
 Suite: 10 passed, 0 failed.
 
+### 3.11 Phase 7 — implementation notes (done)
+
+`Solana` and `SolanaDevnet` are appended to `ParentChainType` (discriminants 5
+and 6, pinned by `borsh_discriminants_are_stable`), and
+`lib/parent_chain/solana.rs` implements the trait for them.
+
+**Genesis hashes are verified, not remembered.** Both were queried from the live
+clusters: mainnet-beta `5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d`, devnet
+`EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG`. Solana has no
+`getblockchaininfo`-style network name, so identity rests entirely on genesis —
+which, unlike Bitcoin Cash, is exact. `expected_genesis` changed from
+`Option<bitcoin::BlockHash>` to `Option<String>` to hold them; existing configs
+are unaffected because `BlockHash` already serialized as a hex string.
+
+**Payments are balance deltas, not outputs.** `credited_lamports` diffs
+`preBalances`/`postBalances` for the recipient's index in `accountKeys`, which
+is correct for plain transfers, CPI transfers and multi-transfer transactions
+alike — instruction parsing would not be. A transaction where the recipient is
+the fee payer is rejected, because the fee is folded into that account's delta
+and no exact amount can be attributed. Failed transactions credit nobody.
+
+**Finality is synthesized.** `ladder()` maps `finalized` → `required`,
+`confirmed` → `min(required-1, 1)`, anything else → 0. `SwapState` is
+Borsh-encoded to the database and `required_confirmations` is inside the block
+body, so neither could change shape to carry a commitment level. The mapping is
+monotone and never reaches `required` before true finality — including when
+`required` is 1, the case that would be easiest to get wrong, where `confirmed`
+reports 0. `default_confirmations` is 2 for Solana so the ladder has a rung to
+show progress on.
+
+Age is measured in slots (`max_l1_tx_age` = 432,000, ~2 days), which is the
+whole reason `L1Payment` splits `age` from `confirmations`: for this chain they
+are unrelated quantities.
+
+**Rate limits.** A per-address cursor (`until:`) means each poll asks only for
+signatures since the last one, requests are paced to a minimum interval, and a
+429 is reported as an ordinary failure so the swap is left alone rather than
+retried into a deeper hole.
+
+Three Phase 0 tests failed when Solana landed, all for the right reason: they
+asserted every chain had 8 decimals and Bitcoin-hex txids. They are now
+chain-aware and assert the *differences* — that lamport amounts format
+differently from sats, and that a hex txid is rejected on a base58 chain and
+vice versa.
+
+`devnet_identify_and_tip` talks to the real devnet endpoint. It is `#[ignore]`d
+so the suite stays offline; run it with `--ignored`. It confirms the adapter
+reads the right genesis, that the registry accepts it for `SolanaDevnet`, and
+that a `Solana` (mainnet) swap pointed at devnet is rejected.
+
+Integration suite unchanged: 10 passed, 0 failed.
+
+---
+
 **Running the suite outside a terminal.** The harness draws `tracing-indicatif`
 progress bars and panics if stdout is not a TTY. `scripts/run_integration_tests.sh`
 handles that with `script -q /dev/null`, but that fails in a nested background
