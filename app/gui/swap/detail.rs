@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 
-use coinshift::parent_chain_rpc::ParentChainRpcClient;
+use coinshift::parent_chain_rpc::{
+    ParentChainRpcClient, btc_rpc_value_to_sats,
+};
 use coinshift::types::{Address, Swap, SwapId, SwapState, SwapTxId};
 use eframe::egui::{self, Button, ScrollArea};
 
@@ -864,7 +866,10 @@ impl SwapDetail {
 
                     // Validate outputs
                     let found = tx_info.vout.iter().any(|vout| {
-                        let sats = (vout.value * 100_000_000.0) as u64;
+                        let Some(sats) = btc_rpc_value_to_sats(vout.value)
+                        else {
+                            return false;
+                        };
                         let addr_match = vout
                             .script_pub_key
                             .address

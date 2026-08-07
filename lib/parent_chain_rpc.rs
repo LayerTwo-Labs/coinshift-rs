@@ -11,6 +11,25 @@ use thiserror::Error;
 
 use crate::types::ParentChainType;
 
+/// Convert a Bitcoin Core-style RPC `vout.value` (BTC as `f64`) to satoshis.
+///
+/// Bitcoin Core JSON-RPC returns amounts as floats. Multiplying by 1e8 and
+/// casting with `as u64` **truncates**, so values that are not exact in binary
+/// floating point (for example `0.29`) become one sat too low and never match
+/// an exact sat target. This helper **rounds** to the nearest sat instead.
+///
+/// Returns `None` for non-finite, negative, or out-of-range values.
+pub fn btc_rpc_value_to_sats(value: f64) -> Option<u64> {
+    if !value.is_finite() || value < 0.0 {
+        return None;
+    }
+    let sats = (value * 100_000_000.0).round();
+    if sats < 0.0 || sats > u64::MAX as f64 {
+        return None;
+    }
+    Some(sats as u64)
+}
+
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("HTTP request error: {0}")]
@@ -331,8 +350,11 @@ impl ParentChainRpcClient {
                 Ok(tx) => {
                     // Check if any output matches the address and amount
                     for vout in &tx.vout {
-                        let vout_value_sats =
-                            (vout.value * 100_000_000.0) as u64;
+                        let Some(vout_value_sats) =
+                            btc_rpc_value_to_sats(vout.value)
+                        else {
+                            continue;
+                        };
                         let matches_address = vout
                             .script_pub_key
                             .address
@@ -597,6 +619,51 @@ pub fn get_rpc_config(_parent_chain: ParentChainType) -> Option<RpcConfig> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Truncating `as u64` after `* 1e8` is the bug this helper replaces.
+    fn truncating_cast_sats(value: f64) -> u64 {
+        (value * 100_000_000.0) as u64
+    }
+
+    #[test]
+    fn btc_rpc_value_to_sats_rounds_classic_truncation_case() {
+        // 0.29 is not exact in binary f64; truncation yields one sat short.
+        assert_eq!(truncating_cast_sats(0.29), 28_999_999);
+        assert_eq!(btc_rpc_value_to_sats(0.29), Some(29_000_000));
+    }
+
+    #[test]
+    fn btc_rpc_value_to_sats_exact_and_whole_coins() {
+        assert_eq!(btc_rpc_value_to_sats(1.0), Some(100_000_000));
+        assert_eq!(btc_rpc_value_to_sats(0.0), Some(0));
+        assert_eq!(btc_rpc_value_to_sats(0.00000001), Some(1));
+        assert_eq!(btc_rpc_value_to_sats(50.0), Some(5_000_000_000));
+    }
+
+    #[test]
+    fn btc_rpc_value_to_sats_rejects_invalid() {
+        assert_eq!(btc_rpc_value_to_sats(f64::NAN), None);
+        assert_eq!(btc_rpc_value_to_sats(f64::INFINITY), None);
+        assert_eq!(btc_rpc_value_to_sats(f64::NEG_INFINITY), None);
+        assert_eq!(btc_rpc_value_to_sats(-0.01), None);
+    }
+
+    #[test]
+    fn btc_rpc_value_to_sats_matches_swap_target_where_cast_would_not() {
+        // Automatic match and GUI claim both compare against exact sat targets.
+        let target_sats = 29_000_000u64;
+        let rpc_float = 0.29_f64;
+        assert_ne!(
+            truncating_cast_sats(rpc_float),
+            target_sats,
+            "precondition: cast must miss the target (documents the bug)"
+        );
+        assert_eq!(
+            btc_rpc_value_to_sats(rpc_float),
+            Some(target_sats),
+            "rounded conversion must hit the exact sat target used by swaps"
+        );
+    }
 
     #[test]
     fn load_rpc_config_from_path_missing_file_returns_none() {
