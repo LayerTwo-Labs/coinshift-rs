@@ -273,6 +273,9 @@ pub mod mainchain {
     use super::common::{ConsensusHex, ReverseHex};
     use crate::types::{M6id, Output, OutputContent, THIS_SIDECHAIN};
 
+    // `async_trait` marks the generated service methods `#[must_use]`, and
+    // they return a boxed future that is already `#[must_use]`.
+    #[allow(clippy::double_must_use)]
     pub mod generated {
         tonic::include_proto!("cusf.mainchain.v1");
     }
