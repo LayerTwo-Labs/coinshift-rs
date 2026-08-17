@@ -5,6 +5,7 @@ use bip300301_enforcer_integration_tests::{
 use futures::{FutureExt, future::BoxFuture};
 
 use crate::{
+    block_template::block_template_trial,
     confirmations_block_inclusion::confirmations_block_inclusion_trial,
     ibd::ibd_trial,
     l1_rpc_dependency::l1_rpc_dependency_trial,
@@ -58,6 +59,11 @@ pub fn tests(
     failure_collector: TestFailureCollector,
 ) -> Vec<AsyncTrial<BoxFuture<'static, anyhow::Result<()>>>> {
     vec![
+        block_template_trial(
+            bin_paths.clone(),
+            file_registry.clone(),
+            failure_collector.clone(),
+        ),
         deposit_withdraw_roundtrip(
             bin_paths.clone(),
             file_registry.clone(),
