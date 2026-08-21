@@ -100,6 +100,7 @@ The CLI talks to the Coinshift RPC server (default `http://localhost:6255`). Use
 | Command | Description |
 |---------|-------------|
 | `create-swap` | Create L2->L1 swap (`--parent-chain`, `--l1-recipient-address`, amounts, etc.) |
+| `accept-swap` | Reserve an open swap for your L2 address, **before** paying on L1 (`--swap-id`) |
 | `update-swap-l1-txid` | Set L1 txid and confirmations for a swap |
 | `claim-swap` | Claim swap after L1 confirmations |
 | `list-swaps` | List all swaps |

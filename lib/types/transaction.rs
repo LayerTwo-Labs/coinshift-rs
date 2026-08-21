@@ -537,6 +537,24 @@ pub enum TxData {
         l2_claimer_address: Option<Address>,
         proof_data: Option<Vec<u8>>,
     },
+    /// Reserve an open swap for a claimer, on-chain, *before* they pay on L1.
+    ///
+    /// This is what makes an open swap claimable safely: it records which L2
+    /// address is entitled to the escrow in block data every node can see,
+    /// rather than in node-local state. The ordering matters — the reservation
+    /// must precede the L1 payment, so that there is nothing to front-run. An
+    /// attacker who reserves first has only reserved it; they still cannot
+    /// claim without paying on L1, the honest filler sees the reservation and
+    /// does not pay, and the reservation lapses.
+    ///
+    /// Must be appended last: borsh encodes the variant index, so inserting
+    /// above would renumber `SwapCreate` / `SwapClaim`.
+    SwapAccept {
+        swap_id: [u8; 32],
+        /// L2 address that will be entitled to claim. The transaction must
+        /// spend an input owned by this address, which proves control of it.
+        l2_claimer_address: Address,
+    },
 }
 
 // Manual ToSchema implementation for TxData

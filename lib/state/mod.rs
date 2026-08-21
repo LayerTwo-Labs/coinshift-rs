@@ -20,8 +20,8 @@ use crate::{
         Authorized, AuthorizedTransaction, BlockHash, Body, FilledTransaction,
         GetAddress, GetValue, Header, InPoint, M6id, MerkleRoot, OutPoint,
         OutPointKey, Output, ParentChainType, PointedOutput, SpentOutput, Swap,
-        SwapId, SwapState, SwapTxId, Transaction, TxData, VERSION, Verify,
-        Version, WithdrawalBundle, WithdrawalBundleStatus,
+        SwapId, SwapReservation, SwapState, SwapTxId, Transaction, TxData,
+        VERSION, Verify, Version, WithdrawalBundle, WithdrawalBundleStatus,
         proto::mainchain::TwoWayPegData,
     },
     util::Watchable,
@@ -147,11 +147,19 @@ pub struct State {
         SerdeBincode<u32>,
         SerdeBincode<Vec<ExpiredSwapReversal>>,
     >,
+    /// On-chain reservations of open swaps, from `TxData::SwapAccept`.
+    ///
+    /// Consensus state: written only by block connect/disconnect and rebuilt by
+    /// `reconstruct_swaps`. Every node derives identical contents from the same
+    /// blocks, which is what lets claim validation enforce a payout target for
+    /// open swaps.
+    pub swap_reservations:
+        DatabaseUnique<SerdeBincode<SwapId>, SerdeBincode<SwapReservation>>,
     _version: DatabaseUnique<UnitKey, SerdeBincode<Version>>,
 }
 
 impl State {
-    pub const NUM_DBS: u32 = 16;
+    pub const NUM_DBS: u32 = 17;
 
     pub fn new(env: &sneed::Env) -> Result<Self, Error> {
         let mut rwtxn = env.write_txn().map_err(EnvError::from)?;
@@ -192,6 +200,9 @@ impl State {
                 .map_err(EnvError::from)?;
         let swaps = DatabaseUnique::create(env, &mut rwtxn, "swaps")
             .map_err(EnvError::from)?;
+        let swap_reservations =
+            DatabaseUnique::create(env, &mut rwtxn, "swap_reservations")
+                .map_err(EnvError::from)?;
         let swaps_by_l1_txid =
             DatabaseUnique::create(env, &mut rwtxn, "swaps_by_l1_txid")
                 .map_err(EnvError::from)?;
@@ -232,6 +243,7 @@ impl State {
             swaps_by_recipient,
             locked_swap_outputs,
             expired_swaps,
+            swap_reservations,
             _version: version,
         })
     }
@@ -428,6 +440,14 @@ impl State {
             }
             TxData::SwapClaim { .. } => {
                 swap::validate_swap_claim(
+                    self,
+                    rotxn,
+                    &transaction.transaction,
+                    &filled_transaction,
+                )?;
+            }
+            TxData::SwapAccept { .. } => {
+                swap::validate_swap_accept(
                     self,
                     rotxn,
                     &transaction.transaction,
@@ -1566,6 +1586,75 @@ impl State {
         Ok(swap_id)
     }
 
+    /// Read the on-chain reservation for a swap, if any.
+    pub fn get_swap_reservation(
+        &self,
+        rotxn: &RoTxn,
+        swap_id: &SwapId,
+    ) -> Result<Option<SwapReservation>, Error> {
+        Ok(self.swap_reservations.try_get(rotxn, swap_id)?)
+    }
+
+    /// Record a reservation. Called only from block connect / reconstruction.
+    pub fn reserve_swap(
+        &self,
+        rwtxn: &mut RwTxn,
+        swap_id: &SwapId,
+        claimer: Address,
+        accepted_at_height: u32,
+    ) -> Result<(), Error> {
+        let reservation = SwapReservation {
+            claimer,
+            accepted_at_height,
+        };
+        self.swap_reservations
+            .put(rwtxn, swap_id, &reservation)
+            .map_err(DbError::from)?;
+        Ok(())
+    }
+
+    /// Drop a reservation. Called only from block disconnect, and when a swap
+    /// is removed.
+    ///
+    /// A reservation that had already lapsed is indistinguishable from none —
+    /// both permit a new accept and neither permits a claim — so clearing is a
+    /// correct reversal whether or not one was live.
+    pub fn clear_swap_reservation(
+        &self,
+        rwtxn: &mut RwTxn,
+        swap_id: &SwapId,
+    ) -> Result<(), Error> {
+        let _: bool = self
+            .swap_reservations
+            .delete(rwtxn, swap_id)
+            .map_err(DbError::from)?;
+        Ok(())
+    }
+
+    /// The address entitled to a swap's escrow at `height`, according to block
+    /// data alone: the recipient fixed at creation, or the holder of a live
+    /// reservation on an open swap.
+    ///
+    /// Returns `None` for an open swap that is unreserved or whose reservation
+    /// has lapsed — nobody may claim it until it is reserved again.
+    pub fn entitled_claimer_at(
+        &self,
+        rotxn: &RoTxn,
+        swap: &Swap,
+        height: u32,
+    ) -> Result<Option<Address>, Error> {
+        if let Some(recipient) = swap.l2_recipient {
+            return Ok(Some(recipient));
+        }
+        let Some(reservation) = self.get_swap_reservation(rotxn, &swap.id)?
+        else {
+            return Ok(None);
+        };
+        Ok(reservation
+            .is_live_at(swap.parent_chain, height)
+            .then_some(reservation.claimer))
+    }
+
     /// Update swap L1 transaction ID and state
     /// Called when a coinshift transaction is detected on L1
     /// For open swaps, l1_claimer_address should be the address of the person who sent the L1 transaction;
@@ -1927,6 +2016,26 @@ impl State {
                                 swap_id = %swap_id,
                                 block_height = height,
                                 "SwapClaim found but swap not found in database (may have been created in a later block)"
+                            );
+                        }
+                    }
+                    TxData::SwapAccept {
+                        swap_id,
+                        l2_claimer_address,
+                    } => {
+                        let swap_id = SwapId(*swap_id);
+                        if self.get_swap(rwtxn, &swap_id)?.is_some() {
+                            self.reserve_swap(
+                                rwtxn,
+                                &swap_id,
+                                *l2_claimer_address,
+                                height,
+                            )?;
+                        } else {
+                            tracing::warn!(
+                                swap_id = %swap_id,
+                                block_height = height,
+                                "SwapAccept found but swap not found in database"
                             );
                         }
                     }

@@ -113,6 +113,19 @@ pub enum Command {
     GetWalletUtxos,
     /// Get the current block count
     GetBlockcount,
+    /// Reserve an open swap for your L2 address, on-chain.
+    ///
+    /// Do this BEFORE paying on L1: the reservation is what entitles you to the
+    /// escrow. Reserving after you pay can be front-run by anyone watching.
+    AcceptSwap {
+        #[arg(long, value_parser = parse_swap_id)]
+        swap_id: SwapId,
+        /// Defaults to an address of this wallet
+        #[arg(long)]
+        l2_claimer_address: Option<Address>,
+        #[arg(long)]
+        fee_sats: Option<u64>,
+    },
     /// Claim a swap (after L1 has required confirmations). For open swaps, pass l2_claimer_address.
     ClaimSwap {
         #[arg(long, value_parser = parse_swap_id)]
@@ -278,6 +291,16 @@ where
                 )
                 .await?;
             format!("Swap created: id={} txid={}", swap_id, txid)
+        }
+        Command::AcceptSwap {
+            swap_id,
+            l2_claimer_address,
+            fee_sats,
+        } => {
+            let txid = rpc_client
+                .accept_swap(swap_id, l2_claimer_address, fee_sats)
+                .await?;
+            format!("Swap reserved: txid={}", txid)
         }
         Command::ClaimSwap {
             swap_id,

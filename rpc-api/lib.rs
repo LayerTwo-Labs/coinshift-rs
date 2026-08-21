@@ -270,6 +270,24 @@ pub trait Rpc {
     async fn get_swap_status(&self, swap_id: SwapId)
     -> RpcResult<Option<Swap>>;
 
+    /// Reserve an open swap for a claimer, before paying on L1.
+    ///
+    /// This is what entitles an address to the escrow: the reservation is
+    /// recorded on-chain, so every node agrees who may claim. Reserve *first*,
+    /// then pay on L1 — a reservation taken after the L1 payment can be
+    /// front-run by anyone watching.
+    ///
+    /// `l2_claimer_address` defaults to an address of this wallet. The
+    /// reservation lapses after the parent chain's acceptance window if the
+    /// swap is not claimed.
+    #[method(name = "accept_swap")]
+    async fn accept_swap(
+        &self,
+        swap_id: SwapId,
+        l2_claimer_address: Option<Address>,
+        fee_sats: Option<u64>,
+    ) -> RpcResult<Txid>;
+
     /// Claim a swap (after L1 transaction has required confirmations)
     /// For open swaps, l2_claimer_address is required (the claimer's L2 address)
     #[method(name = "claim_swap")]

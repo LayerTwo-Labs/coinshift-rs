@@ -591,23 +591,37 @@ impl SwapDetail {
             return;
         }
 
-        let recipient = swap
-            .l2_recipient
-            .or(swap.l2_claimer_address)
-            .or(l2_claimer_address)
-            .ok_or_else(|| {
-                tracing::error!("Open swap requires claimer address");
-            })
-            .ok();
+        let height = app
+            .node
+            .state()
+            .try_get_height(&rotxn)
+            .ok()
+            .flatten()
+            .map_or(0, |height| height + 1);
+        let recipient = app
+            .node
+            .state()
+            .entitled_claimer_at(&rotxn, &swap, height)
+            .ok()
+            .flatten();
 
         let recipient = match recipient {
             Some(addr) => addr,
             None => {
-                self.claim_error =
-                    Some("Open swap requires claimer address".into());
+                self.claim_error = Some(
+                    "Open swap has no live reservation — accept it first (before paying on L1)"
+                        .into(),
+                );
                 return;
             }
         };
+        if let Some(requested) = l2_claimer_address
+            && requested != recipient
+        {
+            self.claim_error =
+                Some(format!("Swap is reserved for {recipient}"));
+            return;
+        }
 
         let l2_claimer_for_tx =
             swap.l2_recipient.is_none().then_some(recipient);
