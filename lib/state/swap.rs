@@ -299,7 +299,26 @@ pub fn validate_swap_claim(
             }
             stored_l2
         } else if let Some(claimer_addr) = l2_claimer_address {
-            // No stored L2 (e.g. auto-detected L1 tx): accept claimer address from tx
+            // KNOWN GAP: no L2 claimer is bound to this swap, so the address
+            // carried by the claim is taken at face value — whoever claims
+            // first gets the escrow.
+            //
+            // This cannot be tightened into a rejection here. `l2_claimer_address`
+            // is only ever set by the node-local `update_swap_l1_txid` RPC; it is
+            // not derived from a block and is never gossiped, so a peer that
+            // relays an honest claim has no binding of its own to check against.
+            // Rejecting would make every honest open-swap claim fail on every
+            // node but the claimer's, and `net_task` drops peers whose
+            // transactions fail validation — the claim would not propagate at
+            // all. The fix is to make the binding on-chain (see the
+            // `SwapAccept` design in docs/COINSHIFT_HOW_IT_WORKS.md), not to
+            // harden this branch.
+            tracing::warn!(
+                %swap_id,
+                claimer = %claimer_addr,
+                "Accepting open swap claim with no bound L2 claimer address; \
+                 entitlement is unverified (first claim wins)"
+            );
             *claimer_addr
         } else {
             return Err(Error::InvalidTransaction(
@@ -359,14 +378,29 @@ pub fn validate_no_locked_outputs(
 /// them here would let a node that has not yet observed the L1 fill reject an
 /// otherwise valid block. Only the rules that follow deterministically from
 /// on-chain data are checked: that the claim spends an output locked to its
-/// swap, spends nothing locked to another swap, and, for pre-specified swaps,
-/// pays the recipient fixed at creation.
+/// swap, spends nothing locked to another swap, and pays the full `l2_amount`
+/// to a single recipient — the one fixed at creation for pre-specified swaps,
+/// or the `l2_claimer_address` the claim itself declares for open swaps.
+///
+/// Note what this does *not* establish for open swaps: that the declared
+/// claimer is the party who actually paid on L1. The L1 fill is not on-chain
+/// data at this layer, and `Swap::l2_claimer_address` — the only record of that
+/// binding — is written by a node-local RPC, never by `connect`, so most nodes
+/// do not have it. An attacker who declares their own address therefore passes
+/// every rule here. Open swaps are first-claim-wins until the binding itself
+/// moves on-chain; see [`validate_swap_claim`] for why the mempool cannot close
+/// the gap either.
 pub fn validate_swap_claim_consensus(
     state: &State,
     rotxn: &RoTxn,
     transaction: &Transaction,
 ) -> Result<(), Error> {
-    let TxData::SwapClaim { swap_id, .. } = &transaction.data else {
+    let TxData::SwapClaim {
+        swap_id,
+        l2_claimer_address,
+        ..
+    } = &transaction.data
+    else {
         return Err(Error::InvalidTransaction(
             "Expected SwapClaim transaction".to_string(),
         ));
@@ -396,18 +430,36 @@ pub fn validate_swap_claim_consensus(
         ));
     }
 
-    // For pre-specified swaps both the recipient and the swapped amount are
-    // fixed at creation, so consensus can require the claim to pay the recipient
-    // the full amount. Open swaps derive their recipient from node-local L1
-    // monitoring, so that binding is left to the mempool check.
-    if let Some(swap) = state.get_swap(rotxn, &swap_id)?
-        && let Some(recipient) = swap.l2_recipient
-    {
-        let amount_to_recipient = amount_paid_to(transaction, &recipient)?;
+    if let Some(swap) = state.get_swap(rotxn, &swap_id)? {
+        // For pre-specified swaps both the recipient and the swapped amount are
+        // fixed at creation, so consensus can require the claim to pay the
+        // recipient the full amount.
+        //
+        // Open swaps have no recipient fixed at creation: which L2 address is
+        // *entitled* to the escrow follows from the L1 fill, which is
+        // node-local, non-deterministic data (see the doc comment above). What
+        // consensus can still pin down is that the claim pays out to the single
+        // address it declares on-chain, in full. Without that, a claim could
+        // spend the escrow while paying the declared claimer a token amount, or
+        // nothing at all, and every node would accept it.
+        let expected_recipient = match swap.l2_recipient {
+            Some(recipient) => recipient,
+            None => match l2_claimer_address {
+                Some(claimer) => *claimer,
+                None => {
+                    return Err(Error::InvalidTransaction(
+                        "Open swap claim requires l2_claimer_address"
+                            .to_string(),
+                    ));
+                }
+            },
+        };
+        let amount_to_recipient =
+            amount_paid_to(transaction, &expected_recipient)?;
         if amount_to_recipient < swap.l2_amount {
             return Err(Error::InvalidTransaction(format!(
                 "SwapClaim must pay at least {} to {}, but pays {}",
-                swap.l2_amount, recipient, amount_to_recipient
+                swap.l2_amount, expected_recipient, amount_to_recipient
             )));
         }
     }
@@ -780,6 +832,264 @@ mod tests {
         assert!(
             result.is_ok(),
             "full-amount claim should pass the mempool validator, got {result:?}"
+        );
+    }
+
+    /// An open swap (`l2_recipient == None`) whose L1 fill has been detected
+    /// and which is `ReadyToClaim`. `bound_claimer` is the L2 address the
+    /// filler registered via `update_swap_l1_txid`, if any.
+    fn open_swap_state(
+        bound_claimer: Option<Address>,
+    ) -> (temp_dir::TempDir, Env, State, SwapId, OutPoint, Output) {
+        let (dir, env, state) = test_state();
+        let creator = Address([5u8; 20]);
+        let swap_id = SwapId([12u8; 32]);
+        let outpoint = OutPoint::Regular {
+            txid: Txid([3u8; 32]),
+            vout: 0,
+        };
+        let locked_output = Output {
+            address: creator,
+            content: OutputContent::SwapPending {
+                value: sat(50_000),
+                swap_id: swap_id.0,
+            },
+        };
+        let mut swap = Swap::new(
+            swap_id,
+            SwapDirection::L2ToL1,
+            ParentChainType::Regtest,
+            // Non-zero: an L1 fill has been observed for this swap.
+            SwapTxId::Hash32([0xaa; 32]),
+            None,
+            None, // open swap: no recipient fixed at creation
+            sat(50_000),
+            "rbtc-recipient".to_string(),
+            sat(40_000),
+            0,
+            None,
+            Some(creator),
+        );
+        swap.state = SwapState::ReadyToClaim;
+        if let Some(claimer) = bound_claimer {
+            swap.set_l2_claimer_address(claimer);
+        }
+
+        let mut rwtxn = env.write_txn().unwrap();
+        state.save_swap(&mut rwtxn, &swap).unwrap();
+        state
+            .lock_output_to_swap(&mut rwtxn, &outpoint, &swap_id)
+            .unwrap();
+        rwtxn.commit().unwrap();
+
+        (dir, env, state, swap_id, outpoint, locked_output)
+    }
+
+    fn open_claim_tx(
+        swap_id: SwapId,
+        outpoint: OutPoint,
+        declared_claimer: Option<Address>,
+        paid_to: Address,
+        paid: bitcoin::Amount,
+    ) -> Transaction {
+        Transaction {
+            inputs: vec![(outpoint, [0u8; 32])],
+            proof: Default::default(),
+            outputs: vec![Output {
+                address: paid_to,
+                content: OutputContent::Value(paid),
+            }],
+            data: TxData::SwapClaim {
+                swap_id: swap_id.0,
+                l2_claimer_address: declared_claimer,
+                proof_data: None,
+            },
+        }
+    }
+
+    /// Block validation must not let an open swap's escrow be routed away from
+    /// the address the claim itself declares. Before this check, consensus
+    /// skipped the payout rule entirely whenever `l2_recipient` was `None`, so
+    /// a claim could spend the escrow and pay anyone.
+    #[test]
+    fn block_validation_rejects_open_claim_paying_undeclared_address() {
+        let (_dir, env, state, swap_id, outpoint, locked_output) =
+            open_swap_state(None);
+        let claimer = Address([7u8; 20]);
+        let attacker = Address([4u8; 20]);
+
+        let tx = open_claim_tx(
+            swap_id,
+            outpoint,
+            Some(claimer),
+            attacker,
+            sat(50_000),
+        );
+        let filled = FilledTransaction {
+            spent_utxos: vec![locked_output],
+            transaction: tx.clone(),
+        };
+
+        let rotxn = env.read_txn().unwrap();
+        let result = validate_block_transaction(&state, &rotxn, &tx, &filled);
+        assert!(
+            matches!(result, Err(Error::InvalidTransaction(_))),
+            "open claim paying an address other than the declared claimer should be rejected, got {result:?}"
+        );
+    }
+
+    /// Paying the declared claimer a token amount and keeping the rest is the
+    /// same theft with an extra output; the full `l2_amount` must land there.
+    #[test]
+    fn block_validation_rejects_open_claim_underpaying_declared_claimer() {
+        let (_dir, env, state, swap_id, outpoint, locked_output) =
+            open_swap_state(None);
+        let claimer = Address([7u8; 20]);
+
+        let tx =
+            open_claim_tx(swap_id, outpoint, Some(claimer), claimer, sat(1));
+        let filled = FilledTransaction {
+            spent_utxos: vec![locked_output],
+            transaction: tx.clone(),
+        };
+
+        let rotxn = env.read_txn().unwrap();
+        let result = validate_block_transaction(&state, &rotxn, &tx, &filled);
+        assert!(
+            matches!(result, Err(Error::InvalidTransaction(_))),
+            "open claim underpaying the declared claimer should be rejected, got {result:?}"
+        );
+    }
+
+    /// A claim on an open swap that declares no claimer has no payout target
+    /// consensus can check, so it must be rejected outright.
+    #[test]
+    fn block_validation_rejects_open_claim_without_declared_claimer() {
+        let (_dir, env, state, swap_id, outpoint, locked_output) =
+            open_swap_state(None);
+        let attacker = Address([4u8; 20]);
+
+        let tx = open_claim_tx(swap_id, outpoint, None, attacker, sat(50_000));
+        let filled = FilledTransaction {
+            spent_utxos: vec![locked_output],
+            transaction: tx.clone(),
+        };
+
+        let rotxn = env.read_txn().unwrap();
+        let result = validate_block_transaction(&state, &rotxn, &tx, &filled);
+        assert!(
+            matches!(result, Err(Error::InvalidTransaction(_))),
+            "open claim without l2_claimer_address should be rejected, got {result:?}"
+        );
+    }
+
+    /// The honest open-swap claim built by `Wallet::create_swap_claim_tx` —
+    /// declares the claimer and pays it the whole escrow — must still connect.
+    #[test]
+    fn block_validation_accepts_open_claim_paying_declared_claimer() {
+        let (_dir, env, state, swap_id, outpoint, locked_output) =
+            open_swap_state(None);
+        let claimer = Address([7u8; 20]);
+
+        let tx = open_claim_tx(
+            swap_id,
+            outpoint,
+            Some(claimer),
+            claimer,
+            sat(50_000),
+        );
+        let filled = FilledTransaction {
+            spent_utxos: vec![locked_output],
+            transaction: tx.clone(),
+        };
+
+        let rotxn = env.read_txn().unwrap();
+        let result = validate_block_transaction(&state, &rotxn, &tx, &filled);
+        assert!(
+            result.is_ok(),
+            "honest open claim should pass block validation, got {result:?}"
+        );
+    }
+
+    /// KNOWN GAP, asserted so it cannot change unnoticed: when no filler has
+    /// bound an L2 address to an open swap, any claimer is accepted. Nothing
+    /// on-chain says who paid on L1, and rejecting here would break relay of
+    /// honest claims (see the comment in `validate_swap_claim`). This test must
+    /// be inverted once the claimer binding moves on-chain.
+    #[test]
+    fn mempool_accepts_unbound_open_claim_known_gap() {
+        let (_dir, env, state, swap_id, outpoint, locked_output) =
+            open_swap_state(None);
+        let anyone = Address([4u8; 20]);
+
+        let tx =
+            open_claim_tx(swap_id, outpoint, Some(anyone), anyone, sat(50_000));
+        let filled = FilledTransaction {
+            spent_utxos: vec![locked_output],
+            transaction: tx.clone(),
+        };
+
+        let rotxn = env.read_txn().unwrap();
+        let result = validate_swap_claim(&state, &rotxn, &tx, &filled);
+        assert!(
+            result.is_ok(),
+            "unbound open claims are still accepted today, got {result:?}"
+        );
+    }
+
+    /// Once a filler *has* bound an address, a claim naming anyone else is
+    /// rejected — the one protection open swaps do have today.
+    #[test]
+    fn mempool_rejects_open_claim_contradicting_bound_claimer() {
+        let claimer = Address([7u8; 20]);
+        let (_dir, env, state, swap_id, outpoint, locked_output) =
+            open_swap_state(Some(claimer));
+        let attacker = Address([4u8; 20]);
+
+        let tx = open_claim_tx(
+            swap_id,
+            outpoint,
+            Some(attacker),
+            attacker,
+            sat(50_000),
+        );
+        let filled = FilledTransaction {
+            spent_utxos: vec![locked_output],
+            transaction: tx.clone(),
+        };
+
+        let rotxn = env.read_txn().unwrap();
+        let result = validate_swap_claim(&state, &rotxn, &tx, &filled);
+        assert!(
+            matches!(result, Err(Error::InvalidTransaction(_))),
+            "claim contradicting the bound claimer should be rejected, got {result:?}"
+        );
+    }
+
+    /// The filler who registered their L2 address can still claim.
+    #[test]
+    fn mempool_accepts_open_claim_matching_bound_claimer() {
+        let claimer = Address([7u8; 20]);
+        let (_dir, env, state, swap_id, outpoint, locked_output) =
+            open_swap_state(Some(claimer));
+
+        let tx = open_claim_tx(
+            swap_id,
+            outpoint,
+            Some(claimer),
+            claimer,
+            sat(50_000),
+        );
+        let filled = FilledTransaction {
+            spent_utxos: vec![locked_output],
+            transaction: tx.clone(),
+        };
+
+        let rotxn = env.read_txn().unwrap();
+        let result = validate_swap_claim(&state, &rotxn, &tx, &filled);
+        assert!(
+            result.is_ok(),
+            "bound claimer should be able to claim, got {result:?}"
         );
     }
 
