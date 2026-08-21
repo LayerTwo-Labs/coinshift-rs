@@ -40,7 +40,7 @@ prost-types = "0.14.4"
 quinn = "0.11.6"
 rayon = "1.7.0"
 reqwest = { version = "0.12", features = ["blocking", "json"] }
-rcgen = "0.13.2"
+rcgen = "0.14.9"
 rustls = { version = "0.23.40", default-features = false, features = ["ring"] }
 rustreexo = { workspace = true, features = ["with-serde"] }
 smallvec = { version = "1.13.2", features = ["write"] }
