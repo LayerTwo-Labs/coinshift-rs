@@ -150,6 +150,7 @@ The CLI talks to the Coinshift RPC server (default `http://localhost:6255`). Use
 | [docs/SETUP_ORDER.md](docs/SETUP_ORDER.md) | Step-by-step regtest setup (mainchain, enforcer, wallets, mining) |
 | [docs/ADDING_PARENT_CHAINS.md](docs/ADDING_PARENT_CHAINS.md) | Supported L1 chains and how to add new ones |
 | [docs/COINSHIFT_HOW_IT_WORKS.md](docs/COINSHIFT_HOW_IT_WORKS.md) | Architecture and swap flow |
+| [docs/SWAP_MECHANICS.html](docs/SWAP_MECHANICS.html) | Illustrated swap protocol: sequence diagrams, the consensus / node-local boundary, and what the L1 leg still trusts |
 | [docs/MANUAL_SETUP_SWAP_REGTEST.md](docs/MANUAL_SETUP_SWAP_REGTEST.md) | Manual regtest + swap (Alice & Bob) |
 | [docs/ENFORCER_WALLET_GUIDE.md](docs/ENFORCER_WALLET_GUIDE.md) | Enforcer wallet creation and usage |
 | [docs/SETUP_COMMANDS.md](docs/SETUP_COMMANDS.md) | Copy-paste setup commands (signet/regtest) |
