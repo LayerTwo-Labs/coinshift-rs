@@ -155,6 +155,7 @@ The CLI talks to the Coinshift RPC server (default `http://localhost:6255`). Use
 | [docs/ENFORCER_WALLET_GUIDE.md](docs/ENFORCER_WALLET_GUIDE.md) | Enforcer wallet creation and usage |
 | [docs/SETUP_COMMANDS.md](docs/SETUP_COMMANDS.md) | Copy-paste setup commands (signet/regtest) |
 | [docs/specs/swap-implementation-spec.md](docs/specs/swap-implementation-spec.md) | Swap implementation specification |
+| [docs/specs/L1_PAYMENT_PROOFS.html](docs/specs/L1_PAYMENT_PROOFS.html) | Proposal: verifying the parent-chain leg of a swap in consensus (awaiting a scope decision) |
 
 ## Scripts
 

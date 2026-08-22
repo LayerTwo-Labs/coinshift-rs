@@ -1,0 +1,686 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>L1 Payment Proofs</title>
+<meta name="description" content="Proposal: make the parent-chain half of a Coinshift swap verifiable by consensus rather than taken on faith.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Spectral:ital,wght@0,600;0,700;1,600&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+
+<style>
+  :root {
+    --ground:      #F4F7F6;
+    --surface:     #FFFFFF;
+    --ink:         #0F1719;
+    --ink-muted:   #55666B;
+    --ink-faint:   #7C8D92;
+    --rule:        #D5DEDC;
+    --rule-soft:   #E4EBE9;
+    --consensus:   #0E6F68;
+    --local:       #A25A12;
+    --danger:      #A32E23;
+    --tint:        #E1EDEA;
+    --tint-local:  #F6EBDA;
+    --tint-danger: #F6E2DF;
+    --plate:       #EDF0EF;
+    --plate-rule:  #CBD5D2;
+    --plate-ink:   #0F1719;
+
+    --measure: 68ch;
+    --figure-w: 1080px;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:      #0B1214;
+      --surface:     #111A1C;
+      --ink:         #E2EAE9;
+      --ink-muted:   #93A5A8;
+      --ink-faint:   #6E8185;
+      --rule:        #223034;
+      --rule-soft:   #1A2528;
+      --consensus:   #4FD8C9;
+      --local:       #E8A845;
+      --danger:      #F0776C;
+      --tint:        #13282A;
+      --tint-local:  #2A2113;
+      --tint-danger: #2B1815;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ground:      #0B1214;
+    --surface:     #111A1C;
+    --ink:         #E2EAE9;
+    --ink-muted:   #93A5A8;
+    --ink-faint:   #6E8185;
+    --rule:        #223034;
+    --rule-soft:   #1A2528;
+    --consensus:   #4FD8C9;
+    --local:       #E8A845;
+    --danger:      #F0776C;
+    --tint:        #13282A;
+    --tint-local:  #2A2113;
+    --tint-danger: #2B1815;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+    font-size: 17px;
+    line-height: 1.65;
+    margin: 0;
+    padding: 0 24px 120px;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .col { max-width: var(--measure); margin-inline: auto; }
+
+  header.masthead {
+    max-width: var(--figure-w);
+    margin: 0 auto;
+    padding: 88px 0 40px;
+    border-bottom: 1px solid var(--rule);
+  }
+
+  .eyebrow {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 12px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--consensus);
+    margin: 0 0 20px;
+  }
+
+  h1 {
+    font-family: Spectral, Georgia, serif;
+    font-weight: 700;
+    font-size: clamp(38px, 6vw, 62px);
+    line-height: 1.04;
+    letter-spacing: -0.02em;
+    text-wrap: balance;
+    margin: 0 0 22px;
+    max-width: 15ch;
+  }
+
+  .standfirst {
+    font-family: Spectral, Georgia, serif;
+    font-size: clamp(19px, 2.3vw, 23px);
+    font-style: italic;
+    line-height: 1.5;
+    color: var(--ink-muted);
+    max-width: 56ch;
+    margin: 0 0 36px;
+    text-wrap: pretty;
+  }
+
+  .meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 28px;
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 12.5px;
+    color: var(--ink-faint);
+  }
+  .meta b { color: var(--ink-muted); font-weight: 500; }
+
+  section { padding-top: 72px; }
+
+  h2 {
+    font-family: Spectral, Georgia, serif;
+    font-weight: 600;
+    font-size: clamp(26px, 3.4vw, 34px);
+    line-height: 1.2;
+    letter-spacing: -0.01em;
+    text-wrap: balance;
+    margin: 0 0 8px;
+  }
+
+  h3 {
+    font-family: "IBM Plex Sans", sans-serif;
+    font-weight: 600;
+    font-size: 17px;
+    margin: 40px 0 10px;
+  }
+
+  h4 {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 12px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--consensus);
+    font-weight: 500;
+    margin: 32px 0 8px;
+  }
+
+  .kicker {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 11.5px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    margin: 0 0 14px;
+    display: block;
+  }
+
+  p { margin: 0 0 18px; text-wrap: pretty; }
+
+  a { color: var(--consensus); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+  a:focus-visible { outline: 2px solid var(--consensus); outline-offset: 3px; border-radius: 2px; }
+
+  code {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 0.87em;
+    background: var(--rule-soft);
+    padding: 0.12em 0.36em;
+    border-radius: 3px;
+  }
+
+  pre.code {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 13px;
+    line-height: 1.6;
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: 5px;
+    padding: 18px 20px;
+    overflow-x: auto;
+    margin: 24px 0;
+  }
+  pre.code code { background: transparent; padding: 0; font-size: inherit; }
+
+  strong { font-weight: 600; }
+
+  ul, ol { margin: 0 0 18px; padding-left: 1.2em; }
+  li { margin-bottom: 9px; }
+  li::marker { color: var(--ink-faint); }
+
+  .note {
+    border-left: 2px solid var(--consensus);
+    background: var(--tint);
+    padding: 18px 22px;
+    margin: 28px 0;
+    border-radius: 0 4px 4px 0;
+  }
+  .note.local  { border-left-color: var(--local);  background: var(--tint-local); }
+  .note.danger { border-left-color: var(--danger); background: var(--tint-danger); }
+  .note p:last-child { margin-bottom: 0; }
+  .note .label {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--consensus);
+    display: block;
+    margin-bottom: 8px;
+  }
+  .note.local .label  { color: var(--local); }
+  .note.danger .label { color: var(--danger); }
+
+  figure { max-width: var(--figure-w); margin: 40px auto; }
+
+  .plate {
+    background: var(--plate);
+    border: 1px solid var(--plate-rule);
+    border-radius: 6px;
+    padding: 28px 20px 20px;
+    overflow-x: auto;
+  }
+  .plate svg { max-width: 100%; height: auto; display: block; margin-inline: auto; }
+
+  pre.mermaid {
+    margin: 0;
+    background: transparent;
+    min-width: 520px;
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 12.5px;
+    line-height: 1.5;
+    color: var(--plate-ink);
+    text-align: left;
+    white-space: pre;
+  }
+  pre.mermaid[data-processed="true"] { text-align: center; }
+  pre.mermaid svg { max-width: 100%; height: auto; }
+
+  figcaption {
+    font-size: 14.5px;
+    line-height: 1.55;
+    color: var(--ink-muted);
+    margin-top: 14px;
+    max-width: 76ch;
+  }
+  figcaption b {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 12px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    font-weight: 500;
+    margin-right: 10px;
+  }
+
+  .table-wrap { overflow-x: auto; margin: 28px 0; }
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    font-size: 15px;
+    font-variant-numeric: tabular-nums;
+  }
+  th, td {
+    text-align: left;
+    padding: 11px 16px 11px 0;
+    border-bottom: 1px solid var(--rule-soft);
+    vertical-align: top;
+  }
+  th {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 11.5px;
+    letter-spacing: 0.11em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    font-weight: 500;
+    border-bottom-color: var(--rule);
+    white-space: nowrap;
+  }
+  td code { background: transparent; padding: 0; }
+
+  .yes { color: var(--consensus); font-weight: 600; }
+  .no  { color: var(--danger); font-weight: 600; }
+  .part { color: var(--local); font-weight: 600; }
+
+  /* option cards */
+  .options {
+    max-width: var(--figure-w);
+    margin: 36px auto;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 18px;
+  }
+  .option {
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: 6px;
+    padding: 22px 24px 24px;
+    display: flex;
+    flex-direction: column;
+  }
+  .option.pick { border-color: var(--consensus); border-width: 2px; }
+  .option .tag {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 11px;
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    display: block;
+    margin-bottom: 10px;
+  }
+  .option.pick .tag { color: var(--consensus); }
+  .option h3 { margin: 0 0 10px; font-size: 18px; }
+  .option p { font-size: 15px; line-height: 1.55; color: var(--ink-muted); }
+  .option dl { margin: auto 0 0; font-size: 14px; display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; }
+  .option dt {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    padding-top: 3px;
+  }
+  .option dd { margin: 0; color: var(--ink); }
+
+  nav.toc { margin: 48px auto 0; padding: 0; max-width: var(--figure-w); }
+  nav.toc ol {
+    list-style: none; padding: 0; margin: 0;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+    gap: 2px 32px;
+    counter-reset: toc;
+  }
+  nav.toc li { margin: 0; counter-increment: toc; }
+  nav.toc a {
+    display: flex; gap: 12px; padding: 9px 0;
+    border-bottom: 1px solid var(--rule-soft);
+    color: var(--ink); text-decoration: none; font-size: 15px;
+  }
+  nav.toc a::before {
+    content: counter(toc, decimal-leading-zero);
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 12px; color: var(--consensus); padding-top: 2px;
+  }
+  nav.toc a:hover { color: var(--consensus); }
+
+  footer {
+    max-width: var(--figure-w);
+    margin: 96px auto 0;
+    padding-top: 28px;
+    border-top: 1px solid var(--rule);
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 12.5px;
+    color: var(--ink-faint);
+    line-height: 1.7;
+  }
+
+  @media (max-width: 720px) {
+    body { padding: 0 18px 80px; font-size: 16px; }
+    header.masthead { padding-top: 56px; }
+    section { padding-top: 56px; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+  }
+</style>
+
+</head>
+<body>
+<header class="masthead">
+  <p class="eyebrow">coinshift-rs · spec · for decision</p>
+  <h1>L1 Payment Proofs</h1>
+  <p class="standfirst">Making the parent-chain half of a swap something every node checks, instead of something each node takes on faith.</p>
+  <div class="meta">
+    <span><b>status</b> proposal, not implemented</span>
+    <span><b>extends</b> <a href="../SWAP_MECHANICS.html">SWAP_MECHANICS.html</a></span>
+    <span><b>decision</b> scope — see §7</span>
+  </div>
+</header>
+
+<nav class="toc" aria-label="Contents">
+  <ol>
+    <li><a href="#problem">What is unverified today</a></li>
+    <li><a href="#where">Where the check has to run</a></li>
+    <li><a href="#proof">The proof, and what carries it</a></li>
+    <li><a href="#anchor">Anchoring the confirmation count</a></li>
+    <li><a href="#binding">Binding the payment to the swap</a></li>
+    <li><a href="#consequences">What this changes elsewhere</a></li>
+    <li><a href="#options">Scope: three options</a></li>
+    <li><a href="#work">Work breakdown</a></li>
+    <li><a href="#open">Open questions</a></li>
+  </ol>
+</nav>
+
+<main>
+
+<section id="problem" class="col">
+  <span class="kicker">01 — Problem</span>
+  <h2>What is unverified today</h2>
+  <p>A swap has two legs. The L2 leg is enforced by consensus: the escrow is locked when <code>SwapCreate</code> connects, and since <code>SwapAccept</code> landed, only the address named by a live reservation can be paid. Every node checks both from block data.</p>
+  <p>The L1 leg is not checked by anything that binds. <code>validate_swap_claim_consensus</code> never asks whether the parent-chain payment happened, because it has no way to find out. The only thing that looks is <code>validate_swap_claim</code>, in the mempool, on nodes that happen to run that chain's RPC — and a miner is under no obligation to be one of them.</p>
+
+  <div class="note danger">
+    <span class="label">Consequence</span>
+    <p>A miner can take any swap's escrow without paying on L1. For an open swap: reserve it, then claim. For a pre-specified swap: be the named recipient, then claim. Honest nodes would refuse to relay either claim, but relaying is not required to mine, and the resulting block is valid everywhere.</p>
+  </div>
+
+  <p>Two smaller defects sit on top of this. <code>update_swap_l1_txid</code> accepts a txid and a confirmation count as arguments and never checks them against the parent chain — the integration tests fill swaps with <code>"11"</code> repeated 32 times. And <code>swaps_by_l1_txid</code>, which stops one L1 payment being reused across swaps, is node-local, so it constrains only the node that holds it.</p>
+</section>
+
+<section id="where" class="col">
+  <span class="kicker">02 — The constraint</span>
+  <h2>Where the check has to run</h2>
+  <p>It is tempting to fix this by making <code>update_swap_l1_txid</code> verify against the configured RPC before it writes. That is worth doing on its own merits, and it is in the cheapest option below — but it does not change the trust model at all. The result is still a local observation: absent on nodes that do not run the chain, different between nodes that do, and trivially skipped by anyone building a block.</p>
+  <p>For the L1 leg to be trustless, the check must be reproducible by every node <strong>from the block itself</strong>. That means three things, and this spec is really just those three:</p>
+  <ol>
+    <li>the claim carries a <strong>proof</strong> rather than an assertion;</li>
+    <li>nodes hold a <strong>proof-of-work-validated header chain</strong> for the parent chain, as consensus state;</li>
+    <li>the confirmation depth is measured against a <strong>deterministic anchor</strong>, not against wall-clock chain tips.</li>
+  </ol>
+  <p>Point 2 is the one that decides scope, because the node already satisfies it for exactly one chain: the mainchain it is merge-mined against. It satisfies it for no other.</p>
+</section>
+
+<section id="proof" class="col">
+  <span class="kicker">03 — Mechanism</span>
+  <h2>The proof, and what carries it</h2>
+  <p><code>TxData::SwapClaim</code> already has the field. <code>proof_data: Option&lt;Vec&lt;u8&gt;&gt;</code> exists, is threaded through the wallet and the validators, and is set to <code>None</code> at every single call site. This is what it was reserved for.</p>
+
+  <h4>What the archive already holds</h4>
+  <p><code>main_header_infos</code> gives, for every mainchain block the node knows: <code>block_hash</code>, <code>prev_block_hash</code>, <code>height</code>, <code>work</code>. Ancestry is enforced on insert and BMM commitments are verified. It is a real, proof-of-work-validated header chain.</p>
+  <p>What it does <em>not</em> hold is merkle roots. <code>BlockHeaderInfo</code> has no such field and <code>BlockInfo</code> carries only the BMM commitment and the peg events. So inclusion proofs cannot be checked against it directly.</p>
+  <p>That gap closes without touching the enforcer. Have the claim supply the raw 80-byte header. Consensus hashes it, requires the result to be a block hash the archive already knows on the main ancestry — and then reads the merkle root out of the header it has just authenticated. The proof carries its own trusted root.</p>
+</section>
+
+<figure>
+  <div class="plate">
+    <svg viewBox="0 0 920 452" role="img" aria-label="The claim carries a raw 80-byte header, a merkle branch, and the raw L1 transaction. Consensus hashes the header to match a block hash already in the archive, recomputes the merkle root from the transaction and branch, and reads the payment out of the transaction outputs." xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="#0E6F68"/>
+        </marker>
+      </defs>
+
+      <text x="20" y="24" font-family="IBM Plex Mono, monospace" font-size="12" letter-spacing="1.6" fill="#A25A12">CARRIED BY THE CLAIM</text>
+      <text x="20" y="42" font-family="IBM Plex Sans, sans-serif" font-size="12" fill="#55666B">proof_data, supplied by the claimer</text>
+
+      <text x="640" y="24" font-family="IBM Plex Mono, monospace" font-size="12" letter-spacing="1.6" fill="#0E6F68">ALREADY IN THE NODE</text>
+      <text x="640" y="42" font-family="IBM Plex Sans, sans-serif" font-size="12" fill="#55666B">no new data source</text>
+
+      <g font-family="IBM Plex Mono, monospace" font-size="12.5" fill="#0F1719">
+        <rect x="20" y="66" width="230" height="46" rx="3" fill="#F6EBDA" stroke="#A25A12"/>
+        <text x="34" y="85">header80</text>
+        <text x="34" y="101" font-family="IBM Plex Sans, sans-serif" font-size="11" fill="#55666B">raw L1 block header</text>
+
+        <rect x="20" y="180" width="230" height="46" rx="3" fill="#F6EBDA" stroke="#A25A12"/>
+        <text x="34" y="199">branch + index</text>
+        <text x="34" y="215" font-family="IBM Plex Sans, sans-serif" font-size="11" fill="#55666B">merkle path to the root</text>
+
+        <rect x="20" y="294" width="230" height="46" rx="3" fill="#F6EBDA" stroke="#A25A12"/>
+        <text x="34" y="313">rawtx</text>
+        <text x="34" y="329" font-family="IBM Plex Sans, sans-serif" font-size="11" fill="#55666B">the L1 payment itself</text>
+      </g>
+
+      <g font-family="IBM Plex Mono, monospace" font-size="12.5" fill="#0F1719">
+        <rect x="330" y="66" width="250" height="46" rx="3" fill="#FFFFFF" stroke="#0E6F68" stroke-width="1.5"/>
+        <text x="344" y="85">sha256d(header80)</text>
+        <text x="344" y="101" font-family="IBM Plex Sans, sans-serif" font-size="11" fill="#55666B">must be a known block hash</text>
+
+        <rect x="330" y="180" width="250" height="46" rx="3" fill="#FFFFFF" stroke="#0E6F68" stroke-width="1.5"/>
+        <text x="344" y="199">merkle(txid, branch)</text>
+        <text x="344" y="215" font-family="IBM Plex Sans, sans-serif" font-size="11" fill="#55666B">must equal header.merkle_root</text>
+
+        <rect x="330" y="294" width="250" height="46" rx="3" fill="#FFFFFF" stroke="#0E6F68" stroke-width="1.5"/>
+        <text x="344" y="313">outputs of rawtx</text>
+        <text x="344" y="329" font-family="IBM Plex Sans, sans-serif" font-size="11" fill="#55666B">amount, address, OP_RETURN</text>
+      </g>
+
+      <rect x="640" y="66" width="260" height="70" rx="3" fill="#E1EDEA" stroke="#0E6F68" stroke-width="1.8"/>
+      <text x="654" y="88" font-family="IBM Plex Mono, monospace" font-size="12.5" fill="#0F1719">main_header_infos</text>
+      <text x="654" y="106" font-family="IBM Plex Sans, sans-serif" font-size="11" fill="#55666B">hash, prev, height, work</text>
+      <text x="654" y="123" font-family="IBM Plex Sans, sans-serif" font-size="11" fill="#55666B">PoW-validated, ancestry enforced</text>
+
+      <line x1="256" y1="89" x2="324" y2="89" stroke="#0E6F68" stroke-width="1.6" marker-end="url(#a1)"/>
+      <line x1="586" y1="89" x2="634" y2="89" stroke="#0E6F68" stroke-width="1.6" marker-end="url(#a1)"/>
+      <line x1="256" y1="203" x2="324" y2="203" stroke="#0E6F68" stroke-width="1.6" marker-end="url(#a1)"/>
+      <line x1="256" y1="317" x2="324" y2="317" stroke="#0E6F68" stroke-width="1.6" marker-end="url(#a1)"/>
+
+      <path d="M 455 118 L 455 174" fill="none" stroke="#0E6F68" stroke-width="1.6" marker-end="url(#a1)"/>
+      <text x="466" y="152" font-family="IBM Plex Sans, sans-serif" font-size="11.5" fill="#0E6F68">authenticated root</text>
+
+      <path d="M 455 232 L 455 288" fill="none" stroke="#0E6F68" stroke-width="1.6" marker-end="url(#a1)"/>
+      <text x="466" y="266" font-family="IBM Plex Sans, sans-serif" font-size="11.5" fill="#0E6F68">tx is in that block</text>
+
+      <rect x="330" y="392" width="570" height="46" rx="3" fill="#E1EDEA" stroke="#0E6F68" stroke-width="1.5"/>
+      <text x="344" y="411" font-family="IBM Plex Mono, monospace" font-size="12.5" fill="#0F1719">watermark_height − header.height ≥ required_confirmations</text>
+      <text x="344" y="428" font-family="IBM Plex Sans, sans-serif" font-size="11" fill="#55666B">depth measured against consensus state, not against a live chain tip</text>
+
+      <path d="M 770 142 L 770 366 L 615 366 L 615 388" fill="none" stroke="#0E6F68" stroke-width="1.6" marker-end="url(#a1)"/>
+      <text x="640" y="358" font-family="IBM Plex Sans, sans-serif" font-size="11.5" fill="#0E6F68">height of the proof block</text>
+    </svg>
+  </div>
+  <figcaption><b>Figure 1</b> Verification chain. Everything on the left is attacker-supplied and none of it is trusted: the header is only believed because its hash already appears in a chain the node validated itself, and the transaction is only believed because it hashes into that header's root. No new data has to reach the node.</figcaption>
+</figure>
+
+<section class="col">
+  <h4>Proof encoding</h4>
+  <p>Borsh, in <code>proof_data</code>, versioned so the format can move without a second consensus change:</p>
+  <pre class="code"><code>struct L1PaymentProof {
+    version: u8,           // 0
+    header: [u8; 80],      // raw parent-chain block header
+    tx_index: u32,         // position of the tx in the block
+    branch: Vec&lt;[u8; 32]&gt;, // merkle path, leaf to root
+    rawtx: Vec&lt;u8&gt;,        // the L1 transaction
+}</code></pre>
+  <p>Bitcoin Core produces the middle two directly: <code>gettxoutproof</code> returns a serialized merkle block containing the header and the branch, and <code>getrawtransaction</code> the last. The wallet assembles the proof at claim time from whatever RPC the claimer runs; it never needs to be trusted, because consensus re-derives everything from it.</p>
+
+  <h4>Verification, in order</h4>
+  <ol>
+    <li><code>sha256d(header)</code> is a block hash present in <code>main_header_infos</code> and on the main ancestry of the L2 block being validated. Yields a trusted <code>height</code> and a trusted <code>merkle_root</code>.</li>
+    <li><code>sha256d(rawtx)</code> gives <code>txid</code>; folding it up <code>branch</code> according to <code>tx_index</code> reproduces <code>merkle_root</code>. The branch length must equal <code>ceil(log2(tx_count))</code> for the block, and any step whose two hashes are equal is rejected — otherwise the CVE-2012-2459 duplicate-hash trick forges inclusion.</li>
+    <li>The outputs of <code>rawtx</code> pay at least <code>l1_amount</code> to the script for <code>l1_recipient_address</code>, parsed for the swap's <code>parent_chain</code> network.</li>
+    <li>An <code>OP_RETURN</code> output commits to this swap and claimer — see §5.</li>
+    <li><code>watermark_height − height ≥ required_confirmations</code> — see §4.</li>
+    <li>This <code>txid</code> has not been used by another swap, checked against consensus state rather than the node-local index.</li>
+  </ol>
+  <p>All six are pure functions of block data plus state derived from block data. Two nodes with the same chain always agree.</p>
+</section>
+
+<section id="anchor" class="col">
+  <span class="kicker">04 — Mechanism</span>
+  <h2>Anchoring the confirmation count</h2>
+  <p>"Six confirmations" has no fixed meaning at validation time. Two nodes at different mainchain sync heights compute different depths for the same proof, and a rule that depends on when you ask is exactly the class of bug this whole branch has been about.</p>
+  <p>The fix is to measure depth against a mainchain height that is itself consensus state. Two-way peg data is already applied deterministically as each L2 block connects — that is what makes deposits and withdrawal bundles work — so <code>State</code> can carry a <strong>mainchain height watermark</strong> advanced by the same path. Depth is then <code>watermark − proof.height</code>, evaluated at the L2 block being validated, and it is identical on every node forever.</p>
+
+  <div class="note local">
+    <span class="label">Alternative, and an open question</span>
+    <p>The other candidate anchor is the mainchain block that BMM-committed the L2 block being validated. It is appealing because BMM already ties the two chains together — but a sidechain block can be committed by more than one mainchain block, so "the" BMM block is not unique, and picking one is a rule that has to be specified and defended. The watermark avoids that. Flagged in §9 rather than settled here.</p>
+  </div>
+</section>
+
+<section id="binding" class="col">
+  <span class="kicker">05 — Mechanism</span>
+  <h2>Binding the payment to the swap</h2>
+  <p>Proving that <em>a</em> payment happened is not the same as proving it was for <em>this</em> swap. Matching on recipient address and amount is circumstantial: two swaps to the same address for the same amount are indistinguishable, which is precisely why an L1-txid uniqueness check had to be bolted on.</p>
+  <p>Require the L1 transaction to carry an <code>OP_RETURN</code> output committing to both the swap and the claimer:</p>
+  <pre class="code"><code>OP_RETURN  PUSH(56)
+    "CSFT"                    4 bytes   magic
+    swap_id                  32 bytes
+    l2_claimer_address       20 bytes</code></pre>
+  <p>56 bytes sits inside the standard 80-byte relay limit with room spare. Consensus reads the claimer out of the commitment and pays that address — so entitlement is established by the act of paying, which is the only thing that should ever have established it.</p>
+
+  <div class="note">
+    <span class="label">This demotes SwapAccept</span>
+    <p>Front-running becomes impossible at the source: nobody can produce a proof of a payment committing to <em>their</em> address without making that payment. The reservation exists only because consensus is blind to L1; once it can see, the reservation is no longer a security mechanism.</p>
+    <p>It keeps one honest use — stopping two takers from both paying L1 for the same swap, where one of them eats the loss. That is coordination, and it is worth keeping for it. But the acceptance window, the lapse rule and the griefing analysis all stop being load-bearing, and could be relaxed or dropped.</p>
+  </div>
+</section>
+
+<section id="consequences" class="col">
+  <span class="kicker">06 — Consequences</span>
+  <h2>What this changes elsewhere</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Today</th><th>After</th></tr></thead>
+      <tbody>
+        <tr><td><code>update_swap_l1_txid</code> writes an unverified txid and confirmation count</td><td>Removed. Nothing needs to assert an L1 fill any more; the proof is the assertion.</td></tr>
+        <tr><td><code>SwapState</code> drives mempool admission, and differs per node</td><td>Advisory. Useful for the UI, no longer gates anything — which also ends the peer-dropping described in the mechanics doc.</td></tr>
+        <tr><td><code>query_and_update_swap</code> polls L1 to advance swap state</td><td>Optional convenience: it can tell a taker their payment is deep enough to claim, but nothing depends on it.</td></tr>
+        <tr><td><code>swaps_by_l1_txid</code> uniqueness is node-local</td><td>Consensus state, written by <code>connect</code>, reversed by <code>disconnect</code>.</td></tr>
+        <tr><td><code>SwapAccept</code> is what makes an open swap claimable</td><td>Coordination only; entitlement comes from the OP_RETURN commitment.</td></tr>
+        <tr><td>Integration tests fill swaps with a fabricated txid</td><td>Must make a real regtest L1 payment and build a real proof — a considerably better test.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>The last row is worth dwelling on. Today's tests cannot distinguish a working swap from a swap that merely believes it worked, because the L1 side is fabricated. Under this design they would exercise the actual mechanism end to end.</p>
+</section>
+
+<section id="options" class="col">
+  <span class="kicker">07 — The decision</span>
+  <h2>Scope: three options</h2>
+  <p>The mechanism above works for one chain: the one the sidechain is merge-mined against, because that is the only chain whose headers the node has. Everything else is a question of how far to go.</p>
+</section>
+
+<div class="options">
+  <article class="option">
+    <span class="tag">Option A</span>
+    <h3>Harden what exists</h3>
+    <p>Make <code>update_swap_l1_txid</code> verify against the configured RPC, or remove it. Narrow <code>ParentChainType</code> to the chains you actually watch. No proofs, no consensus change.</p>
+    <dl>
+      <dt>Buys</dt><dd>Removes the fabricated-fill footgun</dd>
+      <dt>Trust</dt><dd>Unchanged — a miner can still take the escrow</dd>
+      <dt>Size</dt><dd>A day</dd>
+    </dl>
+  </article>
+
+  <article class="option pick">
+    <span class="tag">Option B · recommended</span>
+    <h3>Proofs for the anchored chain</h3>
+    <p>Option A, plus everything in §3–§5, for the sidechain's own mainchain only. Signet and regtest come along free — same header format, same code path.</p>
+    <dl>
+      <dt>Buys</dt><dd>The L1 leg becomes trustless</dd>
+      <dt>Trust</dt><dd>Parent-chain PoW and your chosen depth</dd>
+      <dt>Size</dt><dd>1–2 weeks, see §8</dd>
+    </dl>
+  </article>
+
+  <article class="option">
+    <span class="tag">Option C</span>
+    <h3>Header relay for foreign chains</h3>
+    <p>Option B, plus header-relay transactions so BCH and LTC headers become L2 consensus state — with per-chain proof-of-work and difficulty rules validated on-chain.</p>
+    <dl>
+      <dt>Buys</dt><dd>Trustless swaps against other chains</dd>
+      <dt>Trust</dt><dd>That chain's hashrate; relay liveness</dd>
+      <dt>Size</dt><dd>Months, per chain</dd>
+    </dl>
+  </article>
+</div>
+
+<section class="col">
+  <p><strong>The recommendation is B.</strong> It is the option where the word "trustless" in the README becomes true rather than aspirational, and it needs no new data source, no relay, and no incentive design — the header chain is already there and already validated, because the sidechain cannot function without it.</p>
+  <p>C is a different project wearing the same name. Each chain needs its own difficulty-adjustment implementation — BCH's ASERT, Litecoin's scrypt and retarget schedule — validated in consensus, plus someone paying to relay headers forever, plus the assumption that a low-hashrate chain cannot be outrun cheaply enough to forge a proof. It is defensible for a chain with a real reason to be supported. It is not defensible as a side effect of an enum having five variants.</p>
+
+  <div class="note">
+    <span class="label">Which makes the parent-chain question easy</span>
+    <p>Under B, chains you cannot prove anything about should leave <code>ParentChainType</code>. Keeping <code>BCH</code> and <code>LTC</code> as selectable options while only the mainchain is verifiable ships two tiers of security under one name — and <code>LTC</code> currently resolves to <code>Network::Bitcoin</code> as an acknowledged placeholder, so its addresses are wrong regardless.</p>
+  </div>
+</section>
+
+<section id="work" class="col">
+  <span class="kicker">08 — Estimate</span>
+  <h2>Work breakdown</h2>
+  <p>For Option B, roughly in dependency order.</p>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Piece</th><th>Where</th><th>Size</th></tr></thead>
+      <tbody>
+        <tr><td>Remove or verify <code>update_swap_l1_txid</code>; narrow <code>ParentChainType</code></td><td><code>state/mod.rs</code>, <code>types/swap.rs</code>, RPC, CLI, GUI</td><td>S</td></tr>
+        <tr><td>Mainchain height watermark as consensus state</td><td><code>state/mod.rs</code>, <code>two_way_peg_data.rs</code></td><td>M</td></tr>
+        <tr><td>Give the transaction validators a mainchain view</td><td><code>state/block.rs</code> — plumbing <code>Archive</code> or an index into <code>State</code></td><td>M, the awkward one</td></tr>
+        <tr><td><code>L1PaymentProof</code> type, encoding, merkle and header verification</td><td>new <code>lib/state/l1_proof.rs</code></td><td>M</td></tr>
+        <tr><td>Address and script matching per network; <code>OP_RETURN</code> parsing</td><td><code>l1_proof.rs</code></td><td>S</td></tr>
+        <tr><td>L1 txid uniqueness moved into consensus state</td><td><code>state/mod.rs</code>, <code>block.rs</code></td><td>S</td></tr>
+        <tr><td>Wire the proof into <code>validate_swap_claim_consensus</code></td><td><code>state/swap.rs</code></td><td>S</td></tr>
+        <tr><td>Wallet builds proofs from <code>gettxoutproof</code> + <code>getrawtransaction</code></td><td><code>wallet.rs</code>, <code>parent_chain_rpc.rs</code></td><td>M</td></tr>
+        <tr><td>Demote or remove <code>SwapAccept</code></td><td><code>state/swap.rs</code> and callers</td><td>S</td></tr>
+        <tr><td>Integration tests making real regtest L1 payments</td><td><code>integration_tests/</code></td><td>M</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>The awkward piece is the third. The mainchain view lives in <code>Archive</code>; transaction validation sees only <code>State</code>. Whether to pass the archive down or to mirror a header index into <code>State</code> is the first design call to make, and it decides how much of the rest is pleasant.</p>
+</section>
+
+<section id="open" class="col">
+  <span class="kicker">09 — Unresolved</span>
+  <h2>Open questions</h2>
+  <ul>
+    <li><strong>Watermark or BMM anchor.</strong> The watermark is simpler and sidesteps multiple BMM commitments to one L2 block. A BMM anchor is tighter to the actual chain relationship. Needs a decision before the state work starts.</li>
+    <li><strong>Confirmation depth.</strong> Six is the current default for BTC. Under a proof regime the depth is the entire security parameter for the L1 leg, so it should be chosen against reorg cost rather than inherited from convention.</li>
+    <li><strong>Parent-chain reorgs after payout.</strong> A reorg deeper than the required depth, after the claim has connected, leaves L2 having paid for a payment that no longer exists. Depth is the only mitigation; worth stating the accepted risk explicitly.</li>
+    <li><strong>Keep or drop <code>SwapAccept</code>.</strong> It stops two takers racing and losing money, which is real. It also adds a transaction, a fee and a wait to every open-swap fill. A judgement call once it is no longer carrying security.</li>
+    <li><strong>Proof size.</strong> Header 80 B, branch about 320 B, transaction a few hundred — call it 1 KB per claim against the body size limit. Not a problem, worth noting.</li>
+    <li><strong>Migration.</strong> None needed; nothing is deployed. If that changes before this lands, it is a consensus change and wants the same treatment as the current branch.</li>
+  </ul>
+</section>
+
+</main>
+
+<footer>
+  coinshift-rs · spec, not implemented · extends docs/SWAP_MECHANICS.html<br>
+  Recommendation: Option B. Awaiting a scope decision before any code is written.
+</footer>
+
+</body>
+</html>
