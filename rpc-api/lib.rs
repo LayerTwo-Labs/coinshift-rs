@@ -314,9 +314,4 @@ pub trait Rpc {
     /// Only allowed for Pending swaps (before L1 transaction is detected).
     #[method(name = "cancel_swap")]
     async fn cancel_swap(&self, swap_id: SwapId) -> RpcResult<()>;
-
-    /// Delete a swap from the database.
-    /// Only allowed for Pending or Cancelled swaps.
-    #[method(name = "delete_swap")]
-    async fn delete_swap(&self, swap_id: SwapId) -> RpcResult<()>;
 }

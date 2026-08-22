@@ -914,36 +914,6 @@ impl State {
     }
 
     /// Only the swap creator may delete; pass `creator` from wallet (None = deny for old records).
-    pub fn delete_swap(
-        &self,
-        rwtxn: &mut RwTxn,
-        swap_id: &SwapId,
-        creator: Option<&Address>,
-    ) -> Result<(), Error> {
-        if let Some(swap) = self.get_swap(rwtxn, swap_id)? {
-            // Only the creator may delete
-            match &swap.l2_creator_address {
-                Some(swap_creator) => {
-                    let allowed =
-                        creator.map(|c| c == swap_creator).unwrap_or(false);
-                    if !allowed {
-                        return Err(Error::SwapNotCreator);
-                    }
-                }
-                None => return Err(Error::SwapNotCreator),
-            }
-            // Only Pending or Cancelled swaps can be deleted (not WaitingConfirmations, ReadyToClaim, Completed)
-            if !matches!(swap.state, SwapState::Pending | SwapState::Cancelled)
-            {
-                return Err(Error::InvalidTransaction(format!(
-                    "Swap {} cannot be deleted (state: {:?}). Only Pending or Cancelled swaps can be deleted.",
-                    swap_id, swap.state
-                )));
-            }
-        }
-        self.delete_swap_unchecked(rwtxn, swap_id)
-    }
-
     /// Delete swap without creator or state check. For internal use only
     /// (e.g. block rollback), where reversing a swap's creating block must
     /// always succeed regardless of any local L1-observation state advance.

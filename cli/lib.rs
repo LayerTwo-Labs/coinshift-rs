@@ -158,12 +158,6 @@ pub enum Command {
         #[arg(value_parser = parse_swap_id)]
         swap_id: SwapId,
     },
-    /// Delete a swap from the database (only Pending or Cancelled).
-    DeleteSwap {
-        /// Swap ID (64 hex chars)
-        #[arg(value_parser = parse_swap_id)]
-        swap_id: SwapId,
-    },
     /// Attempt to mine a sidechain block
     Mine {
         #[arg(long)]
@@ -428,10 +422,6 @@ where
         Command::CancelSwap { swap_id } => {
             rpc_client.cancel_swap(swap_id).await?;
             "Swap cancelled".to_string()
-        }
-        Command::DeleteSwap { swap_id } => {
-            rpc_client.delete_swap(swap_id).await?;
-            "Swap deleted".to_string()
         }
         Command::UpdateSwapL1Txid {
             swap_id,

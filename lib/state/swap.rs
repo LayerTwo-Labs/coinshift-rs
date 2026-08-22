@@ -1387,20 +1387,4 @@ mod tests {
             "swap should be gone after rollback deletion"
         );
     }
-
-    /// The user-facing `delete_swap` path keeps its state guard: an active
-    /// (non-Pending/Cancelled) swap must not be manually deletable, even by its
-    /// creator.
-    #[test]
-    fn delete_swap_still_refuses_ready_to_claim_swap() {
-        let (_dir, env, state, swap_id, ..) = ready_swap_state();
-        let creator = Address([5u8; 20]);
-
-        let mut rwtxn = env.write_txn().unwrap();
-        let result = state.delete_swap(&mut rwtxn, &swap_id, Some(&creator));
-        assert!(
-            matches!(result, Err(Error::InvalidTransaction(_))),
-            "user deletion of a ReadyToClaim swap should be refused, got {result:?}"
-        );
-    }
 }

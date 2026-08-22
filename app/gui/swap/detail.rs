@@ -246,14 +246,14 @@ impl SwapDetail {
                         .add_enabled(
                             can_manage,
                             Button::new(
-                                egui::RichText::new("Delete Swap")
+                                egui::RichText::new("Discard Swap")
                                     .color(egui::Color32::RED),
                             ),
                         )
                         .clicked()
                         && let Some(app) = app
                     {
-                        self.delete_swap(app, &swap, list);
+                        self.discard_unmined_swap(app, &swap, list);
                     }
 
                     if !can_manage
@@ -715,67 +715,59 @@ impl SwapDetail {
         }
     }
 
-    fn delete_swap(&mut self, app: &App, swap: &Swap, list: &mut SwapList) {
+    /// Discard a swap that is still only in this node's mempool.
+    ///
+    /// A swap that has made it into a block cannot be removed: it is consensus
+    /// state derived from the chain, and dropping it locally would make this
+    /// node reject blocks containing a claim on it. Such a swap can only be
+    /// cancelled while Pending, or left to expire.
+    fn discard_unmined_swap(
+        &mut self,
+        app: &App,
+        swap: &Swap,
+        list: &mut SwapList,
+    ) {
         let swap_id = swap.id;
 
-        if swap.created_at_height == 0 {
-            if !app.node.is_created_pending_swap(&swap_id) {
-                self.claim_error =
-                    Some("Only the swap creator can delete".into());
-                return;
-            }
-            if let Ok(mempool_txs) = app.node.get_all_transactions() {
-                for tx in mempool_txs {
-                    if let coinshift::types::TxData::SwapCreate {
-                        swap_id: tx_swap_id,
-                        ..
-                    } = &tx.transaction.data
-                        && coinshift::types::SwapId(*tx_swap_id) == swap_id
-                    {
-                        let txid = tx.transaction.txid();
-                        if let Err(err) = app.node.remove_from_mempool(txid) {
-                            self.claim_error = Some(format!(
-                                "Failed to remove from mempool: {err:#}"
-                            ));
-                            return;
-                        }
-                        app.node.remove_created_pending_swap(&swap_id);
-                        self.success_message =
-                            Some("Pending swap deleted".into());
-                        list.refresh_swaps(app);
-                        self.swap = None;
+        if swap.created_at_height != 0 {
+            self.claim_error = Some(
+                "Swap is already in a block and cannot be discarded; cancel it \
+                 while Pending, or let it expire"
+                    .into(),
+            );
+            return;
+        }
+
+        if !app.node.is_created_pending_swap(&swap_id) {
+            self.claim_error =
+                Some("Only the swap creator can discard it".into());
+            return;
+        }
+        if let Ok(mempool_txs) = app.node.get_all_transactions() {
+            for tx in mempool_txs {
+                if let coinshift::types::TxData::SwapCreate {
+                    swap_id: tx_swap_id,
+                    ..
+                } = &tx.transaction.data
+                    && coinshift::types::SwapId(*tx_swap_id) == swap_id
+                {
+                    let txid = tx.transaction.txid();
+                    if let Err(err) = app.node.remove_from_mempool(txid) {
+                        self.claim_error = Some(format!(
+                            "Failed to remove from mempool: {err:#}"
+                        ));
                         return;
                     }
-                }
-            }
-            self.claim_error = Some("Pending swap not found in mempool".into());
-        } else {
-            let creator = swap.l2_creator_address.as_ref();
-            let mut rwtxn = match app.node.env().write_txn() {
-                Ok(txn) => txn,
-                Err(err) => {
-                    self.claim_error =
-                        Some(format!("Failed to get write txn: {err:#}"));
+                    app.node.remove_created_pending_swap(&swap_id);
+                    self.success_message =
+                        Some("Pending swap discarded".into());
+                    list.refresh_swaps(app);
+                    self.swap = None;
                     return;
                 }
-            };
-
-            if let Err(err) =
-                app.node.state().delete_swap(&mut rwtxn, &swap_id, creator)
-            {
-                self.claim_error = Some(format!("Failed to delete: {err:#}"));
-                return;
             }
-
-            if let Err(err) = rwtxn.commit() {
-                self.claim_error = Some(format!("Failed to commit: {err:#}"));
-                return;
-            }
-
-            self.success_message = Some("Swap deleted".into());
-            list.refresh_swaps(app);
-            self.swap = None;
         }
+        self.claim_error = Some("Pending swap not found in mempool".into());
     }
 
     fn fetch_confirmations_from_rpc(

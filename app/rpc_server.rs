@@ -712,19 +712,6 @@ impl RpcServer for RpcServerImpl {
         rwtxn.commit().map_err(custom_err)?;
         Ok(())
     }
-
-    async fn delete_swap(&self, swap_id: SwapId) -> RpcResult<()> {
-        let creator =
-            self.resolve_swap_creator(&swap_id).map_err(custom_err)?;
-        let mut rwtxn = self.app.node.env().write_txn().map_err(custom_err)?;
-        self.app
-            .node
-            .state()
-            .delete_swap(&mut rwtxn, &swap_id, creator.as_ref())
-            .map_err(custom_err)?;
-        rwtxn.commit().map_err(custom_err)?;
-        Ok(())
-    }
 }
 
 #[derive(Clone, Debug)]
