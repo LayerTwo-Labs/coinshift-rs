@@ -476,6 +476,74 @@ impl Wallet {
         Ok(tx)
     }
 
+    /// Create a `SwapAccept` transaction reserving an open swap for a claimer.
+    ///
+    /// Consensus accepts the reservation only if the transaction spends an
+    /// input owned by the address it reserves for — that is how a node proves
+    /// the reserver controls it — so coin selection is restricted to that
+    /// address. Passing `None` reserves for the address of whichever coin is
+    /// selected, which is the common case: the caller just wants the swap held
+    /// for a wallet they own.
+    ///
+    /// `is_locked` returns true for outpoints locked to a swap.
+    pub fn create_swap_accept_tx<F>(
+        &self,
+        accumulator: &Accumulator,
+        swap_id: SwapId,
+        l2_claimer_address: Option<Address>,
+        fee: bitcoin::Amount,
+        is_locked: F,
+    ) -> Result<Transaction, Error>
+    where
+        F: Fn(&OutPoint) -> bool,
+    {
+        let mut candidates: Vec<(OutPoint, Output)> = self
+            .get_utxos()?
+            .into_iter()
+            .filter(|(outpoint, output)| {
+                !output.content.is_withdrawal()
+                    && !output.content.is_swap_pending()
+                    && !is_locked(outpoint)
+                    && l2_claimer_address
+                        .is_none_or(|addr| output.address == addr)
+                    && output.get_value() >= fee
+            })
+            .collect();
+        // Spend the smallest coin that covers the fee, to leave larger coins
+        // available for the L1-side payment this reservation commits to.
+        candidates.sort_by_key(|(_, output)| output.get_value());
+        let (outpoint, output) =
+            candidates.into_iter().next().ok_or(Error::NotEnoughFunds)?;
+
+        let claimer = l2_claimer_address.unwrap_or(output.address);
+        let value = output.get_value();
+        let change = value.checked_sub(fee).ok_or(AmountUnderflowError)?;
+
+        let utxo_hash = hash(&PointedOutput {
+            outpoint,
+            output: output.clone(),
+        });
+        let proof = accumulator.prove(&[utxo_hash.into()])?;
+
+        let mut outputs = Vec::new();
+        if change > bitcoin::Amount::ZERO {
+            outputs.push(Output {
+                address: self.get_new_address()?,
+                content: OutputContent::Value(change),
+            });
+        }
+
+        Ok(Transaction {
+            inputs: vec![(outpoint, utxo_hash)],
+            proof,
+            outputs,
+            data: TxData::SwapAccept {
+                swap_id: swap_id.0,
+                l2_claimer_address: claimer,
+            },
+        })
+    }
+
     /// `is_locked` is a function that returns true if an outpoint is locked to
     /// a swap
     pub fn create_transaction<F>(

@@ -140,6 +140,26 @@ impl ParentChainType {
         }
     }
 
+    /// How long (in L2 blocks) a `SwapAccept` reservation on an open swap
+    /// stays live before anyone may reserve it again.
+    ///
+    /// Must comfortably exceed the time needed to get an L1 payment to
+    /// `required_confirmations` on this chain, or an honest filler could pay on
+    /// L1 and still lose the reservation before they can claim. It also bounds
+    /// how long a griefer can tie up someone else's swap for the price of one
+    /// L2 fee, so it should not be generous beyond that.
+    pub fn accept_expiration_blocks(&self) -> u32 {
+        match self {
+            // 6 confirmations at ~10 min, with room for slow blocks
+            Self::BTC => 144,
+            // 3 confirmations on faster chains
+            Self::BCH | Self::LTC => 72,
+            Self::Signet => 72,
+            // Short for testing
+            Self::Regtest => 20,
+        }
+    }
+
     /// Maximum L1 confirmation age (in L1 blocks) for an L1 transaction
     /// to be accepted as a swap fill.
     ///
@@ -276,6 +296,54 @@ impl SwapState {
     }
 }
 
+/// An on-chain reservation of an open swap, recorded by `TxData::SwapAccept`.
+///
+/// Kept in its own database rather than as fields on [`Swap`] for two reasons.
+/// It leaves the `Swap` record format byte-identical, so swaps written by
+/// earlier versions keep deserializing — and `State::get_swap` turns a
+/// deserialization failure into `Ok(None)`, which for a consensus-critical
+/// field would mean nodes silently disagreeing about who may claim. It also
+/// keeps consensus-derived state physically separate from the node-local
+/// fields on `Swap` (`state`, `l1_txid`, `l2_claimer_address`), which is the
+/// distinction that was blurred when open-swap claims were first written.
+///
+/// Written only by block connect/disconnect. Never by RPC.
+#[derive(
+    BorshSerialize,
+    BorshDeserialize,
+    Clone,
+    Copy,
+    Debug,
+    Deserialize,
+    Eq,
+    PartialEq,
+    Serialize,
+    utoipa::ToSchema,
+)]
+pub struct SwapReservation {
+    /// The L2 address entitled to claim the escrow.
+    pub claimer: Address,
+    /// Height of the block containing the `SwapAccept`.
+    pub accepted_at_height: u32,
+}
+
+impl SwapReservation {
+    /// Height at which this reservation lapses and the swap is open again.
+    pub fn expires_at(&self, parent_chain: ParentChainType) -> u32 {
+        self.accepted_at_height
+            .saturating_add(parent_chain.accept_expiration_blocks())
+    }
+
+    /// Whether the reservation is still live at `height`.
+    pub fn is_live_at(
+        &self,
+        parent_chain: ParentChainType,
+        height: u32,
+    ) -> bool {
+        height < self.expires_at(parent_chain)
+    }
+}
+
 /// Swap transaction ID representation
 #[derive(
     BorshSerialize,
@@ -402,6 +470,88 @@ impl SwapTxId {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `Swap` is persisted as bincode, a non-self-describing format: a record
+    /// written by an earlier version has no room for a new field, and
+    /// `State::get_swap` reports the resulting decode failure as `Ok(None)` —
+    /// a silently missing swap. For a consensus-critical field that means nodes
+    /// disagreeing about who may claim, depending on when each one upgraded.
+    ///
+    /// So this destructuring is deliberate: no `..` pattern, so adding a field
+    /// to `Swap` fails to compile here. If you need new consensus state, give it
+    /// its own database the way [`SwapReservation`] does. If you genuinely need
+    /// a new field on the record, it needs a migration.
+    #[test]
+    fn swap_record_layout_is_pinned() {
+        let swap = Swap::new(
+            SwapId([1u8; 32]),
+            SwapDirection::L2ToL1,
+            ParentChainType::Regtest,
+            SwapTxId::Hash32([0u8; 32]),
+            None,
+            None,
+            bitcoin::Amount::from_sat(1),
+            "addr".to_string(),
+            bitcoin::Amount::from_sat(1),
+            0,
+            None,
+            None,
+        );
+        let Swap {
+            id: _,
+            direction: _,
+            parent_chain: _,
+            l1_txid: _,
+            required_confirmations: _,
+            state: _,
+            l2_recipient: _,
+            l2_amount: _,
+            l1_recipient_address: _,
+            l1_amount: _,
+            l1_claimer_address: _,
+            l2_claimer_address: _,
+            created_at_height: _,
+            expires_at_height: _,
+            l1_txid_validated_at_block_hash: _,
+            l1_txid_validated_at_height: _,
+            l2_creator_address: _,
+        } = swap.clone();
+
+        let bytes = bincode::serialize(&swap).unwrap();
+        let decoded: Swap = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(swap, decoded);
+    }
+
+    /// A reservation lapses at exactly `accepted_at + window`, not before.
+    #[test]
+    fn reservation_expiry_boundary() {
+        let chain = ParentChainType::Regtest;
+        let window = chain.accept_expiration_blocks();
+        let reservation = SwapReservation {
+            claimer: Address([7u8; 20]),
+            accepted_at_height: 100,
+        };
+        assert_eq!(reservation.expires_at(chain), 100 + window);
+        assert!(reservation.is_live_at(chain, 100));
+        assert!(reservation.is_live_at(chain, 100 + window - 1));
+        assert!(!reservation.is_live_at(chain, 100 + window));
+    }
+
+    /// The acceptance window has to outlast the confirmations the filler must
+    /// wait for, or an honest filler could pay on L1 and lose the reservation
+    /// before the swap becomes claimable.
+    #[test]
+    fn acceptance_window_outlasts_required_confirmations() {
+        for chain in ParentChainType::all() {
+            assert!(
+                chain.accept_expiration_blocks()
+                    > chain.default_confirmations() * 2,
+                "{chain:?}: acceptance window {} leaves no margin over {} confirmations",
+                chain.accept_expiration_blocks(),
+                chain.default_confirmations(),
+            );
+        }
+    }
 
     #[test]
     fn from_hex_requires_64_chars() {

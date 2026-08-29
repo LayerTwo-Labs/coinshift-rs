@@ -503,6 +503,42 @@ impl RpcServer for RpcServerImpl {
         Ok(swap)
     }
 
+    async fn accept_swap(
+        &self,
+        swap_id: SwapId,
+        l2_claimer_address: Option<Address>,
+        fee_sats: Option<u64>,
+    ) -> RpcResult<Txid> {
+        let accumulator =
+            self.app.node.get_tip_accumulator().map_err(custom_err)?;
+
+        let node = &self.app.node;
+        let is_locked = |outpoint: &coinshift::types::OutPoint| -> bool {
+            let Ok(rotxn) = node.env().read_txn() else {
+                return false;
+            };
+            matches!(
+                node.state().is_output_locked_to_swap(&rotxn, outpoint),
+                Ok(Some(_))
+            )
+        };
+
+        let tx = self
+            .app
+            .wallet
+            .create_swap_accept_tx(
+                &accumulator,
+                swap_id,
+                l2_claimer_address,
+                Amount::from_sat(fee_sats.unwrap_or(0)),
+                is_locked,
+            )
+            .map_err(custom_err)?;
+        let txid = tx.txid();
+        self.app.sign_and_send(tx).map_err(custom_err)?;
+        Ok(txid)
+    }
+
     async fn claim_swap(
         &self,
         swap_id: SwapId,
@@ -571,14 +607,37 @@ impl RpcServer for RpcServerImpl {
             )));
         }
 
-        // Determine recipient: pre-specified uses swap.l2_recipient; open uses stored or provided claimer address
-        let recipient = swap
-            .l2_recipient
-            .or(swap.l2_claimer_address)
-            .or(l2_claimer_address)
+        // Determine recipient. For open swaps this is the on-chain reservation
+        // recorded by `SwapAccept` — the only value consensus will accept, so
+        // any address the caller passes is ignored rather than silently
+        // producing a claim every node rejects.
+        let height = self
+            .app
+            .node
+            .state()
+            .try_get_height(&rotxn)
+            .map_err(custom_err)?
+            .map_or(0, |height| height + 1);
+        let recipient = self
+            .app
+            .node
+            .state()
+            .entitled_claimer_at(&rotxn, &swap, height)
+            .map_err(custom_err)?
             .ok_or_else(|| {
-                custom_err_msg("Open swap requires l2_claimer_address (or set when L1 tx was submitted)")
+                custom_err_msg(
+                    "Open swap has no live reservation; call accept_swap to \
+                     reserve it (before paying on L1) and claim within the \
+                     acceptance window",
+                )
             })?;
+        if let Some(requested) = l2_claimer_address
+            && requested != recipient
+        {
+            return Err(custom_err_msg(format!(
+                "Swap is reserved for {recipient}, not {requested}"
+            )));
+        }
 
         // Add locked outputs to wallet temporarily so they can be used for signing
         // SwapPending outputs are normally filtered out, but we need them in the wallet
@@ -649,19 +708,6 @@ impl RpcServer for RpcServerImpl {
             .node
             .state()
             .cancel_swap(&mut rwtxn, &swap_id, creator.as_ref())
-            .map_err(custom_err)?;
-        rwtxn.commit().map_err(custom_err)?;
-        Ok(())
-    }
-
-    async fn delete_swap(&self, swap_id: SwapId) -> RpcResult<()> {
-        let creator =
-            self.resolve_swap_creator(&swap_id).map_err(custom_err)?;
-        let mut rwtxn = self.app.node.env().write_txn().map_err(custom_err)?;
-        self.app
-            .node
-            .state()
-            .delete_swap(&mut rwtxn, &swap_id, creator.as_ref())
             .map_err(custom_err)?;
         rwtxn.commit().map_err(custom_err)?;
         Ok(())

@@ -441,6 +441,26 @@ pub fn connect_prevalidated(
                 swap.mark_completed();
                 state.save_swap(rwtxn, &swap)?;
             }
+            TxData::SwapAccept {
+                swap_id,
+                l2_claimer_address,
+            } => {
+                let swap_id = SwapId(*swap_id);
+                // `validate_swap_accept` has already checked that this swap
+                // exists, is open, and is unreserved (or lapsed) at this height.
+                state.reserve_swap(
+                    rwtxn,
+                    &swap_id,
+                    *l2_claimer_address,
+                    pre.next_height,
+                )?;
+                tracing::debug!(
+                    %swap_id,
+                    claimer = %l2_claimer_address,
+                    height = pre.next_height,
+                    "Reserved open swap"
+                );
+            }
             TxData::Regular => {}
         }
     }
@@ -778,7 +798,10 @@ pub fn disconnect_tip(
                     }
                 }
 
-                // Delete swap (rollback: no creator check)
+                // Delete swap (rollback: no creator check). Any reservation
+                // taken on it in a later block is gone with that block, but
+                // clear it here too so no orphan entry can outlive the swap.
+                state.clear_swap_reservation(rwtxn, &swap_id)?;
                 state.delete_swap_unchecked(rwtxn, &swap_id)?;
             }
             TxData::SwapClaim { swap_id, .. } => {
@@ -804,6 +827,13 @@ pub fn disconnect_tip(
                     swap.state = SwapState::ReadyToClaim;
                     state.save_swap(rwtxn, &swap)?;
                 }
+            }
+            TxData::SwapAccept { swap_id, .. } => {
+                let swap_id = SwapId(*swap_id);
+                // The swap may already be gone if the block being disconnected
+                // also created it; `SwapCreate` is reverted later in this same
+                // reverse pass, but an earlier reorg may have removed it.
+                state.clear_swap_reservation(rwtxn, &swap_id)?;
             }
             TxData::Regular => {}
         }

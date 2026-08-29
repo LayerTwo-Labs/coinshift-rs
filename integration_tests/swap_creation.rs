@@ -488,8 +488,20 @@ async fn swap_creation_open_fill_task(
     wait_for_locked_utxos(&sidechain.rpc_client, swap_id, SWAP_L2_AMOUNT)
         .await?;
 
-    // Simulate Bob filling the swap: provide L1 txid and his L2 address (claim only valid for this address)
+    // Bob reserves the swap on-chain BEFORE paying on L1. This is what entitles
+    // him to the escrow: the reservation is block data every node agrees on,
+    // unlike the L1 payment. Taking it after paying would let anyone watching
+    // front-run him.
     let claimer_address = sidechain.rpc_client.get_new_address().await?;
+    let accept_txid = sidechain
+        .rpc_client
+        .accept_swap(swap_id, Some(claimer_address), Some(0))
+        .await?;
+    tracing::info!(swap_id = %swap_id, %accept_txid, "Reserved open swap");
+    sidechain.bmm_single(&mut enforcer_post_setup).await?;
+    sleep(std::time::Duration::from_millis(500)).await;
+
+    // Now Bob pays on L1 and reports it.
     let fake_l1_txid_hex = "11".repeat(32);
     sidechain
         .rpc_client
@@ -524,6 +536,18 @@ async fn swap_creation_open_fill_task(
         status_ready.l2_claimer_address == Some(claimer_address),
         "Stored l2_claimer_address should match: {:?}",
         status_ready.l2_claimer_address
+    );
+
+    // A claim naming anyone else must be refused, whatever this node's local
+    // view of the L1 fill says — the reservation decides.
+    let interloper = sidechain.rpc_client.get_new_address().await?;
+    let stolen = sidechain
+        .rpc_client
+        .claim_swap(swap_id, Some(interloper))
+        .await;
+    anyhow::ensure!(
+        stolen.is_err(),
+        "claiming an open swap reserved for someone else must fail"
     );
 
     // Claim the swap: recipient is taken from stored l2_claimer_address (can pass None)

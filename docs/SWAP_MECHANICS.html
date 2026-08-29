@@ -1,0 +1,803 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Coinshift Swap Mechanics</title>
+<meta name="description" content="How a Coinshift L2/L1 swap works, and why every security property follows from whether a fact lives in block data or only on one node.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Spectral:ital,wght@0,600;0,700;1,600&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+
+<style>
+  :root {
+    --ground:      #F4F7F6;
+    --surface:     #FFFFFF;
+    --ink:         #0F1719;
+    --ink-muted:   #55666B;
+    --ink-faint:   #7C8D92;
+    --rule:        #D5DEDC;
+    --rule-soft:   #E4EBE9;
+    --consensus:   #0E6F68;
+    --local:       #A25A12;
+    --danger:      #A32E23;
+    --tint:        #E1EDEA;
+    --tint-local:  #F6EBDA;
+    --tint-danger: #F6E2DF;
+    /* Figure plates keep one constant ground in both themes, the way a
+       printed plate does — so diagram ink is always dark on light. */
+    --plate:       #EDF0EF;
+    --plate-rule:  #CBD5D2;
+    --plate-ink:   #0F1719;
+
+    --measure: 68ch;
+    --figure-w: 1080px;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:      #0B1214;
+      --surface:     #111A1C;
+      --ink:         #E2EAE9;
+      --ink-muted:   #93A5A8;
+      --ink-faint:   #6E8185;
+      --rule:        #223034;
+      --rule-soft:   #1A2528;
+      --consensus:   #4FD8C9;
+      --local:       #E8A845;
+      --danger:      #F0776C;
+      --tint:        #13282A;
+      --tint-local:  #2A2113;
+      --tint-danger: #2B1815;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ground:      #0B1214;
+    --surface:     #111A1C;
+    --ink:         #E2EAE9;
+    --ink-muted:   #93A5A8;
+    --ink-faint:   #6E8185;
+    --rule:        #223034;
+    --rule-soft:   #1A2528;
+    --consensus:   #4FD8C9;
+    --local:       #E8A845;
+    --danger:      #F0776C;
+    --tint:        #13282A;
+    --tint-local:  #2A2113;
+    --tint-danger: #2B1815;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+    font-size: 17px;
+    line-height: 1.65;
+    margin: 0;
+    padding: 0 24px 120px;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .col {
+    max-width: var(--measure);
+    margin-inline: auto;
+  }
+
+  /* ---------- masthead ---------- */
+
+  header.masthead {
+    max-width: var(--figure-w);
+    margin: 0 auto;
+    padding: 88px 0 40px;
+    border-bottom: 1px solid var(--rule);
+  }
+
+  .eyebrow {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 12px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--consensus);
+    margin: 0 0 20px;
+  }
+
+  h1 {
+    font-family: Spectral, Georgia, serif;
+    font-weight: 700;
+    font-size: clamp(38px, 6vw, 62px);
+    line-height: 1.04;
+    letter-spacing: -0.02em;
+    text-wrap: balance;
+    margin: 0 0 22px;
+    max-width: 16ch;
+  }
+
+  .standfirst {
+    font-family: Spectral, Georgia, serif;
+    font-size: clamp(19px, 2.3vw, 23px);
+    font-style: italic;
+    line-height: 1.5;
+    color: var(--ink-muted);
+    max-width: 54ch;
+    margin: 0 0 36px;
+    text-wrap: pretty;
+  }
+
+  .meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 28px;
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 12.5px;
+    color: var(--ink-faint);
+  }
+  .meta b { color: var(--ink-muted); font-weight: 500; }
+
+  /* ---------- sections ---------- */
+
+  section { padding-top: 72px; }
+
+  h2 {
+    font-family: Spectral, Georgia, serif;
+    font-weight: 600;
+    font-size: clamp(26px, 3.4vw, 34px);
+    line-height: 1.2;
+    letter-spacing: -0.01em;
+    text-wrap: balance;
+    margin: 0 0 8px;
+  }
+
+  h3 {
+    font-family: "IBM Plex Sans", sans-serif;
+    font-weight: 600;
+    font-size: 17px;
+    letter-spacing: 0.005em;
+    margin: 40px 0 10px;
+  }
+
+  .kicker {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 11.5px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    margin: 0 0 14px;
+    display: block;
+  }
+
+  p { margin: 0 0 18px; text-wrap: pretty; }
+
+  a { color: var(--consensus); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+  a:focus-visible, summary:focus-visible {
+    outline: 2px solid var(--consensus);
+    outline-offset: 3px;
+    border-radius: 2px;
+  }
+
+  code {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 0.87em;
+    background: var(--rule-soft);
+    padding: 0.12em 0.36em;
+    border-radius: 3px;
+  }
+
+  strong { font-weight: 600; }
+
+  ul, ol { margin: 0 0 18px; padding-left: 1.15em; }
+  li { margin-bottom: 8px; }
+  li::marker { color: var(--ink-faint); }
+
+  /* ---------- callouts ---------- */
+
+  .note {
+    border-left: 2px solid var(--consensus);
+    background: var(--tint);
+    padding: 18px 22px;
+    margin: 28px 0;
+    border-radius: 0 4px 4px 0;
+  }
+  .note.local  { border-left-color: var(--local);  background: var(--tint-local); }
+  .note.danger { border-left-color: var(--danger); background: var(--tint-danger); }
+  .note p:last-child { margin-bottom: 0; }
+  .note .label {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--consensus);
+    display: block;
+    margin-bottom: 8px;
+  }
+  .note.local .label  { color: var(--local); }
+  .note.danger .label { color: var(--danger); }
+
+  /* ---------- figures ---------- */
+
+  figure {
+    max-width: var(--figure-w);
+    margin: 40px auto;
+  }
+
+  .plate {
+    background: var(--plate);
+    border: 1px solid var(--plate-rule);
+    border-radius: 6px;
+    padding: 28px 20px 20px;
+    overflow-x: auto;
+  }
+
+  .plate svg { max-width: 100%; height: auto; display: block; margin-inline: auto; }
+
+  /* Before mermaid runs — or if it never loads, e.g. opened offline — the
+     diagram source stays readable as plain text. Once rendered, mermaid stamps
+     data-processed and the SVG is centred instead. */
+  pre.mermaid {
+    margin: 0;
+    background: transparent;
+    min-width: 520px;
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 12.5px;
+    line-height: 1.5;
+    color: var(--plate-ink);
+    text-align: left;
+    white-space: pre;
+  }
+  pre.mermaid[data-processed="true"] { text-align: center; }
+  pre.mermaid svg { max-width: 100%; height: auto; }
+
+  figcaption {
+    font-size: 14.5px;
+    line-height: 1.55;
+    color: var(--ink-muted);
+    margin-top: 14px;
+    max-width: 76ch;
+  }
+  figcaption b {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 12px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    font-weight: 500;
+    margin-right: 10px;
+  }
+
+  /* ---------- tables ---------- */
+
+  .table-wrap { overflow-x: auto; margin: 28px 0; }
+
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    font-size: 15px;
+    font-variant-numeric: tabular-nums;
+  }
+  th, td {
+    text-align: left;
+    padding: 11px 16px 11px 0;
+    border-bottom: 1px solid var(--rule-soft);
+    vertical-align: top;
+  }
+  th {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 11.5px;
+    letter-spacing: 0.11em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    font-weight: 500;
+    border-bottom-color: var(--rule);
+    white-space: nowrap;
+  }
+  td code { background: transparent; padding: 0; }
+
+  .yes { color: var(--consensus); font-weight: 600; }
+  .no  { color: var(--danger); font-weight: 600; }
+
+  /* ---------- contents ---------- */
+
+  nav.toc {
+    margin: 48px auto 0;
+    padding: 0;
+    max-width: var(--figure-w);
+  }
+  nav.toc ol {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+    gap: 2px 32px;
+    counter-reset: toc;
+  }
+  nav.toc li { margin: 0; counter-increment: toc; }
+  nav.toc a {
+    display: flex;
+    gap: 12px;
+    padding: 9px 0;
+    border-bottom: 1px solid var(--rule-soft);
+    color: var(--ink);
+    text-decoration: none;
+    font-size: 15px;
+  }
+  nav.toc a::before {
+    content: counter(toc, decimal-leading-zero);
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 12px;
+    color: var(--consensus);
+    padding-top: 2px;
+  }
+  nav.toc a:hover { color: var(--consensus); }
+
+  footer {
+    max-width: var(--figure-w);
+    margin: 96px auto 0;
+    padding-top: 28px;
+    border-top: 1px solid var(--rule);
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 12.5px;
+    color: var(--ink-faint);
+    line-height: 1.7;
+  }
+
+  @media (max-width: 720px) {
+    body { padding: 0 18px 80px; font-size: 16px; }
+    header.masthead { padding-top: 56px; }
+    section { padding-top: 56px; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+  }
+</style>
+
+</head>
+<body>
+<header class="masthead">
+  <p class="eyebrow">coinshift-rs · swap subsystem</p>
+  <h1>Coinshift Swap Mechanics</h1>
+  <p class="standfirst">Every security property in the swap system follows from one question: is this fact in the blocks, or only on your node?</p>
+  <div class="meta">
+    <span><b>source</b> lib/state/swap.rs</span>
+    <span><b>see also</b> docs/COINSHIFT_HOW_IT_WORKS.md</span>
+    <span><b>status</b> pre-deployment</span>
+  </div>
+</header>
+
+<nav class="toc" aria-label="Contents">
+  <ol>
+    <li><a href="#boundary">The boundary everything rests on</a></li>
+    <li><a href="#validators">Two validators, one payout rule</a></li>
+    <li><a href="#fixed">A swap with a fixed recipient</a></li>
+    <li><a href="#open">An open swap, reserved on-chain</a></li>
+    <li><a href="#attack">The attack, and why it now fails</a></li>
+    <li><a href="#ordering">Why reserving must come first</a></li>
+    <li><a href="#parent">What the parent chain still costs you</a></li>
+    <li><a href="#state">Two lifetimes, two owners</a></li>
+    <li><a href="#reference">Rules and code map</a></li>
+  </ol>
+</nav>
+
+<main>
+
+<section id="boundary" class="col">
+  <span class="kicker">01 — The central idea</span>
+  <h2>The boundary everything rests on</h2>
+  <p>A Coinshift node knows two very different kinds of thing.</p>
+  <p><strong>Block data</strong> is derived from the chain by replaying it. Every node that has the same blocks computes the same values, so block validation may rely on them: if a rule reads only from here, every node reaches the same verdict and the chain cannot split.</p>
+  <p><strong>Local observation</strong> comes from somewhere else — a parent-chain RPC that this operator happens to run, an RPC call someone made against this node. It is real information, often the information that matters most, but it differs from node to node. A block validation rule that reads from here makes block validity depend on your configuration file.</p>
+
+  <figure>
+    <div class="plate">
+      <svg viewBox="0 0 900 428" role="img" aria-label="Two columns of facts: block data on the left, which every node agrees on, and local observation on the right, which differs per node. Block validation may read only from the left." xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <marker id="ar-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="#0E6F68"/>
+          </marker>
+          <marker id="ar-no" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="#A32E23"/>
+          </marker>
+        </defs>
+
+        <text x="20" y="26" font-family="IBM Plex Mono, monospace" font-size="12" letter-spacing="1.6" fill="#0E6F68">BLOCK DATA</text>
+        <text x="20" y="46" font-family="IBM Plex Sans, sans-serif" font-size="13" fill="#55666B">identical on every node</text>
+
+        <text x="500" y="26" font-family="IBM Plex Mono, monospace" font-size="12" letter-spacing="1.6" fill="#A25A12">LOCAL OBSERVATION</text>
+        <text x="500" y="46" font-family="IBM Plex Sans, sans-serif" font-size="13" fill="#55666B">differs from node to node</text>
+
+        <line x1="460" y1="12" x2="460" y2="330" stroke="#7C8D92" stroke-width="1.5" stroke-dasharray="5 5"/>
+
+        <g font-family="IBM Plex Mono, monospace" font-size="12.5" fill="#0F1719">
+          <rect x="20" y="66" width="410" height="40" rx="3" fill="#E1EDEA" stroke="#0E6F68" stroke-width="1"/>
+          <text x="36" y="83">swap.l2_recipient, l2_amount</text>
+          <text x="36" y="98" font-family="IBM Plex Sans, sans-serif" font-size="11.5" fill="#55666B">fixed by SwapCreate in a block</text>
+
+          <rect x="20" y="118" width="410" height="40" rx="3" fill="#E1EDEA" stroke="#0E6F68" stroke-width="1"/>
+          <text x="36" y="135">locked_swap_outputs</text>
+          <text x="36" y="150" font-family="IBM Plex Sans, sans-serif" font-size="11.5" fill="#55666B">escrow locked when the block connects</text>
+
+          <rect x="20" y="170" width="410" height="40" rx="3" fill="#E1EDEA" stroke="#0E6F68" stroke-width="1.8"/>
+          <text x="36" y="187">swap_reservations</text>
+          <text x="36" y="202" font-family="IBM Plex Sans, sans-serif" font-size="11.5" fill="#55666B">claimer + height, written by SwapAccept</text>
+
+          <rect x="20" y="222" width="410" height="40" rx="3" fill="#E1EDEA" stroke="#0E6F68" stroke-width="1"/>
+          <text x="36" y="239">block height</text>
+          <text x="36" y="254" font-family="IBM Plex Sans, sans-serif" font-size="11.5" fill="#55666B">decides whether a reservation is live</text>
+        </g>
+
+        <g font-family="IBM Plex Mono, monospace" font-size="12.5" fill="#0F1719">
+          <rect x="490" y="66" width="390" height="40" rx="3" fill="#F6EBDA" stroke="#A25A12" stroke-width="1"/>
+          <text x="506" y="83">swap.state</text>
+          <text x="506" y="98" font-family="IBM Plex Sans, sans-serif" font-size="11.5" fill="#55666B">Pending … ReadyToClaim, from L1 polling</text>
+
+          <rect x="490" y="118" width="390" height="40" rx="3" fill="#F6EBDA" stroke="#A25A12" stroke-width="1"/>
+          <text x="506" y="135">swap.l1_txid</text>
+          <text x="506" y="150" font-family="IBM Plex Sans, sans-serif" font-size="11.5" fill="#55666B">set only if you run that chain's RPC</text>
+
+          <rect x="490" y="170" width="390" height="40" rx="3" fill="#F6EBDA" stroke="#A25A12" stroke-width="1"/>
+          <text x="506" y="187">swap.l2_claimer_address</text>
+          <text x="506" y="202" font-family="IBM Plex Sans, sans-serif" font-size="11.5" fill="#55666B">legacy hint, set by a local RPC call</text>
+
+          <rect x="490" y="222" width="390" height="40" rx="3" fill="#F6EBDA" stroke="#A25A12" stroke-width="1"/>
+          <text x="506" y="239">l1_rpc_configs.json</text>
+          <text x="506" y="254" font-family="IBM Plex Sans, sans-serif" font-size="11.5" fill="#55666B">which chains this operator watches</text>
+        </g>
+
+        <rect x="20" y="352" width="410" height="56" rx="3" fill="#FFFFFF" stroke="#0E6F68" stroke-width="1.5"/>
+        <text x="36" y="376" font-family="IBM Plex Mono, monospace" font-size="12.5" fill="#0F1719">validate_swap_claim_consensus</text>
+        <text x="36" y="394" font-family="IBM Plex Sans, sans-serif" font-size="11.5" fill="#55666B">runs on every block, on every node</text>
+
+        <line x1="225" y1="270" x2="225" y2="346" stroke="#0E6F68" stroke-width="1.8" marker-end="url(#ar-ok)"/>
+        <text x="236" y="312" font-family="IBM Plex Sans, sans-serif" font-size="12" fill="#0E6F68">may read</text>
+
+        <path d="M 685 270 L 685 310 L 445 310 L 445 344" fill="none" stroke="#A32E23" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#ar-no)"/>
+        <g stroke="#A32E23" stroke-width="2.4">
+          <line x1="556" y1="301" x2="574" y2="319"/>
+          <line x1="574" y1="301" x2="556" y2="319"/>
+        </g>
+        <text x="594" y="330" font-family="IBM Plex Sans, sans-serif" font-size="12" fill="#A32E23">must not read</text>
+      </svg>
+    </div>
+    <figcaption><b>Figure 1</b> The two knowledge sets, and the one rule that governs them. The bug that started this work was a fact that had to be on the left — which L2 address is entitled to an open swap's escrow — sitting on the right. <code>swap_reservations</code> is drawn heavier because moving that one fact across the line is the whole fix.</figcaption>
+  </figure>
+
+  <div class="note">
+    <span class="label">The rule</span>
+    <p>Block validation reads only from the left. Anything on the right may inform the mempool, the wallet, or the UI — never whether a block is valid.</p>
+  </div>
+</section>
+
+<section id="validators" class="col">
+  <span class="kicker">02 — Structure</span>
+  <h2>Two validators, one payout rule</h2>
+  <p>Because of that boundary, a <code>SwapClaim</code> is checked by two different functions depending on where it arrives.</p>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>&nbsp;</th><th>Mempool</th><th>Block validation</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><b>Function</b></td>
+          <td><code>validate_swap_claim</code></td>
+          <td><code>validate_swap_claim_consensus</code></td>
+        </tr>
+        <tr>
+          <td><b>Reached from</b></td>
+          <td><code>State::validate_transaction</code> — the RPC submit path and peer relay</td>
+          <td><code>validate_block_transaction</code> — prevalidate and connect</td>
+        </tr>
+        <tr>
+          <td><b>Swap is <code>ReadyToClaim</code></b></td>
+          <td class="yes">checked</td>
+          <td class="no">skipped — local</td>
+        </tr>
+        <tr>
+          <td><b>L1 fill observed</b></td>
+          <td class="yes">checked</td>
+          <td class="no">skipped — local</td>
+        </tr>
+        <tr>
+          <td><b>Spends this swap's escrow, and nothing else's</b></td>
+          <td class="yes">checked</td>
+          <td class="yes">checked</td>
+        </tr>
+        <tr>
+          <td><b>Full <code>l2_amount</code> reaches the entitled claimer</b></td>
+          <td class="yes">checked</td>
+          <td class="yes">checked</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>The consensus half skips the first two deliberately. A node that has not yet seen the L1 fill — or that does not watch that chain at all — must still be able to accept a block containing the claim, or the chain splits along the lines of who configured what.</p>
+  <p>The two halves used to disagree about the last row, and that was the vulnerability. They no longer can: <code>validate_swap_claim</code> now performs its local checks and then <em>calls</em> the consensus function for everything about who gets paid. One rule, one implementation.</p>
+</section>
+
+<section id="fixed" class="col">
+  <span class="kicker">03 — Lifecycle</span>
+  <h2>A swap with a fixed recipient</h2>
+  <p>The simple case. Alice names Bob when she creates the swap, so the entitled address is block data from the very first transaction and nothing else is needed.</p>
+</section>
+
+<figure>
+  <div class="plate">
+<pre class="mermaid">
+%%{init: {'theme':'base','themeVariables':{'primaryColor':'#E1EDEA','primaryTextColor':'#0F1719','primaryBorderColor':'#0E6F68','lineColor':'#55666B','actorBkg':'#E1EDEA','actorBorder':'#0E6F68','actorTextColor':'#0F1719','actorLineColor':'#7C8D92','signalColor':'#3A4A50','signalTextColor':'#0F1719','noteBkgColor':'#F6EBDA','noteBorderColor':'#A25A12','noteTextColor':'#0F1719','labelBoxBkgColor':'#E1EDEA','labelBoxBorderColor':'#0E6F68','labelTextColor':'#0F1719','sequenceNumberColor':'#FFFFFF'}}}%%
+sequenceDiagram
+    autonumber
+    participant A as Alice (maker)
+    participant L2 as L2 chain
+    participant B as Bob (taker)
+    participant L1 as Parent chain
+    A->>L2: SwapCreate(l2_recipient = Bob, l2_amount)
+    Note over L2: escrow locked, recipient fixed on-chain
+    B->>L1: pay l1_amount to l1_recipient_address
+    L1-->>B: confirmations reach required_confirmations
+    Note right of B: only Bob's node sees this
+    B->>L2: SwapClaim
+    Note over L2: consensus: full l2_amount must reach l2_recipient
+    L2-->>B: escrow released, swap Completed
+</pre>
+  </div>
+  <figcaption><b>Figure 2</b> A pre-specified swap. Step 4 is the only local observation in the flow, and it gates nothing at the block level — every node validates step 6 identically against the recipient recorded in step 1.</figcaption>
+</figure>
+
+<section id="open" class="col">
+  <span class="kicker">04 — Lifecycle</span>
+  <h2>An open swap, reserved on-chain</h2>
+  <p>An open swap has no recipient at creation — that is the point, since anyone should be able to fill it. So entitlement has to be established later, and it has to land in block data to be worth anything. That is what <code>SwapAccept</code> does.</p>
+</section>
+
+<figure>
+  <div class="plate">
+<pre class="mermaid">
+%%{init: {'theme':'base','themeVariables':{'primaryColor':'#E1EDEA','primaryTextColor':'#0F1719','primaryBorderColor':'#0E6F68','lineColor':'#55666B','actorBkg':'#E1EDEA','actorBorder':'#0E6F68','actorTextColor':'#0F1719','actorLineColor':'#7C8D92','signalColor':'#3A4A50','signalTextColor':'#0F1719','noteBkgColor':'#F6EBDA','noteBorderColor':'#A25A12','noteTextColor':'#0F1719','labelBoxBkgColor':'#E1EDEA','labelBoxBorderColor':'#0E6F68','labelTextColor':'#0F1719','sequenceNumberColor':'#FFFFFF'}}}%%
+sequenceDiagram
+    autonumber
+    participant A as Alice (maker)
+    participant L2 as L2 chain
+    participant B as Bob (taker)
+    participant L1 as Parent chain
+    A->>L2: SwapCreate(l2_recipient = none)
+    Note over L2: escrow locked, nobody entitled yet
+    B->>L2: SwapAccept(swap_id, claimer = Bob)
+    Note over L2: open, unexpired, unreserved, input owned by Bob
+    L2-->>B: swap_reservations[swap_id] = Bob at height H
+    B->>L2: read the reservation back
+    Note right of B: only pay if it names Bob
+    B->>L1: pay l1_amount
+    L1-->>B: confirmations
+    B->>L2: SwapClaim
+    Note over L2: consensus: full l2_amount must reach the reservation holder
+    L2-->>B: escrow released, swap Completed
+</pre>
+  </div>
+  <figcaption><b>Figure 3</b> An open swap. Steps 3 to 5 are the addition: one extra L2 transaction, before any money moves on the parent chain. Step 6 is not ceremony — checking that the reservation is yours before you pay is the taker's whole protection.</figcaption>
+</figure>
+
+<section class="col">
+  <p>The reservation is not permanent. It lapses at <code>accepted_at_height + accept_expiration_blocks</code>, after which the swap is open to anyone again. That window is what bounds griefing: someone can sit on a swap they never intend to fill, but each attempt costs an L2 fee and buys only one window.</p>
+  <p>The accept must also spend an input owned by the address it reserves for. Nothing exempts <code>SwapAccept</code> from the per-input authorization check, so that input carries a signature from the key — which is what stops anyone from parking every open swap for an address they do not control.</p>
+</section>
+
+<section id="attack" class="col">
+  <span class="kicker">05 — The vulnerability</span>
+  <h2>The attack, and why it now fails</h2>
+  <p>Before this work, <code>validate_swap_claim_consensus</code> gated its payout check on the recipient existing:</p>
+  <p><code>if let Some(swap) = get_swap(..) &amp;&amp; let Some(recipient) = swap.l2_recipient { … }</code></p>
+  <p>For an open swap, <code>l2_recipient</code> is <code>None</code>, so the whole check fell away. Block validation asked only that the claim spend the escrow — not where a single satoshi went. Combined with the authorization bypass for <code>SwapPending</code> inputs, that left open swaps with no payout protection at all on the block path.</p>
+</section>
+
+<figure>
+  <div class="plate">
+<pre class="mermaid">
+%%{init: {'theme':'base','themeVariables':{'primaryColor':'#E1EDEA','primaryTextColor':'#0F1719','primaryBorderColor':'#0E6F68','lineColor':'#55666B','actorBkg':'#E1EDEA','actorBorder':'#0E6F68','actorTextColor':'#0F1719','actorLineColor':'#7C8D92','signalColor':'#3A4A50','signalTextColor':'#0F1719','noteBkgColor':'#F6E2DF','noteBorderColor':'#A32E23','noteTextColor':'#0F1719','labelBoxBkgColor':'#E1EDEA','labelBoxBorderColor':'#0E6F68','labelTextColor':'#0F1719','sequenceNumberColor':'#FFFFFF'}}}%%
+sequenceDiagram
+    autonumber
+    participant M as Mallory
+    participant L2 as L2 chain
+    participant B as Bob (paid on L1)
+    M->>L2: SwapClaim(swap_id, claimer = Mallory, pays Mallory)
+    Note over L2: BEFORE — l2_recipient is none, so no payout check runs
+    L2-->>M: escrow released to Mallory
+    B->>L2: SwapClaim
+    L2-->>B: nothing left to claim
+    Note over L2: AFTER — entitled claimer comes from swap_reservations
+    M->>L2: same SwapClaim
+    L2-->>M: rejected, swap is reserved for Bob
+</pre>
+  </div>
+  <figcaption><b>Figure 4</b> The same transaction, before and after. Mallory declaring herself as <code>l2_claimer_address</code> no longer helps, because the entitled address is read from the chain rather than from the claim. Note that this needs no L1 payment, no timing, and no mining — it was a plain broadcast.</figcaption>
+</figure>
+
+<section class="col">
+  <div class="note danger">
+    <span class="label">Why the obvious patch was not enough</span>
+    <p>The first fix required an open claim to pay the <code>l2_claimer_address</code> the claim itself declares. That is a real invariant — the escrow can no longer be split, redirected, or burned — but on its own it stops nobody: an attacker declares her own address and pays herself in full. A payout rule is only as good as the source of the address it pays to.</p>
+  </div>
+</section>
+
+<section id="ordering" class="col">
+  <span class="kicker">06 — Design</span>
+  <h2>Why reserving must come first</h2>
+  <p>The intuitive design is to record the claimer at the moment you learn who paid — attach the L2 address to the L1 notification. It does not work, and the reason is worth seeing drawn.</p>
+</section>
+
+<figure>
+  <div class="plate">
+<pre class="mermaid">
+%%{init: {'theme':'base','themeVariables':{'primaryColor':'#E1EDEA','primaryTextColor':'#0F1719','primaryBorderColor':'#0E6F68','lineColor':'#55666B','actorBkg':'#E1EDEA','actorBorder':'#0E6F68','actorTextColor':'#0F1719','actorLineColor':'#7C8D92','signalColor':'#3A4A50','signalTextColor':'#0F1719','noteBkgColor':'#F6E2DF','noteBorderColor':'#A32E23','noteTextColor':'#0F1719','labelBoxBkgColor':'#E1EDEA','labelBoxBorderColor':'#0E6F68','labelTextColor':'#0F1719','sequenceNumberColor':'#FFFFFF'}}}%%
+sequenceDiagram
+    autonumber
+    participant B as Bob
+    participant L1 as Parent chain
+    participant MP as L2 mempool
+    participant M as Mallory
+    B->>L1: pay l1_amount
+    B->>MP: notify(swap_id, l1_txid, claimer = Bob)
+    M->>MP: watching
+    M->>MP: notify(swap_id, l1_txid, claimer = Mallory) at a higher fee
+    Note over MP: consensus cannot tell who sent the L1 payment
+    MP-->>M: Mallory's notify is mined first
+    M->>MP: SwapClaim, paid to Mallory
+    Note over B: Bob has paid on L1 and gets nothing
+</pre>
+  </div>
+  <figcaption><b>Figure 5</b> Notify-after-pay, the design that does not work. Recording the claimer after the L1 payment moves the theft rather than removing it — and makes it easier, since a fee auction beats a race. Reserving first inverts the exposure: an attacker who reserves has only reserved, Bob reads the reservation, sees it is not his, and keeps his money.</figcaption>
+</figure>
+
+<section class="col">
+  <div class="note">
+    <span class="label">The invariant</span>
+    <p>The reservation must be causally prior to the L1 payment. That ordering is the security property, not an implementation detail — it is the reason there is nothing to front-run.</p>
+  </div>
+</section>
+
+<section id="parent" class="col">
+  <span class="kicker">07 — The remaining trust</span>
+  <h2>What the parent chain still costs you</h2>
+  <p>One fact never crosses into block data: whether the L1 payment actually happened. Consensus has no view of the parent chain, so "was Bob's BCH really sent?" is checked only by <code>validate_swap_claim</code>, only in the mempool, and only on nodes that run that chain's RPC. Three consequences follow, and they are worth separating.</p>
+
+  <h3>Not a consensus problem</h3>
+  <p>A node with no BCH RPC validates and connects a block containing a BCH swap claim exactly like everyone else, because the consensus half skips the L1 checks by design. Not running a parent chain never forks you.</p>
+
+  <h3>It is a relay problem</h3>
+  <p>The mempool half still requires <code>swap.state == ReadyToClaim</code>, which only advances if you poll that chain — <code>query_and_update_swap</code> skips the lookup entirely when no RPC is configured, and the swap stays <code>Pending</code> forever. So that node rejects an honest claim from a peer, and <code>net_task.rs:1240</code> drops the peer on validation failure. Honest claims do not propagate through nodes that do not watch the chain, and relaying one costs you connections.</p>
+
+  <h3>It is an unenforceable check</h3>
+  <p>Worse than unwatched: the check is advisory even where somebody is watching. <code>update_swap_l1_txid</code> takes a txid and a confirmation count as arguments and never verifies them against the parent chain — the integration tests fill swaps with <code>"11"</code> repeated 32 times. That RPC is a defect in its own right and should verify or go away. But removing it would not close anything, because a miner never has to pass through it: block validation does not look at L1 at all, so any claim satisfying the consensus rules can simply be mined.</p>
+  <p>Honest nodes would never have relayed that claim. But relaying is not required to mine, and nothing about block validity depends on it. Follow that through and the shape of the residual risk is clear:</p>
+  <ul>
+    <li><strong>Open swaps.</strong> A miner reserves the swap — public, costs a fee, takes a block — then claims without ever paying on L1.</li>
+    <li><strong>Pre-specified swaps.</strong> The named recipient is already the entitled claimer, so a miner who <em>is</em> that recipient claims without paying.</li>
+  </ul>
+  <p>In both cases the maker loses the escrow. The reservation machinery does its job — it decides <em>who</em> may be paid, and that part is now enforced by every node — but nothing in block validation asks whether the other leg of the trade ever happened. The L1 leg is secured by whoever is watching and by the cost of misbehaving, not by consensus.</p>
+  <p>Closing it means proving the parent-chain payment <em>to</em> consensus: per-chain header sync, proof-of-work validation, and a merkle proof of the payment inside a parent-chain block, carried by the claim. That is a substantial project, and it is the honest price of the word "trustless" for the L1 leg.</p>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>Parent chain</th><th>Ticker</th><th>Confirmations</th><th>Accept window</th><th>Preset config shipped</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Bitcoin</td><td><code>BTC</code></td><td>6</td><td>144 blocks</td><td class="no">none</td></tr>
+        <tr><td>Bitcoin Cash</td><td><code>BCH</code></td><td>3</td><td>72 blocks</td><td class="yes">testnet4</td></tr>
+        <tr><td>Litecoin</td><td><code>LTC</code></td><td>3</td><td>72 blocks</td><td class="no">none</td></tr>
+        <tr><td>Bitcoin Signet</td><td><code>sBTC</code></td><td>3</td><td>72 blocks</td><td class="yes">localhost:38332</td></tr>
+        <tr><td>Bitcoin Regtest</td><td><code>rBTC</code></td><td>3</td><td>20 blocks</td><td class="no">none</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="note local">
+    <span class="label">Open question</span>
+    <p>All five are selectable today, and swaps can be created against any of them whether or not a single node is watching. <code>LTC</code> also resolves to <code>Network::Bitcoin</code> as an explicit placeholder, so its address handling is wrong regardless. A chain you do not intend to police is better removed from <code>ParentChainType</code> than left in it.</p>
+  </div>
+</section>
+
+<section id="state" class="col">
+  <span class="kicker">08 — State</span>
+  <h2>Two lifetimes, two owners</h2>
+  <p>A swap carries two pieces of state that are easy to confuse and must never be merged. <code>SwapState</code> tracks what this node has observed about the L1 side; the reservation tracks what the chain says about entitlement.</p>
+</section>
+
+<figure>
+  <div class="plate">
+<pre class="mermaid">
+%%{init: {'theme':'base','themeVariables':{'primaryColor':'#F6EBDA','primaryTextColor':'#0F1719','primaryBorderColor':'#A25A12','lineColor':'#55666B','labelColor':'#0F1719','labelTextColor':'#0F1719','noteBkgColor':'#E1EDEA','noteBorderColor':'#0E6F68','noteTextColor':'#0F1719'}}}%%
+stateDiagram-v2
+    direction LR
+    [*] --> Pending: SwapCreate connects
+    Pending --> WaitingConfirmations: L1 tx observed
+    WaitingConfirmations --> ReadyToClaim: confirmations reached
+    Pending --> ReadyToClaim: observed already confirmed
+    ReadyToClaim --> Completed: SwapClaim connects
+    Pending --> Cancelled: expires or creator cancels
+    WaitingConfirmations --> Cancelled: expires
+</pre>
+  </div>
+  <figcaption><b>Figure 6</b> <code>SwapState</code> — node-local throughout. Two nodes watching the same chain can legitimately sit in different states at the same height, which is exactly why block validation ignores this machine. <code>Completed</code> is the one transition driven by a block rather than by observation.</figcaption>
+</figure>
+
+<section class="col">
+  <p>The reservation has a much simpler life and a different owner. It is created by <code>connect</code> from a <code>SwapAccept</code>, cleared by <code>disconnect</code>, rebuilt by <code>reconstruct_swaps</code>, and expires by arithmetic rather than by a write — <code>entitled_claimer_at</code> compares the current height against <code>accepted_at_height + accept_expiration_blocks</code> each time it is asked. Nothing else may touch it; there is no RPC that writes a reservation.</p>
+
+  <div class="note">
+    <span class="label">Why it lives in its own table</span>
+    <p><code>Swap</code> is persisted as bincode, a non-self-describing format, and <code>State::get_swap</code> reports a decode failure as <code>Ok(None)</code> — a silently missing swap. Adding a consensus-critical field to that record would make every swap written by an earlier build read as "no swap", and nodes would disagree about who may claim depending on when each upgraded: a consensus split introduced by a schema change. <code>swap_reservations</code> keeps the <code>Swap</code> record byte-identical, and a test destructures <code>Swap</code> without a <code>..</code> pattern so that adding a field fails to compile.</p>
+  </div>
+</section>
+
+<section id="reference" class="col">
+  <span class="kicker">09 — Reference</span>
+  <h2>Rules and code map</h2>
+
+  <h3>What consensus enforces</h3>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>Transaction</th><th>Rule</th></tr>
+      </thead>
+      <tbody>
+        <tr><td rowspan="3"><code>SwapAccept</code></td><td>The swap exists, is open (<code>l2_recipient</code> is <code>None</code>), and has not expired</td></tr>
+        <tr><td>It is unreserved, or its reservation has lapsed — first accept wins while one is live</td></tr>
+        <tr><td>The transaction spends an input owned by <code>l2_claimer_address</code></td></tr>
+        <tr><td rowspan="3"><code>SwapClaim</code></td><td>Spends at least one output locked to this swap, and none locked to another</td></tr>
+        <tr><td>The full <code>l2_amount</code> reaches the entitled claimer at this height</td></tr>
+        <tr><td>Any <code>l2_claimer_address</code> the claim carries agrees with the reservation rather than overriding it</td></tr>
+        <tr><td><code>SwapCreate</code></td><td>Swap id matches the computed id, the swap is new, and the <code>SwapPending</code> outputs escrow the declared <code>l2_amount</code></td></tr>
+        <tr><td><code>Regular</code></td><td>Spends no output locked to any swap</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>Where it lives</h3>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>Path</th><th>Responsibility</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>lib/state/swap.rs</code></td><td>All four validators, and the dispatch in <code>validate_block_transaction</code></td></tr>
+        <tr><td><code>lib/state/block.rs</code></td><td><code>connect</code> writes reservations and locks; <code>disconnect_tip</code> reverses both</td></tr>
+        <tr><td><code>lib/state/mod.rs</code></td><td>The <code>swap_reservations</code> database, <code>entitled_claimer_at</code>, mempool dispatch, reconstruction</td></tr>
+        <tr><td><code>lib/state/two_way_peg_data.rs</code></td><td><code>query_and_update_swap</code> — the parent-chain polling that drives <code>SwapState</code></td></tr>
+        <tr><td><code>lib/types/swap.rs</code></td><td><code>SwapReservation</code>, <code>ParentChainType</code> and its windows</td></tr>
+        <tr><td><code>lib/wallet.rs</code></td><td><code>create_swap_accept_tx</code> — coin selection restricted to the reserved address</td></tr>
+        <tr><td><code>lib/node/net_task.rs</code></td><td>Peer relay: validates then drops the peer on failure</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>Taker's checklist</h3>
+  <ol>
+    <li><code>list-swaps</code> — find an open swap and confirm it is unreserved.</li>
+    <li><code>accept-swap --swap-id …</code> — reserve it, and wait for the transaction to be mined.</li>
+    <li><code>get-swap-status --swap-id …</code> — confirm the reservation names your address. <strong>Do not skip this.</strong></li>
+    <li>Pay <code>l1_amount</code> on the parent chain, within the acceptance window.</li>
+    <li><code>claim-swap --swap-id …</code> once confirmations are reached.</li>
+  </ol>
+</section>
+
+</main>
+
+<footer>
+  coinshift-rs · swap subsystem · 49 lib tests, clippy and fmt clean<br>
+  Nothing here is deployed; chains start from genesis with these rules in place.
+</footer>
+
+<script type="module">
+  // Diagrams are rendered client-side by mermaid. This is the file's only
+  // external dependency: open it offline and the diagram source shows as text
+  // rather than as pictures, but the document still reads.
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+  mermaid.initialize({ startOnLoad: true, securityLevel: "loose" });
+</script>
+</body>
+</html>

@@ -100,6 +100,7 @@ The CLI talks to the Coinshift RPC server (default `http://localhost:6255`). Use
 | Command | Description |
 |---------|-------------|
 | `create-swap` | Create L2->L1 swap (`--parent-chain`, `--l1-recipient-address`, amounts, etc.) |
+| `accept-swap` | Reserve an open swap for your L2 address, **before** paying on L1 (`--swap-id`) |
 | `update-swap-l1-txid` | Set L1 txid and confirmations for a swap |
 | `claim-swap` | Claim swap after L1 confirmations |
 | `list-swaps` | List all swaps |
@@ -149,10 +150,12 @@ The CLI talks to the Coinshift RPC server (default `http://localhost:6255`). Use
 | [docs/SETUP_ORDER.md](docs/SETUP_ORDER.md) | Step-by-step regtest setup (mainchain, enforcer, wallets, mining) |
 | [docs/ADDING_PARENT_CHAINS.md](docs/ADDING_PARENT_CHAINS.md) | Supported L1 chains and how to add new ones |
 | [docs/COINSHIFT_HOW_IT_WORKS.md](docs/COINSHIFT_HOW_IT_WORKS.md) | Architecture and swap flow |
+| [docs/SWAP_MECHANICS.html](docs/SWAP_MECHANICS.html) | Illustrated swap protocol: sequence diagrams, the consensus / node-local boundary, and what the L1 leg still trusts |
 | [docs/MANUAL_SETUP_SWAP_REGTEST.md](docs/MANUAL_SETUP_SWAP_REGTEST.md) | Manual regtest + swap (Alice & Bob) |
 | [docs/ENFORCER_WALLET_GUIDE.md](docs/ENFORCER_WALLET_GUIDE.md) | Enforcer wallet creation and usage |
 | [docs/SETUP_COMMANDS.md](docs/SETUP_COMMANDS.md) | Copy-paste setup commands (signet/regtest) |
 | [docs/specs/swap-implementation-spec.md](docs/specs/swap-implementation-spec.md) | Swap implementation specification |
+| [docs/specs/L1_PAYMENT_PROOFS.html](docs/specs/L1_PAYMENT_PROOFS.html) | Proposal: verifying the parent-chain leg of a swap in consensus (awaiting a scope decision) |
 
 ## Scripts
 

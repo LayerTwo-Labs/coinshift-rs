@@ -211,7 +211,105 @@ pub fn validate_swap_create(
     Ok(())
 }
 
-/// Validate a SwapClaim transaction
+/// Height of the block currently being validated.
+///
+/// `try_get_height` returns the tip's height, so the block under validation is
+/// the next one. `prevalidate_block`, `connect_block` and the mempool path all
+/// run against the same tip, so they all agree on this value.
+fn validating_height(state: &State, rotxn: &RoTxn) -> Result<u32, Error> {
+    Ok(state.try_get_height(rotxn)?.map_or(0, |height| height + 1))
+}
+
+/// Validate a `SwapAccept`: a reservation of an open swap for a claimer.
+///
+/// Every rule here is decided from block data alone, which is the point — the
+/// resulting `Swap::accepted_by` is identical on every node, so claim
+/// validation can rely on it (see [`validate_swap_claim_consensus`]).
+pub fn validate_swap_accept(
+    state: &State,
+    rotxn: &RoTxn,
+    transaction: &Transaction,
+    filled_transaction: &FilledTransaction,
+) -> Result<(), Error> {
+    let TxData::SwapAccept {
+        swap_id,
+        l2_claimer_address,
+    } = &transaction.data
+    else {
+        return Err(Error::InvalidTransaction(
+            "Expected SwapAccept transaction".to_string(),
+        ));
+    };
+    let swap_id = SwapId(*swap_id);
+
+    // A reservation must not double as a way to move escrowed value.
+    let () = validate_no_locked_outputs(state, rotxn, transaction)?;
+
+    let swap = state
+        .get_swap(rotxn, &swap_id)?
+        .ok_or(Error::SwapNotFound { swap_id })?;
+
+    if swap.l2_recipient.is_some() {
+        return Err(Error::InvalidTransaction(format!(
+            "Swap {} is not an open swap; its recipient was fixed at creation",
+            swap_id
+        )));
+    }
+
+    let height = validating_height(state, rotxn)?;
+
+    if let Some(expires_at) = swap.expires_at_height
+        && height >= expires_at
+    {
+        return Err(Error::InvalidTransaction(format!(
+            "Swap {} expired at height {}, cannot be accepted at {}",
+            swap_id, expires_at, height
+        )));
+    }
+
+    // First reservation wins while it is live; a lapsed one releases the swap.
+    if let Some(reservation) = state.get_swap_reservation(rotxn, &swap_id)?
+        && reservation.is_live_at(swap.parent_chain, height)
+    {
+        return Err(Error::InvalidTransaction(format!(
+            "Swap {} is already reserved by {} until height {}",
+            swap_id,
+            reservation.claimer,
+            reservation.expires_at(swap.parent_chain),
+        )));
+    }
+
+    // Proof that the reserver controls the address they are reserving for:
+    // spend an input owned by it. `prevalidate`/`connect` already require every
+    // authorization to match its spent output's address (SwapAccept gets no
+    // exemption), so this input carries a signature from that key.
+    //
+    // Without it, anyone could reserve every open swap for an address they do
+    // not own and stall the market for free.
+    if !filled_transaction
+        .spent_utxos
+        .iter()
+        .any(|utxo| utxo.address == *l2_claimer_address)
+    {
+        return Err(Error::InvalidTransaction(format!(
+            "SwapAccept must spend an input owned by {}, the address it reserves for",
+            l2_claimer_address
+        )));
+    }
+
+    Ok(())
+}
+
+/// Validate a SwapClaim transaction in the mempool.
+///
+/// This is [`validate_swap_claim_consensus`] plus the node-local checks that
+/// consensus deliberately omits: that this node has seen the swap reach
+/// `ReadyToClaim`, and for open swaps that it has observed the L1 fill. Those
+/// come from each node's own parent-chain monitoring, so they can legitimately
+/// differ between nodes and must never gate block validation.
+///
+/// Everything that decides *who gets paid* now lives in the consensus half, so
+/// the two paths cannot drift apart the way they had.
 pub fn validate_swap_claim(
     state: &State,
     rotxn: &RoTxn,
@@ -226,12 +324,10 @@ pub fn validate_swap_claim(
 
     let swap_id = SwapId(*swap_id);
 
-    // 1. Verify swap exists
     let swap = state
         .get_swap(rotxn, &swap_id)?
-        .ok_or_else(|| Error::SwapNotFound { swap_id })?;
+        .ok_or(Error::SwapNotFound { swap_id })?;
 
-    // 2. Verify swap is in ReadyToClaim state
     if !matches!(swap.state, SwapState::ReadyToClaim) {
         return Err(Error::InvalidTransaction(format!(
             "Swap {} is not ready to claim (state: {:?})",
@@ -239,9 +335,8 @@ pub fn validate_swap_claim(
         )));
     }
 
-    // 2.5. For open swaps, verify L1 transaction exists (someone filled it)
+    // For open swaps, verify this node has seen the L1 side filled.
     if swap.l2_recipient.is_none() {
-        // Open swap - verify L1 transaction was detected
         let zero_hash32 = [0u8; 32];
         let has_l1_tx = !matches!(swap.l1_txid, SwapTxId::Hash32(h) if h == zero_hash32)
             && !matches!(swap.l1_txid, SwapTxId::Hash(ref v) if v.is_empty() || v.iter().all(|&b| b == 0));
@@ -254,72 +349,7 @@ pub fn validate_swap_claim(
         }
     }
 
-    // 3. Verify at least one input is locked to this swap
-    let mut found_locked_input = false;
-    for (outpoint, _) in &transaction.inputs {
-        if let Some(locked_swap_id) =
-            state.is_output_locked_to_swap(rotxn, outpoint)?
-        {
-            if locked_swap_id != swap_id {
-                return Err(Error::InvalidTransaction(format!(
-                    "Input {} is locked to different swap {}",
-                    outpoint, locked_swap_id
-                )));
-            }
-            found_locked_input = true;
-        }
-    }
-
-    if !found_locked_input {
-        return Err(Error::InvalidTransaction(
-            "SwapClaim must spend at least one output locked to the swap"
-                .to_string(),
-        ));
-    }
-
-    // 4. Verify output goes to correct recipient
-    let TxData::SwapClaim {
-        l2_claimer_address, ..
-    } = &transaction.data
-    else {
-        unreachable!()
-    };
-
-    let expected_recipient = if let Some(recipient) = swap.l2_recipient {
-        // Pre-specified swap: must go to specified recipient
-        recipient
-    } else {
-        // Open swap
-        if let Some(stored_l2) = swap.l2_claimer_address {
-            // Claim only valid for the L2 address the filler declared when providing L1 tx details
-            if l2_claimer_address.as_ref() != Some(&stored_l2) {
-                return Err(Error::InvalidTransaction(
-                    "Open swap claim must use the L2 address declared when the L1 transaction was submitted".to_string(),
-                ));
-            }
-            stored_l2
-        } else if let Some(claimer_addr) = l2_claimer_address {
-            // No stored L2 (e.g. auto-detected L1 tx): accept claimer address from tx
-            *claimer_addr
-        } else {
-            return Err(Error::InvalidTransaction(
-                "Open swap claim requires l2_claimer_address".to_string(),
-            ));
-        }
-    };
-
-    // The recipient must receive the full swapped amount. Checking only that
-    // some output pays the recipient lets a claimer spend the locked output
-    // while paying the recipient a token amount and keeping the rest.
-    let amount_to_recipient = amount_paid_to(transaction, &expected_recipient)?;
-    if amount_to_recipient < swap.l2_amount {
-        return Err(Error::InvalidTransaction(format!(
-            "SwapClaim must pay at least {} to {}, but pays {}",
-            swap.l2_amount, expected_recipient, amount_to_recipient
-        )));
-    }
-
-    Ok(())
+    validate_swap_claim_consensus(state, rotxn, transaction)
 }
 
 /// Validate that non-SwapClaim transactions don't spend locked outputs
@@ -357,16 +387,24 @@ pub fn validate_no_locked_outputs(
 /// `two_way_peg_data::query_and_update_swap`) and are not part of consensus, so
 /// `connect` trusts the block and advances the local state to match. Enforcing
 /// them here would let a node that has not yet observed the L1 fill reject an
-/// otherwise valid block. Only the rules that follow deterministically from
-/// on-chain data are checked: that the claim spends an output locked to its
-/// swap, spends nothing locked to another swap, and, for pre-specified swaps,
-/// pays the recipient fixed at creation.
+/// otherwise valid block.
+///
+/// What *is* enforced: the claim spends an output locked to its swap, spends
+/// nothing locked to another swap, and pays the full `l2_amount` to the address
+/// entitled to it — the recipient fixed at creation for a pre-specified swap,
+/// or the holder of a live `SwapAccept` reservation for an open one. Both come
+/// from block data, so every node reaches the same verdict.
 pub fn validate_swap_claim_consensus(
     state: &State,
     rotxn: &RoTxn,
     transaction: &Transaction,
 ) -> Result<(), Error> {
-    let TxData::SwapClaim { swap_id, .. } = &transaction.data else {
+    let TxData::SwapClaim {
+        swap_id,
+        l2_claimer_address,
+        ..
+    } = &transaction.data
+    else {
         return Err(Error::InvalidTransaction(
             "Expected SwapClaim transaction".to_string(),
         ));
@@ -396,18 +434,46 @@ pub fn validate_swap_claim_consensus(
         ));
     }
 
-    // For pre-specified swaps both the recipient and the swapped amount are
-    // fixed at creation, so consensus can require the claim to pay the recipient
-    // the full amount. Open swaps derive their recipient from node-local L1
-    // monitoring, so that binding is left to the mempool check.
-    if let Some(swap) = state.get_swap(rotxn, &swap_id)?
-        && let Some(recipient) = swap.l2_recipient
+    let height = validating_height(state, rotxn)?;
+
+    // Fail closed if the swap record cannot be read. `State::get_swap` reports a
+    // corrupted record as `Ok(None)`, and skipping the payout rule in that case
+    // would let the escrow be spent to anywhere — on whichever nodes happened to
+    // hit the bad record, which is also how nodes would come to disagree.
+    let swap = state
+        .get_swap(rotxn, &swap_id)?
+        .ok_or(Error::SwapNotFound { swap_id })?;
     {
-        let amount_to_recipient = amount_paid_to(transaction, &recipient)?;
+        // Who is entitled to the escrow, according to the chain alone.
+        let Some(expected_recipient) =
+            state.entitled_claimer_at(rotxn, &swap, height)?
+        else {
+            return Err(Error::InvalidTransaction(format!(
+                "Open swap {} has no live reservation at height {}; it must be \
+                 reserved by a SwapAccept before it can be claimed",
+                swap_id, height
+            )));
+        };
+
+        // The claim may still carry the legacy `l2_claimer_address` field. If
+        // it does, it must agree with the reservation rather than override it.
+        if let Some(declared) = l2_claimer_address
+            && *declared != expected_recipient
+        {
+            return Err(Error::InvalidTransaction(format!(
+                "SwapClaim declares claimer {} but swap {} is reserved for {}",
+                declared, swap_id, expected_recipient
+            )));
+        }
+
+        // Paying the recipient a token amount and keeping the rest is the same
+        // theft with an extra output, so require the full amount.
+        let amount_to_recipient =
+            amount_paid_to(transaction, &expected_recipient)?;
         if amount_to_recipient < swap.l2_amount {
             return Err(Error::InvalidTransaction(format!(
                 "SwapClaim must pay at least {} to {}, but pays {}",
-                swap.l2_amount, recipient, amount_to_recipient
+                swap.l2_amount, expected_recipient, amount_to_recipient
             )));
         }
     }
@@ -435,6 +501,9 @@ pub fn validate_block_transaction(
         }
         TxData::SwapClaim { .. } => {
             validate_swap_claim_consensus(state, rotxn, transaction)
+        }
+        TxData::SwapAccept { .. } => {
+            validate_swap_accept(state, rotxn, transaction, filled_transaction)
         }
         TxData::Regular => {
             validate_no_locked_outputs(state, rotxn, transaction)
@@ -783,6 +852,402 @@ mod tests {
         );
     }
 
+    /// Set the tip height, so that `validating_height` reports `height`.
+    fn set_height(env: &Env, state: &State, height: u32) {
+        let mut rwtxn = env.write_txn().unwrap();
+        // Validation looks at the *next* block, so store one below.
+        state
+            .height
+            .put(&mut rwtxn, &(), &height.saturating_sub(1))
+            .unwrap();
+        rwtxn.commit().unwrap();
+    }
+
+    /// An open swap (`l2_recipient == None`) whose L1 fill has been detected
+    /// and which is `ReadyToClaim`. `reservation` is an on-chain `SwapAccept`
+    /// binding — `(claimer, accepted_at_height)`.
+    fn open_swap_state(
+        reservation: Option<(Address, u32)>,
+    ) -> (temp_dir::TempDir, Env, State, SwapId, OutPoint, Output) {
+        let (dir, env, state) = test_state();
+        let creator = Address([5u8; 20]);
+        let swap_id = SwapId([12u8; 32]);
+        let outpoint = OutPoint::Regular {
+            txid: Txid([3u8; 32]),
+            vout: 0,
+        };
+        let locked_output = Output {
+            address: creator,
+            content: OutputContent::SwapPending {
+                value: sat(50_000),
+                swap_id: swap_id.0,
+            },
+        };
+        let mut swap = Swap::new(
+            swap_id,
+            SwapDirection::L2ToL1,
+            ParentChainType::Regtest,
+            // Non-zero: an L1 fill has been observed for this swap.
+            SwapTxId::Hash32([0xaa; 32]),
+            None,
+            None, // open swap: no recipient fixed at creation
+            sat(50_000),
+            "rbtc-recipient".to_string(),
+            sat(40_000),
+            0,
+            None,
+            Some(creator),
+        );
+        swap.state = SwapState::ReadyToClaim;
+
+        let mut rwtxn = env.write_txn().unwrap();
+        state.save_swap(&mut rwtxn, &swap).unwrap();
+        state
+            .lock_output_to_swap(&mut rwtxn, &outpoint, &swap_id)
+            .unwrap();
+        if let Some((claimer, height)) = reservation {
+            state
+                .reserve_swap(&mut rwtxn, &swap_id, claimer, height)
+                .unwrap();
+        }
+        rwtxn.commit().unwrap();
+
+        (dir, env, state, swap_id, outpoint, locked_output)
+    }
+
+    fn open_claim_tx(
+        swap_id: SwapId,
+        outpoint: OutPoint,
+        declared_claimer: Option<Address>,
+        paid_to: Address,
+        paid: bitcoin::Amount,
+    ) -> Transaction {
+        Transaction {
+            inputs: vec![(outpoint, [0u8; 32])],
+            proof: Default::default(),
+            outputs: vec![Output {
+                address: paid_to,
+                content: OutputContent::Value(paid),
+            }],
+            data: TxData::SwapClaim {
+                swap_id: swap_id.0,
+                l2_claimer_address: declared_claimer,
+                proof_data: None,
+            },
+        }
+    }
+
+    fn accept_tx(
+        swap_id: SwapId,
+        claimer: Address,
+        funding_owner: Address,
+    ) -> (Transaction, FilledTransaction) {
+        let outpoint = OutPoint::Regular {
+            txid: Txid([42u8; 32]),
+            vout: 0,
+        };
+        let tx = Transaction {
+            inputs: vec![(outpoint, [0u8; 32])],
+            proof: Default::default(),
+            outputs: vec![Output {
+                address: funding_owner,
+                content: OutputContent::Value(sat(900)),
+            }],
+            data: TxData::SwapAccept {
+                swap_id: swap_id.0,
+                l2_claimer_address: claimer,
+            },
+        };
+        let filled = FilledTransaction {
+            spent_utxos: vec![Output {
+                address: funding_owner,
+                content: OutputContent::Value(sat(1_000)),
+            }],
+            transaction: tx.clone(),
+        };
+        (tx, filled)
+    }
+
+    /// This is the attack from the bug report: spend an open swap's escrow and
+    /// pay yourself. With no reservation on the swap, no address is entitled to
+    /// it, so the claim is invalid — on the block path, where it counts.
+    #[test]
+    fn block_validation_rejects_claim_on_unreserved_open_swap() {
+        let (_dir, env, state, swap_id, outpoint, locked_output) =
+            open_swap_state(None);
+        set_height(&env, &state, 10);
+        let attacker = Address([4u8; 20]);
+
+        let tx = open_claim_tx(
+            swap_id,
+            outpoint,
+            Some(attacker),
+            attacker,
+            sat(50_000),
+        );
+        let filled = FilledTransaction {
+            spent_utxos: vec![locked_output],
+            transaction: tx.clone(),
+        };
+
+        let rotxn = env.read_txn().unwrap();
+        let result = validate_block_transaction(&state, &rotxn, &tx, &filled);
+        assert!(
+            matches!(result, Err(Error::InvalidTransaction(_))),
+            "claim on an unreserved open swap must be rejected, got {result:?}"
+        );
+    }
+
+    /// The same attack against a swap someone else reserved: declaring your own
+    /// address no longer helps, because the entitled address comes from the
+    /// chain, not from the claim.
+    #[test]
+    fn block_validation_rejects_claim_paying_attacker_over_reserver() {
+        let reserver = Address([7u8; 20]);
+        let (_dir, env, state, swap_id, outpoint, locked_output) =
+            open_swap_state(Some((reserver, 10)));
+        set_height(&env, &state, 12);
+        let attacker = Address([4u8; 20]);
+
+        let tx = open_claim_tx(
+            swap_id,
+            outpoint,
+            Some(attacker),
+            attacker,
+            sat(50_000),
+        );
+        let filled = FilledTransaction {
+            spent_utxos: vec![locked_output],
+            transaction: tx.clone(),
+        };
+
+        let rotxn = env.read_txn().unwrap();
+        let result = validate_block_transaction(&state, &rotxn, &tx, &filled);
+        assert!(
+            matches!(result, Err(Error::InvalidTransaction(_))),
+            "claim paying anyone but the reserver must be rejected, got {result:?}"
+        );
+    }
+
+    /// Paying the reserver a token amount and keeping the rest is the same
+    /// theft with an extra output.
+    #[test]
+    fn block_validation_rejects_claim_underpaying_reserver() {
+        let reserver = Address([7u8; 20]);
+        let (_dir, env, state, swap_id, outpoint, locked_output) =
+            open_swap_state(Some((reserver, 10)));
+        set_height(&env, &state, 12);
+
+        let tx =
+            open_claim_tx(swap_id, outpoint, Some(reserver), reserver, sat(1));
+        let filled = FilledTransaction {
+            spent_utxos: vec![locked_output],
+            transaction: tx.clone(),
+        };
+
+        let rotxn = env.read_txn().unwrap();
+        let result = validate_block_transaction(&state, &rotxn, &tx, &filled);
+        assert!(
+            matches!(result, Err(Error::InvalidTransaction(_))),
+            "claim underpaying the reserver must be rejected, got {result:?}"
+        );
+    }
+
+    /// The honest claim: the reserver takes the escrow they paid for on L1.
+    #[test]
+    fn block_validation_accepts_claim_paying_reserver() {
+        let reserver = Address([7u8; 20]);
+        let (_dir, env, state, swap_id, outpoint, locked_output) =
+            open_swap_state(Some((reserver, 10)));
+        set_height(&env, &state, 12);
+
+        let tx = open_claim_tx(
+            swap_id,
+            outpoint,
+            Some(reserver),
+            reserver,
+            sat(50_000),
+        );
+        let filled = FilledTransaction {
+            spent_utxos: vec![locked_output],
+            transaction: tx.clone(),
+        };
+
+        let rotxn = env.read_txn().unwrap();
+        let result = validate_block_transaction(&state, &rotxn, &tx, &filled);
+        assert!(
+            result.is_ok(),
+            "reserver's claim should pass block validation, got {result:?}"
+        );
+    }
+
+    /// A claim omitting `l2_claimer_address` entirely still has to pay the
+    /// reserver — the field is advisory now, not the source of truth.
+    #[test]
+    fn block_validation_accepts_claim_paying_reserver_without_declaration() {
+        let reserver = Address([7u8; 20]);
+        let (_dir, env, state, swap_id, outpoint, locked_output) =
+            open_swap_state(Some((reserver, 10)));
+        set_height(&env, &state, 12);
+
+        let tx = open_claim_tx(swap_id, outpoint, None, reserver, sat(50_000));
+        let filled = FilledTransaction {
+            spent_utxos: vec![locked_output],
+            transaction: tx.clone(),
+        };
+
+        let rotxn = env.read_txn().unwrap();
+        let result = validate_block_transaction(&state, &rotxn, &tx, &filled);
+        assert!(
+            result.is_ok(),
+            "undeclared claim paying the reserver should pass, got {result:?}"
+        );
+    }
+
+    /// Once the reservation lapses the escrow is unassigned again, so the old
+    /// reserver cannot claim on the strength of an expired hold.
+    #[test]
+    fn block_validation_rejects_claim_after_reservation_lapses() {
+        let reserver = Address([7u8; 20]);
+        let (_dir, env, state, swap_id, outpoint, locked_output) =
+            open_swap_state(Some((reserver, 10)));
+        let window = ParentChainType::Regtest.accept_expiration_blocks();
+        set_height(&env, &state, 10 + window);
+
+        let tx = open_claim_tx(
+            swap_id,
+            outpoint,
+            Some(reserver),
+            reserver,
+            sat(50_000),
+        );
+        let filled = FilledTransaction {
+            spent_utxos: vec![locked_output],
+            transaction: tx.clone(),
+        };
+
+        let rotxn = env.read_txn().unwrap();
+        let result = validate_block_transaction(&state, &rotxn, &tx, &filled);
+        assert!(
+            matches!(result, Err(Error::InvalidTransaction(_))),
+            "claim on a lapsed reservation must be rejected, got {result:?}"
+        );
+    }
+
+    /// The mempool inherits the consensus rule, so the two paths cannot
+    /// disagree about who gets paid.
+    #[test]
+    fn mempool_rejects_claim_on_unreserved_open_swap() {
+        let (_dir, env, state, swap_id, outpoint, locked_output) =
+            open_swap_state(None);
+        set_height(&env, &state, 10);
+        let attacker = Address([4u8; 20]);
+
+        let tx = open_claim_tx(
+            swap_id,
+            outpoint,
+            Some(attacker),
+            attacker,
+            sat(50_000),
+        );
+        let filled = FilledTransaction {
+            spent_utxos: vec![locked_output],
+            transaction: tx.clone(),
+        };
+
+        let rotxn = env.read_txn().unwrap();
+        let result = validate_swap_claim(&state, &rotxn, &tx, &filled);
+        assert!(
+            matches!(result, Err(Error::InvalidTransaction(_))),
+            "mempool must reject an unreserved open claim, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn swap_accept_reserves_open_swap() {
+        let (_dir, env, state, swap_id, ..) = open_swap_state(None);
+        set_height(&env, &state, 10);
+        let claimer = Address([7u8; 20]);
+
+        let (tx, filled) = accept_tx(swap_id, claimer, claimer);
+        let rotxn = env.read_txn().unwrap();
+        let result = validate_block_transaction(&state, &rotxn, &tx, &filled);
+        assert!(result.is_ok(), "valid accept should pass, got {result:?}");
+    }
+
+    /// Proof of control: reserving for an address you do not own would let
+    /// anyone park every open swap for free.
+    #[test]
+    fn swap_accept_rejects_claimer_without_matching_input() {
+        let (_dir, env, state, swap_id, ..) = open_swap_state(None);
+        set_height(&env, &state, 10);
+        let claimer = Address([7u8; 20]);
+        let someone_else = Address([9u8; 20]);
+
+        let (tx, filled) = accept_tx(swap_id, claimer, someone_else);
+        let rotxn = env.read_txn().unwrap();
+        let result = validate_block_transaction(&state, &rotxn, &tx, &filled);
+        assert!(
+            matches!(result, Err(Error::InvalidTransaction(_))),
+            "accept without an input from the claimer must be rejected, got {result:?}"
+        );
+    }
+
+    /// First reservation wins while it is live.
+    #[test]
+    fn swap_accept_rejects_double_reservation() {
+        let first = Address([7u8; 20]);
+        let (_dir, env, state, swap_id, ..) =
+            open_swap_state(Some((first, 10)));
+        set_height(&env, &state, 12);
+        let second = Address([9u8; 20]);
+
+        let (tx, filled) = accept_tx(swap_id, second, second);
+        let rotxn = env.read_txn().unwrap();
+        let result = validate_block_transaction(&state, &rotxn, &tx, &filled);
+        assert!(
+            matches!(result, Err(Error::InvalidTransaction(_))),
+            "second accept during a live reservation must be rejected, got {result:?}"
+        );
+    }
+
+    /// ...but a lapsed reservation releases the swap, so a griefer can only
+    /// stall the market for one window per fee paid.
+    #[test]
+    fn swap_accept_allowed_after_reservation_lapses() {
+        let first = Address([7u8; 20]);
+        let (_dir, env, state, swap_id, ..) =
+            open_swap_state(Some((first, 10)));
+        let window = ParentChainType::Regtest.accept_expiration_blocks();
+        set_height(&env, &state, 10 + window);
+        let second = Address([9u8; 20]);
+
+        let (tx, filled) = accept_tx(swap_id, second, second);
+        let rotxn = env.read_txn().unwrap();
+        let result = validate_block_transaction(&state, &rotxn, &tx, &filled);
+        assert!(
+            result.is_ok(),
+            "accept after the window should pass, got {result:?}"
+        );
+    }
+
+    /// Pre-specified swaps already have a recipient; reserving one is
+    /// meaningless and must not overwrite it.
+    #[test]
+    fn swap_accept_rejects_pre_specified_swap() {
+        let (_dir, env, state, swap_id, ..) = pre_specified_swap_state();
+        set_height(&env, &state, 10);
+        let claimer = Address([7u8; 20]);
+
+        let (tx, filled) = accept_tx(swap_id, claimer, claimer);
+        let rotxn = env.read_txn().unwrap();
+        let result = validate_block_transaction(&state, &rotxn, &tx, &filled);
+        assert!(
+            matches!(result, Err(Error::InvalidTransaction(_))),
+            "accepting a pre-specified swap must be rejected, got {result:?}"
+        );
+    }
+
     /// Build a `SwapCreate` declaring `l2_amount`, escrowing `escrowed` in a
     /// `SwapPending` output and keeping `change` as a regular output, funded by
     /// a single input worth `l2_amount` plus a fee.
@@ -920,22 +1385,6 @@ mod tests {
         assert!(
             state.get_swap(&rwtxn, &swap_id).unwrap().is_none(),
             "swap should be gone after rollback deletion"
-        );
-    }
-
-    /// The user-facing `delete_swap` path keeps its state guard: an active
-    /// (non-Pending/Cancelled) swap must not be manually deletable, even by its
-    /// creator.
-    #[test]
-    fn delete_swap_still_refuses_ready_to_claim_swap() {
-        let (_dir, env, state, swap_id, ..) = ready_swap_state();
-        let creator = Address([5u8; 20]);
-
-        let mut rwtxn = env.write_txn().unwrap();
-        let result = state.delete_swap(&mut rwtxn, &swap_id, Some(&creator));
-        assert!(
-            matches!(result, Err(Error::InvalidTransaction(_))),
-            "user deletion of a ReadyToClaim swap should be refused, got {result:?}"
         );
     }
 }

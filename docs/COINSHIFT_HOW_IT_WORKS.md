@@ -108,22 +108,80 @@ Coinshift is a trustless swap system for a BIP300-style sidechain that enables p
    - else → `WaitingConfirmations(current, required)`  
    Then `state.save_swap(rwtxn, &swap)` is called.
 
-### 3. Swap Claiming (Bob)
+### 3. Reserving an open swap (Bob)
 
-1. **Bob creates SwapClaim** (e.g. via `claim_swap()`) with `swap_id`, optional `l2_claimer_address` for open swaps, and fee.
+An open swap has no recipient fixed at creation, so before Bob pays on L1 he
+reserves it on-chain:
 
-2. **Validation** (`lib/state/swap.rs::validate_swap_claim()`):
+```
+coinshift_app_cli accept-swap --swap-id <id>
+```
+
+This broadcasts `TxData::SwapAccept { swap_id, l2_claimer_address }`. Validation
+(`lib/state/swap.rs::validate_swap_accept()`) requires:
+
+- the swap exists, is open (`l2_recipient == None`), and has not expired
+- it is unreserved, or its previous reservation has lapsed — first accept wins
+- the transaction **spends an input owned by `l2_claimer_address`**, which
+  proves the reserver controls the address they are reserving for
+
+`connect` writes the reservation to the `swap_reservations` database. Every rule
+above is decided from block data, so every node records the same reservation.
+
+**Reserve before paying on L1.** The ordering is the security property: it means
+there is nothing to front-run. A reservation taken *after* the L1 payment could
+be beaten by anyone watching the mempool, who would simply reserve the swap for
+their own address and claim the escrow Bob paid for. Bob should also check that
+a swap is unreserved before paying — if someone else holds it, his payment buys
+him nothing.
+
+Reservations lapse after `ParentChainType::accept_expiration_blocks()`, which is
+sized to outlast the confirmations the filler must wait for. A griefer can hold
+someone else's swap, but only for one window per L2 fee paid, and only from an
+address they own.
+
+### 4. Swap Claiming (Bob)
+
+1. **Bob creates SwapClaim** (e.g. via `claim_swap()`) with `swap_id` and fee.
+
+2. **Mempool validation** (`lib/state/swap.rs::validate_swap_claim()`):
    - Swap exists, state is `ReadyToClaim`
-   - At least one input locked to this swap; all locked inputs to same swap
    - For open swaps: L1 tx was detected (non-zero `l1_txid`)
-   - At least one output to the correct recipient (swap’s `l2_recipient` or claimer)
+   - then delegates to the consensus rules below
 
-3. **Block processing — SwapClaim** (`lib/state/block.rs`):
-   - Unlock all inputs locked to this swap
-   - Set swap state to `Completed`
-   - Save swap
+3. **Consensus validation** (`validate_swap_claim_consensus()`), used by block
+   validation. It skips the two node-local checks above — they come from each
+   node's own parent-chain monitoring and would let a node that has not yet seen
+   the L1 fill reject a valid block. It requires:
+   - the claim spends an output locked to this swap, and nothing locked to another
+   - the full `l2_amount` reaches the **entitled claimer**: `l2_recipient` for a
+     pre-specified swap, or the holder of a live reservation for an open one
+   - if the claim carries the legacy `l2_claimer_address` field, it agrees with
+     the reservation rather than overriding it
 
-4. Bob’s L2 address receives the coins; swap is complete.
+   Because entitlement now comes from block data, the mempool and consensus
+   paths enforce the same payout rule. They cannot drift apart the way they did
+   when open swaps were validated only locally.
+
+4. **Block processing — SwapClaim** (`lib/state/block.rs`): unlock inputs, mark
+   the swap `Completed`, save.
+
+5. Bob's L2 address receives the coins; swap is complete.
+
+### Why the reservation is a separate database
+
+`Swap` is persisted as bincode, a non-self-describing format, and
+`State::get_swap` reports a decode failure as `Ok(None)` — a silently missing
+swap. Adding a consensus-critical field to the `Swap` record would therefore
+make every record written by an earlier version read as "no swap", and nodes
+would disagree about who may claim depending on when each upgraded. Keeping
+reservations in `swap_reservations` leaves the `Swap` record byte-identical.
+
+It also keeps the two kinds of state physically apart. `Swap::state`,
+`l1_txid` and `l2_claimer_address` are node-local — set by parent-chain
+monitoring or by RPC, different on every node, and never safe to validate
+blocks against. `swap_reservations` is derived from blocks alone. Blurring
+those two is what made open-swap claims unenforceable in the first place.
 
 ---
 
@@ -142,6 +200,9 @@ Coinshift is a trustless swap system for a BIP300-style sidechain that enables p
 | **Block reference** | ✅ | `l1_txid_validated_at_block_hash` / `l1_txid_validated_at_height` stored when L1 tx is applied |
 | **Confirmations threshold** | ✅ | State moves to ReadyToClaim only when `confirmations >= required_confirmations` |
 | **Expiration** | ✅ | Swaps can have `expires_at_height`; expired swaps are marked Cancelled |
+| **Claim payout binding** | ✅ | `validate_swap_claim{,_consensus}()`: full `l2_amount` must reach the entitled claimer |
+| **Open-swap entitlement** | ✅ | `SwapAccept` records the claimer on-chain; claims must pay the holder of a live reservation |
+| **Reservation is controlled by the reserver** | ✅ | `validate_swap_accept()` requires an input owned by `l2_claimer_address` |
 
 ### Not implemented (doc vs code)
 
