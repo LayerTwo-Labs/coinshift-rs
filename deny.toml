@@ -79,6 +79,19 @@ ignore = [
     # https://github.com/aws/aws-lc-rs/issues/722
     { id = "RUSTSEC-2024-0436", reason = "Temporary ignore until aws-lc-rs and rustls-webpki get updated"},
     { id = "RUSTSEC-2025-0141", reason = "Temporary ignore until heed migrates to wincode"},
+    # quick-xml is reachable only from the eframe GUI stack, in two copies that
+    # are both pinned out of reach: 0.30 via zbus_xml (^0.30) -> atspi ->
+    # accesskit, and 0.38 via wayland-scanner (^0.38.3) -> winit. Neither can be
+    # bumped without a major egui/eframe upgrade.
+    { id = "RUSTSEC-2026-0194", reason = "Temporary ignore until eframe pulls accesskit/winit with a patched quick-xml"},
+    { id = "RUSTSEC-2026-0195", reason = "Temporary ignore until eframe pulls accesskit/winit with a patched quick-xml"},
+    # ttf-parser (via owned_ttf_parser -> egui) is unmaintained
+    { id = "RUSTSEC-2026-0192", reason = "Temporary ignore until egui migrates off owned_ttf_parser"},
+    # webbrowser (via egui-winit) allows argument injection through the Unix
+    # BROWSER env var. Only reachable from the GUI's "open link" path.
+    { id = "RUSTSEC-2026-0257", reason = "Temporary ignore until egui-winit updates webbrowser"},
+    # bitmaps (via imbl -> cusf-enforcer-mempool) is unmaintained
+    { id = "RUSTSEC-2026-0247", reason = "Temporary ignore until imbl drops bitmaps"},
 ]
 # If this is true, then cargo deny will use the git executable to fetch advisory database.
 # If this is false, then it uses a built-in git library.
