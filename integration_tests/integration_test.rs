@@ -6,6 +6,7 @@ use futures::{FutureExt, future::BoxFuture};
 
 use crate::{
     block_template::block_template_trial,
+    btc_htlc::btc_htlc_trial,
     confirmations_block_inclusion::confirmations_block_inclusion_trial,
     hash_lock_lifecycle::hash_lock_lifecycle_trial,
     ibd::ibd_trial,
@@ -86,6 +87,11 @@ pub fn tests(
             failure_collector.clone(),
         ),
         swap_creation_open_fill_trial(
+            bin_paths.clone(),
+            file_registry.clone(),
+            failure_collector.clone(),
+        ),
+        btc_htlc_trial(
             bin_paths.clone(),
             file_registry.clone(),
             failure_collector.clone(),

@@ -148,6 +148,124 @@ impl HtlcParams {
     }
 }
 
+/// Which output is being spent, and where the value goes.
+///
+/// Grouped rather than passed loose because the alternative is eight
+/// positional arguments, four of which are amounts and outpoints that would
+/// transpose silently.
+#[derive(Clone, Copy, Debug)]
+pub struct SpendRequest<'a> {
+    /// The funding output of the contract.
+    pub outpoint: bitcoin::OutPoint,
+    /// Its value. Needed for the segwit sighash, which commits to it.
+    pub value: bitcoin::Amount,
+    /// Where the balance goes.
+    pub to: &'a bitcoin::Address,
+    /// Deducted from `value`.
+    pub fee: bitcoin::Amount,
+}
+
+/// How a spend of the Bitcoin leg is being made.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpendPath {
+    /// Reveal the preimage. Spendable immediately.
+    Claim,
+    /// Wait out the timeout. Requires the transaction to say so — see
+    /// [`HtlcParams::spend_transaction`].
+    Refund,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SpendError {
+    #[error("failed to compute the p2wsh sighash: {0}")]
+    Sighash(String),
+}
+
+impl HtlcParams {
+    /// Build and sign a spend of this contract.
+    ///
+    /// `request` names the funding output and where the balance goes.
+    ///
+    /// The refund path is the fiddly one, and getting it wrong looks like a
+    /// mysteriously rejected transaction rather than an error. `OP_CLTV`
+    /// compares against the spending transaction's `lock_time`, and it refuses
+    /// to run at all if the input's sequence is final — so a refund needs
+    /// **both** `lock_time >= timeout_height` and a non-final sequence. Setting
+    /// one without the other fails. This sets both, and only for the refund
+    /// path, because a claim wants neither.
+    pub fn spend_transaction(
+        &self,
+        path: SpendPath,
+        request: SpendRequest<'_>,
+        key: &bitcoin::secp256k1::SecretKey,
+        secret: Option<&Secret>,
+    ) -> Result<bitcoin::Transaction, SpendError> {
+        let SpendRequest {
+            outpoint,
+            value,
+            to,
+            fee,
+        } = request;
+        use bitcoin::{
+            EcdsaSighashType, Sequence, TxIn, TxOut, absolute::LockTime,
+            sighash::SighashCache, transaction::Version,
+        };
+
+        let (lock_time, sequence) = match path {
+            SpendPath::Claim => (LockTime::ZERO, Sequence::MAX),
+            SpendPath::Refund => (
+                LockTime::from_height(self.timeout_height)
+                    .unwrap_or(LockTime::ZERO),
+                // Non-final, or OP_CHECKLOCKTIMEVERIFY refuses to run.
+                Sequence::ENABLE_LOCKTIME_NO_RBF,
+            ),
+        };
+
+        let mut tx = bitcoin::Transaction {
+            version: Version::TWO,
+            lock_time,
+            input: vec![TxIn {
+                previous_output: outpoint,
+                script_sig: bitcoin::ScriptBuf::new(),
+                sequence,
+                witness: bitcoin::Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: value - fee,
+                script_pubkey: to.script_pubkey(),
+            }],
+        };
+
+        let script = self.witness_script();
+        let sighash = SighashCache::new(&tx)
+            .p2wsh_signature_hash(0, &script, value, EcdsaSighashType::All)
+            .map_err(|err| SpendError::Sighash(err.to_string()))?;
+
+        let secp = bitcoin::secp256k1::Secp256k1::new();
+        let message =
+            bitcoin::secp256k1::Message::from_digest(sighash.to_byte_array());
+        let signature = bitcoin::ecdsa::Signature {
+            signature: secp.sign_ecdsa(&message, key),
+            sighash_type: EcdsaSighashType::All,
+        };
+
+        tx.input[0].witness = match (path, secret) {
+            (SpendPath::Claim, Some(secret)) => {
+                self.claim_witness(&signature.serialize(), secret)
+            }
+            (SpendPath::Claim, None) => {
+                // A claim without the secret cannot be built; produce the
+                // refund shape rather than a witness that silently fails.
+                self.refund_witness(&signature.serialize())
+            }
+            (SpendPath::Refund, _) => {
+                self.refund_witness(&signature.serialize())
+            }
+        };
+        Ok(tx)
+    }
+}
+
 /// The Coinshift leg's terms — the mirror of [`HtlcParams`].
 ///
 /// The two are kept next to each other deliberately: a swap is correct exactly
@@ -472,6 +590,116 @@ mod tests {
         let rendered = format!("{secret:?}");
         assert_eq!(rendered, "Secret(<redacted>)");
         assert!(!rendered.contains("07"));
+    }
+
+    fn keypair(
+        byte: u8,
+    ) -> (bitcoin::secp256k1::SecretKey, bitcoin::PublicKey) {
+        let secp = bitcoin::secp256k1::Secp256k1::new();
+        let sk = bitcoin::secp256k1::SecretKey::from_slice(&[byte; 32])
+            .expect("valid secret key");
+        (sk, bitcoin::PublicKey::new(sk.public_key(&secp)))
+    }
+
+    /// The refund path needs BOTH a lock_time at or past the deadline AND a
+    /// non-final sequence. `OP_CHECKLOCKTIMEVERIFY` refuses to run at all if
+    /// the input's sequence is final, so setting only the lock_time produces a
+    /// transaction that fails for a reason nothing in it points at.
+    #[test]
+    fn a_refund_sets_both_the_locktime_and_a_non_final_sequence() {
+        let (sk, pk) = keypair(1);
+        let p = HtlcParams {
+            hash: Secret::from_bytes([7u8; 32]).hash(),
+            claim_pubkey: pk,
+            refund_pubkey: pk,
+            timeout_height: 800_100,
+        };
+        let to = p.address(Network::Regtest);
+        let tx = p
+            .spend_transaction(
+                SpendPath::Refund,
+                SpendRequest {
+                    outpoint: bitcoin::OutPoint::null(),
+                    value: bitcoin::Amount::from_sat(100_000),
+                    to: &to,
+                    fee: bitcoin::Amount::from_sat(1_000),
+                },
+                &sk,
+                None,
+            )
+            .expect("refund should build");
+
+        assert_eq!(
+            tx.lock_time.to_consensus_u32(),
+            800_100,
+            "lock_time must reach the deadline"
+        );
+        assert!(
+            !tx.input[0].sequence.is_final(),
+            "a final sequence makes OP_CLTV refuse to run"
+        );
+        assert_eq!(tx.input[0].witness.len(), 3, "sig, FALSE, script");
+    }
+
+    /// A claim needs neither, and must never carry them — a lock_time in the
+    /// future would make an immediately-spendable claim unspendable until then.
+    #[test]
+    fn a_claim_sets_no_locktime_and_reveals_the_secret() {
+        let (sk, pk) = keypair(2);
+        let secret = Secret::from_bytes([7u8; 32]);
+        let p = HtlcParams {
+            hash: secret.hash(),
+            claim_pubkey: pk,
+            refund_pubkey: pk,
+            timeout_height: 800_100,
+        };
+        let to = p.address(Network::Regtest);
+        let tx = p
+            .spend_transaction(
+                SpendPath::Claim,
+                SpendRequest {
+                    outpoint: bitcoin::OutPoint::null(),
+                    value: bitcoin::Amount::from_sat(100_000),
+                    to: &to,
+                    fee: bitcoin::Amount::from_sat(1_000),
+                },
+                &sk,
+                Some(&secret),
+            )
+            .expect("claim should build");
+
+        assert_eq!(tx.lock_time.to_consensus_u32(), 0);
+        assert!(tx.input[0].sequence.is_final());
+        assert_eq!(tx.input[0].witness.len(), 4, "sig, preimage, TRUE, script");
+        assert_eq!(tx.input[0].witness.nth(1).unwrap(), secret.as_bytes());
+    }
+
+    /// The fee has to come out of the output, or the transaction is invalid for
+    /// paying out more than it takes in.
+    #[test]
+    fn the_fee_comes_out_of_the_spend() {
+        let (sk, pk) = keypair(3);
+        let p = HtlcParams {
+            hash: Secret::from_bytes([7u8; 32]).hash(),
+            claim_pubkey: pk,
+            refund_pubkey: pk,
+            timeout_height: 1,
+        };
+        let to = p.address(Network::Regtest);
+        let tx = p
+            .spend_transaction(
+                SpendPath::Refund,
+                SpendRequest {
+                    outpoint: bitcoin::OutPoint::null(),
+                    value: bitcoin::Amount::from_sat(100_000),
+                    to: &to,
+                    fee: bitcoin::Amount::from_sat(1_000),
+                },
+                &sk,
+                None,
+            )
+            .unwrap();
+        assert_eq!(tx.output[0].value, bitcoin::Amount::from_sat(99_000));
     }
 
     /// Fresh secrets must actually differ.

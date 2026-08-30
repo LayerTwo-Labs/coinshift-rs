@@ -6,6 +6,7 @@ use std::collections::HashSet;
 use tracing_subscriber::{filter as tracing_filter, layer::SubscriberExt};
 
 mod block_template;
+mod btc_htlc;
 mod confirmations_block_inclusion;
 mod hash_lock_lifecycle;
 mod ibd;

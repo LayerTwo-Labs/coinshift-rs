@@ -383,6 +383,7 @@
     <li><a href="#tests">How each phase is proved</a></li>
     <li><a href="#runit">Running it yourself</a></li>
     <li><a href="#found">What the test found</a></li>
+    <li><a href="#lied">Where the documentation lied</a></li>
     <li><a href="#rollout">Rollout</a></li>
   </ol>
 </nav>
@@ -670,8 +671,50 @@
 
 <hr class="rule">
 
+<section class="col" id="lied">
+  <p class="secnum">08 — Corrections</p>
+  <h2>Where the documentation lied</h2>
+  <p class="lede">Three places where a document asserted something that was not true, found while doing this work. Recorded rather than quietly corrected, because a contradiction that is silently patched teaches nobody anything, and the same one grows back.</p>
+
+  <h3>The README said the swap system was trustless</h3>
+  <p>First sentence, first line: <em>"a BIP300-style sidechain node with a trustless L2 &lt;-&gt; L1 swap system"</em>. It was not trustless. <code>validate_swap_claim_consensus</code> never inspected a parent-chain fact, so a miner could claim an escrow for a payment that never happened — the vulnerability this entire branch exists to close.</p>
+  <p>Every document in <span class="mono">docs/specs/</span> had been saying so for some time. The README, which is what anyone reads first, said the opposite. The claim is now replaced by a note that states what is actually true and says the README used to say otherwise.</p>
+
+  <h3>COINSHIFT_HOW_IT_WORKS.md contradicted itself, 130 lines apart</h3>
+</section>
+
+<div class="wide tablewrap">
+  <table>
+    <thead>
+      <tr><th scope="col">"Not implemented (doc vs code)"</th><th scope="col">"Current Limitations"</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>L1 transaction uniqueness — <strong>not implemented</strong></td><td>Uniqueness — <strong>enforced</strong></td></tr>
+      <tr><td>Reject <code>confirmations == 0</code> — <strong>not implemented</strong></td><td>Confirmations — <strong>enforced and tested</strong></td></tr>
+      <tr><td>Block inclusion — <strong>not implemented</strong></td><td>Block inclusion — <strong>enforced and tested</strong></td></tr>
+    </tbody>
+  </table>
+</div>
+
+<section class="col">
+  <p>The second column was right. The code does all three and there are integration tests named after them. The first table had gone stale and nobody noticed, because nothing reads a document end to end looking for two halves that disagree.</p>
+  <p>The stale table is gone, replaced by the more useful fact: each of those checks runs against a <em>node-local RPC answer</em>, so none of them makes the parent-chain leg trustworthy, and consensus asks none of them.</p>
+
+  <h3>And two in this document's own commits</h3>
+  <p>A commit message argued at length that taking the fee out of a claim's payout was safe, "so no payee is silently underpaid below what the spend rules require". The spend rules require payment in full; the reasoning was simply inverted, and every claim with a fee was rejected. A second commit reasoned that refunds must pay the output's own address, which was redundant with the signature that authorises them and blocked fees the same way.</p>
+  <p>An earlier draft of this plan also stated that <code>ParentChainType</code> already had a <code>borsh_discriminants_are_stable</code> test to copy. It does not — that test exists only on <code>feat/parent-chain-phase-9-docs</code>, and phase 1 had to write one.</p>
+
+  <div class="note warn">
+    <span class="label">The pattern</span>
+    <p>Every one of these was <em>reasoning written next to the thing it was wrong about</em>. Confident, specific, and load-bearing. None of them survived contact with a regtest run, and the two spend bugs were found in forty seconds by a test that had been unable to start for months.</p>
+    <p>The practical lesson is not "write better comments". It is that a claim about behaviour belongs in a test, where being wrong is loud, rather than in prose, where being wrong is invisible and gets quoted back as evidence.</p>
+  </div>
+</section>
+
+<hr class="rule">
+
 <section class="col" id="rollout">
-  <p class="secnum">08 — Rollout</p>
+  <p class="secnum">09 — Rollout</p>
   <h2>Getting it into the world</h2>
   <p class="lede">Nothing is in production, so this ships as an ordinary change rather than a fork. That is the single biggest thing working in this plan's favour, and it has a shelf life.</p>
   <p>The three consensus changes queued up — the expiry fix in <code>#138</code>, the <code>SwapAccept</code> binding already merged in <code>#135</code>, and this one — would each need a coordinated deployment against a live chain. Against no chain they need a merge and a rebuilt regtest. Landing them now costs a fraction of what landing them later will.</p>

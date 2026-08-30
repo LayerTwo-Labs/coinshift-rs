@@ -1363,6 +1363,7 @@ dependencies = [
  "prost-types",
  "protox",
  "quinn",
+ "rand 0.8.5",
  "rayon",
  "rcgen",
  "reqwest 0.12.28",

@@ -2,14 +2,33 @@
 
 Coinshift is a [BIP300](https://en.bitcoin.it/wiki/BIP_0300)-style sidechain node with an **L2 <-> L1 swap** system. Exchange sidechain (L2) coins for parent-chain (L1) assets such as BTC, BCH, or LTC, and vice versa. The app includes a JSON-RPC server, CLI, and GUI.
 
-> **The swap system is not yet trustless, and this README used to say it was.**
-> The L2 side is enforced by consensus, but nothing checks the parent-chain
-> payment: `validate_swap_claim_consensus` never inspects an L1 fact, so a
-> miner can claim an escrow for a payment that never happened. The fix is
-> atomic swaps — see [the decision](docs/specs/PARENT_CHAIN_VERIFICATION.html)
-> and [the plan and runbook](docs/specs/ATOMIC_SWAP_PLAN.html). The Coinshift
-> half already works end to end on regtest; the Bitcoin half is not yet wired.
-> Nothing is in production, so this is a merge rather than a fork.
+> ### The swap system is not yet trustless
+>
+> **This README said it was, in this sentence, for a long time.** That was
+> wrong, and it is worth saying plainly rather than quietly deleting.
+>
+> The L2 side is enforced by consensus: the escrow is locked when `SwapCreate`
+> connects, and only the address named by a live `SwapAccept` reservation can
+> be paid. The parent-chain side is checked by nothing that binds.
+> `validate_swap_claim_consensus` never inspects an L1 fact, so **a miner can
+> claim a swap escrow for a Bitcoin payment that never happened**, and every
+> node will accept the block.
+>
+> The checks that do exist — L1 txid uniqueness, rejecting zero confirmations,
+> requiring block inclusion — all run against a *node-local RPC answer*. They
+> are as honest as whichever endpoint you configured, they differ between
+> nodes, and consensus consults none of them.
+>
+> **The fix is atomic swaps**, and it is underway: the Coinshift leg works end
+> to end on regtest today. See [the decision](docs/specs/PARENT_CHAIN_VERIFICATION.html)
+> for why that option and not the other three, and [the plan and
+> runbook](docs/specs/ATOMIC_SWAP_PLAN.html) for how to run it yourself.
+> Nothing is in production, so this lands as a merge rather than a fork.
+>
+> That document's [§08](docs/specs/ATOMIC_SWAP_PLAN.html) also records the
+> other places our documentation asserted something untrue — including one
+> file that contradicted itself 130 lines apart — because a contradiction that
+> gets quietly patched teaches nobody anything and grows back.
 
 - **Live node:** [coinshift.bip300.xyz](https://coinshift.bip300.xyz)
 - **Built by:** [Layer Two Labs](https://layertwolabs.com)
