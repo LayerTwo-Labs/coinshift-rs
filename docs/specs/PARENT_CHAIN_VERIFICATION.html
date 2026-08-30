@@ -323,36 +323,6 @@
   }
   .fork p { font-size: 15.5px; margin-bottom: 0; }
 
-  /* ---- doc pointers ---- */
-  .docs { display: grid; gap: 12px; margin: 0 0 20px; }
-  .doc {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: baseline;
-    gap: 6px 14px;
-    padding: 13px 16px;
-    border: 1px solid var(--rule);
-    border-radius: 5px;
-    background: var(--surface);
-  }
-  .doc .path {
-    font-family: "IBM Plex Mono", ui-monospace, monospace;
-    font-size: 13.5px;
-    color: var(--ink);
-  }
-  .doc .where {
-    font-family: "IBM Plex Mono", ui-monospace, monospace;
-    font-size: 11.5px;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-    padding: 2px 8px;
-    border-radius: 100px;
-    background: var(--tint);
-    color: var(--consensus);
-  }
-  .doc .where.alt { background: var(--tint-local); color: var(--local); }
-  .doc .desc { font-size: 14.5px; color: var(--ink-muted); flex-basis: 100%; }
-
   hr.rule {
     border: 0;
     border-top: 1px solid var(--rule);
@@ -404,42 +374,28 @@
   </div>
 </header>
 
-<section class="col">
-  <p class="secnum">01 — Orientation</p>
-  <h2>Where this is already written down</h2>
-  <p class="lede">Three documents cover parts of this, and they are on different branches — which is itself worth knowing before you read them.</p>
+<div class="recommend">
+  <p class="eyebrow">The recommendation</p>
+  <p class="rec-lead">Take <a href="#option-c">Option C, atomic swaps</a>, if the taker can run our software. Take <a href="#option-b">Option B, a BTC header relay</a>, if they must be able to pay from any wallet or an exchange withdrawal.</p>
+  <p class="rec-sub">That one product question settles it, and it is the only thing here that is not an engineering call. Everything below is the argument for why those two are the only options that actually close the hole — and why the obvious third and fourth do not. <a href="#decision">Skip to the decision →</a></p>
+</div>
 
-  <div class="docs">
-    <div class="doc">
-      <span class="path">docs/specs/L1_PAYMENT_PROOFS.html</span>
-      <span class="where">main</span>
-      <span class="desc">The proof-carrying-claims proposal. Sections 3–5 are the mechanism this memo builds on; §7 is its own three-option scope decision.</span>
-    </div>
-    <div class="doc">
-      <span class="path">docs/SWAP_MECHANICS.html</span>
-      <span class="where">main</span>
-      <span class="desc">How swaps work end to end: the boundary between block data and node-local observation, and why the two claim validators differ.</span>
-    </div>
-    <div class="doc">
-      <span class="path">docs/PARENT_CHAIN_ROADMAP.md</span>
-      <span class="where alt">feat/parent-chain-phase-9-docs</span>
-      <span class="desc">The parent-chain abstraction work, phase by phase, with its own risk register. Not on main.</span>
-    </div>
-  </div>
+<nav class="toc" aria-label="Contents">
+  <ol>
+    <li><a href="#pivotal">Your mainchain is not your parent chain</a></li>
+    <li><a href="#today">What a miner can do today</a></li>
+    <li><a href="#option-a">Option A — swap against the mainchain</a></li>
+    <li><a href="#option-b">Option B — relay BTC headers</a></li>
+    <li><a href="#option-c">Option C — never look at BTC at all</a></li>
+    <li><a href="#option-d">Option D — the attestation ladder</a></li>
+    <li><a href="#compare">What each one actually costs</a></li>
+    <li><a href="#shared">Work that is the same either way</a></li>
+    <li><a href="#decision">The question that settles it</a></li>
+  </ol>
+</nav>
 
-  <div class="note warn">
-    <span class="label">Read this first</span>
-    <p><code>feat/parent-chain-phase-9-docs</code> does not contain commit <code>7b87a67</code>. It has no <code>SwapAccept</code>, no <code>swap_reservations</code>, and neither spec document. Merging it as it stands reverts the open-swap claim fix. It needs rebasing onto main before anything else happens to it.</p>
-  </div>
-
-  <h3>What is fixed, and what is not</h3>
-  <p><code>SwapAccept</code> closed front-running: entitlement to an open swap is now block data, so nobody can name their own address after someone else has paid. What it does not do — and its own commit message says so — is prove anyone paid on the parent chain at all. That is the subject of this memo.</p>
-</section>
-
-<hr class="rule">
-
-<section class="col">
-  <p class="secnum">02 — The pivotal fact</p>
+<section class="col" id="pivotal">
+  <p class="secnum">01 — The pivotal fact</p>
   <h2>Your mainchain is not your parent chain</h2>
   <p class="lede">The cheap fix in <span class="mono">L1_PAYMENT_PROOFS</span> works because the node already holds a proof-of-work-validated header chain. It holds exactly one, and it is not the one you want to swap against.</p>
 
@@ -520,8 +476,8 @@
 
 <hr class="rule">
 
-<section class="col">
-  <p class="secnum">03 — The failure</p>
+<section class="col" id="today">
+  <p class="secnum">02 — The failure</p>
   <h2>What a miner can do today</h2>
   <p class="lede">No lie to any RPC is required. Consensus simply never asks.</p>
   <p><code>validate_swap_claim_consensus</code> checks that the claim spends an output locked to its swap, that it pays the address a live reservation names, and nothing else. <code>connect</code> then explicitly trusts the block and advances local swap state to match. Honest nodes will not relay the claim — but relaying is not required in order to mine it.</p>
@@ -580,8 +536,8 @@
 
 <hr class="rule">
 
-<section class="col">
-  <p class="secnum">04 — Option A</p>
+<section class="col" id="option-a">
+  <p class="secnum">03 — Option A</p>
   <h2>Swap against the mainchain</h2>
   <div class="verdict">
     <span class="chip good">trustless</span>
@@ -648,8 +604,8 @@
 
 <hr class="rule">
 
-<section class="col">
-  <p class="secnum">05 — Option B</p>
+<section class="col" id="option-b">
+  <p class="secnum">04 — Option B</p>
   <h2>Relay BTC headers into consensus</h2>
   <div class="verdict">
     <span class="chip good">trustless-ish</span>
@@ -714,8 +670,8 @@
 
 <hr class="rule">
 
-<section class="col">
-  <p class="secnum">06 — Option C</p>
+<section class="col" id="option-c">
+  <p class="secnum">05 — Option C</p>
   <h2>Never look at BTC at all</h2>
   <div class="verdict">
     <span class="chip good">trustless</span>
@@ -785,8 +741,8 @@
 
 <hr class="rule">
 
-<section class="col">
-  <p class="secnum">07 — Option D</p>
+<section class="col" id="option-d">
+  <p class="secnum">06 — Option D</p>
   <h2>The attestation ladder, and why it does not close</h2>
   <div class="verdict">
     <span class="chip bad">not trustless</span>
@@ -843,8 +799,8 @@
 
 <hr class="rule">
 
-<section class="col">
-  <p class="secnum">08 — Side by side</p>
+<section class="col" id="compare">
+  <p class="secnum">07 — Side by side</p>
   <h2>What each one actually costs</h2>
 </section>
 
@@ -911,8 +867,8 @@
 
 <hr class="rule">
 
-<section class="col">
-  <p class="secnum">09 — Regardless of which</p>
+<section class="col" id="shared">
+  <p class="secnum">08 — Regardless of which</p>
   <h2>Most of the work is the same either way</h2>
   <p class="lede">A useful property of A and B: they differ in exactly one module. You can start now without settling the decision.</p>
   <p>Shared by both, and worth doing on its own merits:</p>
@@ -930,8 +886,8 @@
 
 <hr class="rule">
 
-<section class="col">
-  <p class="secnum">10 — The decision</p>
+<section class="col" id="decision">
+  <p class="secnum">09 — The decision</p>
   <h2>One question settles it</h2>
 
   <div class="decision">
