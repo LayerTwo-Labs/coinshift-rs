@@ -289,7 +289,6 @@
   tr.pick td, tr.pick th { background: var(--tint); }
   td .yes { color: var(--consensus); font-weight: 600; }
   td .no  { color: var(--danger); font-weight: 600; }
-  td .mid { color: var(--local); font-weight: 600; }
 
   /* ---- decision block ---- */
   .decision {
@@ -300,28 +299,22 @@
     margin: 30px 0 0;
   }
   .decision h3 { margin-top: 0; }
-  .fork {
-    display: grid;
-    gap: 18px;
-    grid-template-columns: 1fr;
-    margin-top: 22px;
-  }
-  @media (min-width: 720px) { .fork { grid-template-columns: 1fr 1fr; } }
-  .fork > div {
+
+  pre.codeblock {
+    background: var(--surface);
     border: 1px solid var(--rule);
-    border-radius: 5px;
-    padding: 18px 20px;
-    background: var(--ground);
+    border-left: 3px solid var(--consensus);
+    border-radius: 0 4px 4px 0;
+    padding: 14px 18px;
+    overflow-x: auto;
+    margin: 0 0 20px;
   }
-  .fork h4 {
-    font-family: "IBM Plex Mono", ui-monospace, monospace;
-    font-size: 12px;
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
-    color: var(--consensus);
-    margin: 0 0 10px;
+  pre.codeblock code {
+    background: none;
+    padding: 0;
+    font-size: 13px;
+    line-height: 1.6;
   }
-  .fork p { font-size: 15.5px; margin-bottom: 0; }
 
   hr.rule {
     border: 0;
@@ -329,7 +322,7 @@
     margin: 0;
   }
 
-  /* ---- shared document nav — keep identical across the three protocol docs ---- */
+  /* ---- shared document nav — keep identical across the protocol docs ---- */
   nav.docnav {
     max-width: var(--figure-w);
     margin: 0 auto;
@@ -360,6 +353,7 @@
   <a href="SWAP_MECHANICS.html">Swap Mechanics</a>
   <a href="L1_PAYMENT_PROOFS.html">L1 Payment Proofs</a>
   <a href="PARENT_CHAIN_VERIFICATION.html" aria-current="page">Proving the Parent Chain</a>
+  <a href="ATOMIC_SWAP_PLAN.html">Building the Atomic Swap</a>
 </nav>
 
 <header class="masthead">
@@ -375,15 +369,16 @@
 </header>
 
 <div class="recommend">
-  <p class="eyebrow">The recommendation</p>
-  <p class="rec-lead">Take <a href="#option-c">Option C, atomic swaps</a>, if the taker can run our software. Take <a href="#option-b">Option B, a BTC header relay</a>, if they must be able to pay from any wallet or an exchange withdrawal.</p>
-  <p class="rec-sub">That one product question settles it, and it is the only thing here that is not an engineering call. Everything below is the argument for why those two are the only options that actually close the hole — and why the obvious third and fourth do not. <a href="#decision">Skip to the decision →</a></p>
+  <p class="eyebrow">The recommendation — settled</p>
+  <p class="rec-lead"><a href="#option-c">Option C, atomic swaps.</a> Not "the better of two"; the only one left once you check what the protocol already requires of a taker.</p>
+  <p class="rec-sub">An earlier draft made this a two-way fork on whether the taker could run Coinshift software. <code>validate_swap_accept</code> settles that question in code: a taker must already hold funded Coinshift outputs before they can reserve a swap. Option B's only advantage is an affordance consensus already forbids. <a href="#codesays">What the code says →</a></p>
 </div>
 
 <nav class="toc" aria-label="Contents">
   <ol>
     <li><a href="#pivotal">Your mainchain is not your parent chain</a></li>
     <li><a href="#today">What a miner can do today</a></li>
+    <li><a href="#codesays">What the code says about the choice</a></li>
     <li><a href="#option-a">Option A — swap against the mainchain</a></li>
     <li><a href="#option-b">Option B — relay BTC headers</a></li>
     <li><a href="#option-c">Option C — never look at BTC at all</a></li>
@@ -536,8 +531,57 @@
 
 <hr class="rule">
 
+<section class="col" id="codesays">
+  <p class="secnum">03 — Checked against the code</p>
+  <h2>What the code says about the choice</h2>
+  <p class="lede">The draft above treated "can the taker run our software?" as an open product question. It is not open. The protocol answered it in <code>#135</code>, and four more facts from the codebase all point the same way.</p>
+
+  <h3>A taker already has to hold Coinshift coins</h3>
+  <p><code>validate_swap_accept</code> requires the reserver to spend an input owned by the address they are reserving for — <code>lib/state/swap.rs:L288</code>:</p>
+  <pre class="codeblock"><code>// Proof that the reserver controls the address they are reserving for:
+// spend an input owned by it.
+if !filled_transaction.spent_utxos.iter()
+    .any(|utxo| utxo.address == *l2_claimer_address)</code></pre>
+  <p>So a taker must run Coinshift software <em>and</em> already own funded Coinshift outputs, before they pay anything on BTC. The failing integration test <code>swap_creation_open_fill</code> is the empirical proof: it reserves for a freshly generated address and dies with <code>"not enough funds"</code>.</p>
+
+  <div class="note warn">
+    <span class="label">This eliminates Option B</span>
+    <p>B's entire advantage was "the taker pays from any wallet, with no Coinshift software." That was already only half true — a taker must submit a <code>SwapClaim</code>, which is an L2 transaction, and must receive L2 coins. With <code>SwapAccept</code> it is not true at all. B would spend months buying an affordance consensus forbids.</p>
+  </div>
+
+  <h3>Three more findings, all favouring C</h3>
+  <div class="tablewrap">
+    <table>
+      <thead>
+        <tr><th scope="col">Finding</th><th scope="col">Where</th><th scope="col">Consequence</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <th scope="row">The deterministic clock already exists</th>
+          <td><code>validating_height()</code><br><span class="mono">lib/state/swap.rs:L219</span></td>
+          <td>Its doc: <em>"prevalidate_block, connect_block and the mempool path all run against the same tip, so they all agree."</em> <code>SwapAccept</code> expiry already uses it. C's timeouts reuse it — <strong>the mainchain watermark in §09 is not needed at all</strong>.</td>
+        </tr>
+        <tr>
+          <th scope="row">The validator cannot see the archive</th>
+          <td><code>validate_swap_claim_consensus(state, rotxn, transaction)</code><br><span class="mono">lib/state/swap.rs:L397</span></td>
+          <td>No <code>Archive</code> parameter. A and B must widen this signature and thread a header view through every call site — the piece <span class="mono">L1_PAYMENT_PROOFS</span> calls awkward. C never needs it: <code>sha256(s) == H</code> is a pure function of the transaction.</td>
+        </tr>
+        <tr>
+          <th scope="row">The type change is contained to one file</th>
+          <td><code>Content</code><br><span class="mono">lib/types/transaction.rs:L342</span></td>
+          <td>Degree 25, every edge inside that file except the <code>Output</code> back-reference. Adding <code>HashLocked</code> touches ten exhaustive sites the compiler finds for you.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>A fourth is structural rather than textual: <code>parent_chain_rpc.rs</code> clusters into the <em>L1 Config Panel</em> community alongside the GUI, not into <em>Swap Claim Validation</em>. The RPC observer is already peripheral in the real dependency graph, so demoting it to pure UI is a cut, not a surgery.</p>
+</section>
+
+<hr class="rule">
+
 <section class="col" id="option-a">
-  <p class="secnum">03 — Option A</p>
+  <p class="secnum">04 — Option A</p>
   <h2>Swap against the mainchain</h2>
   <div class="verdict">
     <span class="chip good">trustless</span>
@@ -605,13 +649,17 @@
 <hr class="rule">
 
 <section class="col" id="option-b">
-  <p class="secnum">04 — Option B</p>
+  <p class="secnum">05 — Option B</p>
   <h2>Relay BTC headers into consensus</h2>
   <div class="verdict">
-    <span class="chip good">trustless-ish</span>
+    <span class="chip bad">ruled out</span>
     <span class="chip good">real BTC</span>
     <span class="chip bad">months</span>
     <span class="chip warn">relay must be kept alive</span>
+  </div>
+  <div class="note warn">
+    <span class="label">Ruled out — see §03</span>
+    <p>Kept for the record, and because the header-relay design is the right one <em>if</em> passive fills ever become the product. Its only advantage over C is a taker who pays without holding Coinshift coins, and <code>validate_swap_accept</code> already forbids that.</p>
   </div>
   <p>Everything in Option A, plus a way to get an authenticated BTC header chain into L2 consensus state. Headers arrive as ordinary L2 transactions; consensus validates proof-of-work and the retarget schedule, and keeps the heaviest chain.</p>
   <p>BTC is the best possible case for this. Forging a proof means outrunning BTC's hashrate, which is the strongest assumption available anywhere — unlike BCH or LTC, where renting a majority is cheap enough that fake proofs are a real business. And because eCash is a BTC fork, the header format and SHA-256d work check are shapes your node already handles; BTC's 2016-block retarget is <em>simpler</em> than eCash's ASERT.</p>
@@ -671,7 +719,7 @@
 <hr class="rule">
 
 <section class="col" id="option-c">
-  <p class="secnum">05 — Option C</p>
+  <p class="secnum">06 — Option C</p>
   <h2>Never look at BTC at all</h2>
   <div class="verdict">
     <span class="chip good">trustless</span>
@@ -742,7 +790,7 @@
 <hr class="rule">
 
 <section class="col" id="option-d">
-  <p class="secnum">06 — Option D</p>
+  <p class="secnum">07 — Option D</p>
   <h2>The attestation ladder, and why it does not close</h2>
   <div class="verdict">
     <span class="chip bad">not trustless</span>
@@ -800,7 +848,7 @@
 <hr class="rule">
 
 <section class="col" id="compare">
-  <p class="secnum">07 — Side by side</p>
+  <p class="secnum">08 — Side by side</p>
   <h2>What each one actually costs</h2>
 </section>
 
@@ -834,11 +882,11 @@
         <td>1–2 weeks</td>
       </tr>
       <tr>
-        <th scope="row">B · BTC header relay</th>
+        <th scope="row">B · BTC header relay <span class="mono" style="color:var(--danger);font-weight:400">(ruled out)</span></th>
         <td>BTC</td>
         <td><span class="yes">no</span></td>
         <td>BTC hashrate + relay liveness</td>
-        <td>any wallet</td>
+        <td><span class="no">impossible — see §03</span></td>
         <td><span class="no">months</span></td>
       </tr>
       <tr class="pick">
@@ -846,7 +894,7 @@
         <td>BTC</td>
         <td><span class="yes">no</span></td>
         <td><span class="yes">none</span></td>
-        <td><span class="mid">swap software only</span></td>
+        <td><span class="yes">already required</span></td>
         <td>2–3 weeks</td>
       </tr>
       <tr>
@@ -868,7 +916,7 @@
 <hr class="rule">
 
 <section class="col" id="shared">
-  <p class="secnum">08 — Regardless of which</p>
+  <p class="secnum">09 — Regardless of which</p>
   <h2>Most of the work is the same either way</h2>
   <p class="lede">A useful property of A and B: they differ in exactly one module. You can start now without settling the decision.</p>
   <p>Shared by both, and worth doing on its own merits:</p>
@@ -887,28 +935,24 @@
 <hr class="rule">
 
 <section class="col" id="decision">
-  <p class="secnum">09 — The decision</p>
-  <h2>One question settles it</h2>
+  <p class="secnum">10 — The decision</p>
+  <h2>Settled: Option C</h2>
 
   <div class="decision">
-    <h3>How does the taker pay?</h3>
-    <p>Everything above collapses to this. It is a product question, not an engineering one, which is why it is yours rather than mine.</p>
-    <div class="fork">
-      <div>
-        <h4>They run our software</h4>
-        <p>Take <strong>Option C</strong>. Trustless, no relay, no oracle, no new trust assumption, and it removes the parent-chain observation problem instead of mitigating it. Keep <code>SwapAccept</code> for matching and the RPC observer as pure UI. This is my recommendation.</p>
-      </div>
-      <div>
-        <h4>Any wallet or exchange</h4>
-        <p>Then BTC facts must reach consensus, and that is <strong>Option B</strong> — months, with a relay to keep alive and the fork-checkpoint hazard to get right. No cheaper path exists that is honestly trustless.</p>
-      </div>
-    </div>
+    <h3>Atomic swaps, with SwapAccept kept for matching</h3>
+    <p>The question this section used to pose — <em>how does the taker pay?</em> — turned out to be already answered in <code>lib/state/swap.rs</code>. A taker holds Coinshift outputs before they can reserve, so "pays from any wallet" is not a product option we get to choose. That removes B, A was already off the table once the parent chain was fixed as BTC, and D never closed the hole.</p>
+    <p>What is left is also, independently, the smallest change: one output variant in one file, two spend rules, and a timeout that reuses a height function the codebase already trusts.</p>
   </div>
 
-  <p style="margin-top:26px;">With the parent chain confirmed as BTC, Option A is off the table unless the asset itself is negotiable, and Option D does not close the hole. So the live choice is <strong>B or C</strong>, and the two differ far less in security than in what you ask of the person on the other side of the trade.</p>
+  <h3>What we accept by choosing it</h3>
+  <p><strong>The free-option problem.</strong> The maker knows the secret and picks the moment to reveal. If BTC moves against them inside the window they can walk away; the taker refunds, whole but out a round trip and fees. That is a market-design problem, not a security hole — nobody can steal. Mitigate with short timeouts and a maker bond forfeited on non-reveal, designed in from the start rather than discovered when a market maker complains.</p>
+  <p><strong>Interactivity.</strong> Both sides must be online within the timeout window. <code>SwapAccept</code> keeps orders postable, so this is a settlement-window requirement rather than a live handshake, but it is not zero.</p>
+
+  <h3>What would reopen it</h3>
+  <p>Only one thing: a decision that a taker should be able to fill an order holding no Coinshift coins at all. That is a change to <code>validate_swap_accept</code> as much as to this document, and it would mean building the relay — on top of a system that is by then already trustless, which is a far better place to start from than today.</p>
 
   <h3>In the meantime</h3>
-  <p>Whichever way this goes, the README says "trustless" about a leg that currently is not. Until one of these lands, either say so plainly or ship a bonded attester set and describe it as the federation it would be. Being wrong in the documentation is the one option with no upside.</p>
+  <p>Until this lands the README says "trustless" about a leg that is not. Either say so plainly or ship a bonded attester set and describe it as the federation it would be. Being wrong in the documentation is the one option with no upside.</p>
 </section>
 </body>
 </html>

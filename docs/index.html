@@ -181,7 +181,6 @@
     margin-left: 8px;
     vertical-align: 2px;
   }
-  .tag.decide { background: var(--tint-local); color: var(--local); }
 
   ul.plain { list-style: none; padding: 0; margin: 0; display: grid; gap: 2px; }
   ul.plain li {
@@ -243,11 +242,11 @@
 </header>
 
 <section>
-  <h2>The decision currently open</h2>
-  <p class="sectionnote">One thing is waiting on a call, and it gates the security of every swap.</p>
+  <h2>What we are building next</h2>
+  <p class="sectionnote">One decision drove the current work, and it gates the security of every swap.</p>
   <div class="callout">
-    <p class="callout-lead">The BTC leg of a swap is not checked by consensus, so a miner can take an escrow without paying. Closing it means either <strong>atomic swaps</strong> or <strong>relaying BTC headers</strong> — and which one depends on whether the taker can run our software or must pay from any wallet.</p>
-    <p class="callout-sub"><a href="specs/PARENT_CHAIN_VERIFICATION.html#decision">The recommendation, and the question behind it →</a></p>
+    <p class="callout-lead">The BTC leg of a swap is not checked by consensus, so a miner can take an escrow without paying. The fix is <strong>atomic swaps</strong> — settled, because a taker must already hold Coinshift outputs to reserve a swap, which rules out the header-relay alternative on the facts.</p>
+    <p class="callout-sub"><a href="specs/ATOMIC_SWAP_PLAN.html">The execution plan →</a> &nbsp;·&nbsp; <a href="specs/PARENT_CHAIN_VERIFICATION.html#codesays">why the other options are out →</a></p>
   </div>
 </section>
 
@@ -266,9 +265,14 @@
       <p class="blurb">Making the parent-chain half of a swap something every node checks rather than something each node takes on faith. Proof-carrying claims, a deterministic depth anchor, and three scope options.</p>
     </a>
     <a class="card" href="specs/PARENT_CHAIN_VERIFICATION.html">
-      <span class="name">Proving the Parent Chain<span class="tag decide">for decision</span></span>
+      <span class="name">Proving the Parent Chain<span class="tag">decided</span></span>
       <span class="path">docs/specs/PARENT_CHAIN_VERIFICATION.html</span>
-      <p class="blurb">Four ways to close the L1 gap for a BTC parent chain, given that our mainchain is eCash. Sequence diagrams for each, what they cost, and the one product question that decides between them.</p>
+      <p class="blurb">Four ways to close the L1 gap for a BTC parent chain, given that our mainchain is eCash. Sequence diagrams for each, what they cost, and why the code itself rules out three of them.</p>
+    </a>
+    <a class="card" href="specs/ATOMIC_SWAP_PLAN.html">
+      <span class="name">Building the Atomic Swap<span class="tag">plan</span></span>
+      <span class="path">docs/specs/ATOMIC_SWAP_PLAN.html</span>
+      <p class="blurb">The execution plan for the decision above: eight phases, what changes in which file, the three ways to get it wrong, and how each phase is proved before the next begins.</p>
     </a>
     <a class="card" href="specs/swap-implementation-spec.md">
       <span class="name">Swap Implementation Spec</span>

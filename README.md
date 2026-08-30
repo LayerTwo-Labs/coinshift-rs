@@ -154,7 +154,8 @@ documents live on other branches. Open it directly; there is no build step.
 |-----|-------------|
 | [SWAP_MECHANICS.html](docs/specs/SWAP_MECHANICS.html) | Illustrated swap protocol: sequence diagrams, the consensus / node-local boundary, and what the L1 leg still trusts |
 | [L1_PAYMENT_PROOFS.html](docs/specs/L1_PAYMENT_PROOFS.html) | Proposal: verifying the parent-chain leg of a swap in consensus |
-| [PARENT_CHAIN_VERIFICATION.html](docs/specs/PARENT_CHAIN_VERIFICATION.html) | For decision: four ways to close the L1 gap for a BTC parent chain, and what each costs |
+| [PARENT_CHAIN_VERIFICATION.html](docs/specs/PARENT_CHAIN_VERIFICATION.html) | Decided: four ways to close the L1 gap for a BTC parent chain, and why the code rules out three |
+| [ATOMIC_SWAP_PLAN.html](docs/specs/ATOMIC_SWAP_PLAN.html) | Execution plan for the atomic swap: phases, files, pitfalls, tests, rollout |
 | [swap-implementation-spec.md](docs/specs/swap-implementation-spec.md) | Swap implementation specification |
 
 **Guides** (`docs/`):

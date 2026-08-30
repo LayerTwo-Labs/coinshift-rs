@@ -1,0 +1,595 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Building the Atomic Swap</title>
+<meta name="description" content="Phase-by-phase execution plan for the Coinshift atomic swap: what changes, in which file, in what order, and how each phase is proved.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Spectral:ital,wght@0,600;0,700;1,400&display=swap">
+
+<style>
+  :root {
+    --ground:      #F4F7F6;
+    --surface:     #FFFFFF;
+    --ink:         #0F1719;
+    --ink-muted:   #55666B;
+    --ink-faint:   #7C8D92;
+    --rule:        #D5DEDC;
+    --rule-soft:   #E4EBE9;
+    --consensus:   #0E6F68;
+    --local:       #A25A12;
+    --danger:      #A32E23;
+    --tint:        #E1EDEA;
+    --tint-local:  #F6EBDA;
+    --tint-danger: #F6E2DF;
+
+    --measure: 68ch;
+    --figure-w: 1080px;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:      #0B1214;
+      --surface:     #111A1C;
+      --ink:         #E2EAE9;
+      --ink-muted:   #93A5A8;
+      --ink-faint:   #6E8185;
+      --rule:        #223034;
+      --rule-soft:   #1A2528;
+      --consensus:   #4FD8C9;
+      --local:       #E8A845;
+      --danger:      #F0776C;
+      --tint:        #13282A;
+      --tint-local:  #2A2113;
+      --tint-danger: #2B1815;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ground:      #0B1214;
+    --surface:     #111A1C;
+    --ink:         #E2EAE9;
+    --ink-muted:   #93A5A8;
+    --ink-faint:   #6E8185;
+    --rule:        #223034;
+    --rule-soft:   #1A2528;
+    --consensus:   #4FD8C9;
+    --local:       #E8A845;
+    --danger:      #F0776C;
+    --tint:        #13282A;
+    --tint-local:  #2A2113;
+    --tint-danger: #2B1815;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+    font-size: 17px;
+    line-height: 1.65;
+    margin: 0;
+    padding: 0 24px 120px;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .col { max-width: var(--measure); margin-inline: auto; }
+  .wide { max-width: var(--figure-w); margin-inline: auto; }
+
+  header.masthead {
+    max-width: var(--figure-w);
+    margin: 0 auto;
+    padding: 88px 0 40px;
+    border-bottom: 1px solid var(--rule);
+  }
+
+  .eyebrow {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 12px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--consensus);
+    margin: 0 0 20px;
+  }
+
+  h1 {
+    font-family: Spectral, Georgia, serif;
+    font-weight: 700;
+    font-size: clamp(38px, 6vw, 62px);
+    line-height: 1.04;
+    letter-spacing: -0.02em;
+    text-wrap: balance;
+    margin: 0 0 22px;
+    max-width: 15ch;
+  }
+
+  .standfirst {
+    font-family: Spectral, Georgia, serif;
+    font-size: clamp(19px, 2.3vw, 23px);
+    font-style: italic;
+    line-height: 1.5;
+    color: var(--ink-muted);
+    max-width: 58ch;
+    margin: 0 0 36px;
+    text-wrap: pretty;
+  }
+
+  .meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 28px;
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 12.5px;
+    color: var(--ink-faint);
+  }
+  .meta b { color: var(--ink-muted); font-weight: 500; }
+
+  section { padding-top: 76px; }
+
+  .secnum {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 12px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    margin: 0 0 10px;
+  }
+
+  h2 {
+    font-family: Spectral, Georgia, serif;
+    font-weight: 600;
+    font-size: clamp(26px, 3.4vw, 34px);
+    line-height: 1.2;
+    letter-spacing: -0.01em;
+    text-wrap: balance;
+    margin: 0 0 18px;
+  }
+
+  h3 {
+    font-family: "IBM Plex Sans", sans-serif;
+    font-weight: 600;
+    font-size: 17px;
+    margin: 36px 0 8px;
+  }
+
+  p { margin: 0 0 18px; text-wrap: pretty; }
+
+  a { color: var(--consensus); text-underline-offset: 3px; }
+  a:focus-visible, summary:focus-visible {
+    outline: 2px solid var(--consensus);
+    outline-offset: 3px;
+    border-radius: 2px;
+  }
+
+  code, .mono {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 0.88em;
+  }
+  code { background: var(--rule-soft); padding: 1px 5px; border-radius: 3px; }
+
+  ul, ol { margin: 0 0 18px; padding-left: 22px; }
+  li { margin-bottom: 8px; }
+
+  .lede {
+    font-size: 19px;
+    line-height: 1.6;
+    color: var(--ink-muted);
+    margin-bottom: 26px;
+  }
+
+  /* ---- callouts ---- */
+  .note {
+    border-left: 3px solid var(--consensus);
+    background: var(--tint);
+    padding: 16px 20px;
+    margin: 0 0 22px;
+    border-radius: 0 4px 4px 0;
+  }
+  .note.warn { border-left-color: var(--danger); background: var(--tint-danger); }
+  .note.local { border-left-color: var(--local); background: var(--tint-local); }
+  .note p:last-child { margin-bottom: 0; }
+  .note .label {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 11.5px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    display: block;
+    margin-bottom: 6px;
+    color: var(--consensus);
+  }
+  .note.warn .label { color: var(--danger); }
+  .note.local .label { color: var(--local); }
+
+  /* ---- figures ---- */
+  figure {
+    margin: 32px 0 40px;
+    max-width: var(--figure-w);
+    margin-inline: auto;
+  }
+  .figscroll { overflow-x: auto; }
+  figure svg { max-width: 100%; height: auto; display: block; min-width: 640px; }
+  figcaption {
+    font-size: 14.5px;
+    line-height: 1.55;
+    color: var(--ink-faint);
+    margin-top: 14px;
+    max-width: 72ch;
+  }
+
+  /* ---- legend ---- */
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 26px;
+    padding: 14px 18px;
+    border: 1px solid var(--rule);
+    border-radius: 5px;
+    background: var(--surface);
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 12.5px;
+    color: var(--ink-muted);
+    margin: 0 0 8px;
+  }
+  .legend span { display: flex; align-items: center; gap: 9px; }
+  .swatch { width: 22px; height: 3px; border-radius: 2px; flex: none; }
+
+  /* ---- option cards ---- */
+  .verdict {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 10px;
+    margin: 0 0 22px;
+  }
+  .chip {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 12px;
+    letter-spacing: 0.04em;
+    padding: 5px 11px;
+    border-radius: 100px;
+    border: 1px solid var(--rule);
+    color: var(--ink-muted);
+    background: var(--surface);
+  }
+  .chip.good { border-color: var(--consensus); color: var(--consensus); background: var(--tint); }
+  .chip.bad  { border-color: var(--danger); color: var(--danger); background: var(--tint-danger); }
+  .chip.warn { border-color: var(--local); color: var(--local); background: var(--tint-local); }
+
+  /* ---- table ---- */
+  .tablewrap { overflow-x: auto; margin: 28px 0 12px; }
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    min-width: 720px;
+    font-size: 15px;
+    background: var(--surface);
+  }
+  th, td {
+    text-align: left;
+    padding: 13px 16px;
+    border-bottom: 1px solid var(--rule-soft);
+    vertical-align: top;
+  }
+  thead th {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 11.5px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    border-bottom: 1px solid var(--rule);
+    font-weight: 500;
+  }
+  tbody th {
+    font-family: "IBM Plex Sans", sans-serif;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  tr.pick td, tr.pick th { background: var(--tint); }
+  td .yes { color: var(--consensus); font-weight: 600; }
+  td .no  { color: var(--danger); font-weight: 600; }
+
+  /* ---- decision block ---- */
+  .decision {
+    border: 1px solid var(--consensus);
+    border-radius: 6px;
+    background: var(--surface);
+    padding: 30px 32px;
+    margin: 30px 0 0;
+  }
+  .decision h3 { margin-top: 0; }
+
+  pre.codeblock {
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-left: 3px solid var(--consensus);
+    border-radius: 0 4px 4px 0;
+    padding: 14px 18px;
+    overflow-x: auto;
+    margin: 0 0 20px;
+  }
+  pre.codeblock code {
+    background: none;
+    padding: 0;
+    font-size: 13px;
+    line-height: 1.6;
+  }
+
+  hr.rule {
+    border: 0;
+    border-top: 1px solid var(--rule);
+    margin: 0;
+  }
+
+  /* ---- shared document nav — keep identical across the protocol docs ---- */
+  nav.docnav {
+    max-width: var(--figure-w);
+    margin: 0 auto;
+    padding: 20px 0 0;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 6px 18px;
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 12.5px;
+  }
+  nav.docnav a {
+    color: var(--ink-faint);
+    text-decoration: none;
+    padding-bottom: 2px;
+    border-bottom: 1px solid transparent;
+  }
+  nav.docnav a:hover { color: var(--consensus); border-bottom-color: var(--consensus); }
+  nav.docnav a:focus-visible { outline: 2px solid var(--consensus); outline-offset: 3px; }
+  nav.docnav a[aria-current="page"] { color: var(--ink); border-bottom-color: var(--consensus); }
+  nav.docnav .sep { color: var(--rule); }
+</style>
+</head>
+<body>
+<nav class="docnav" aria-label="Protocol documents">
+  <a href="../index.html">All docs</a>
+  <span class="sep" aria-hidden="true">/</span>
+  <a href="SWAP_MECHANICS.html">Swap Mechanics</a>
+  <a href="L1_PAYMENT_PROOFS.html">L1 Payment Proofs</a>
+  <a href="PARENT_CHAIN_VERIFICATION.html">Proving the Parent Chain</a>
+  <a href="ATOMIC_SWAP_PLAN.html" aria-current="page">Building the Atomic Swap</a>
+</nav>
+
+<header class="masthead">
+  <p class="eyebrow">coinshift-rs · execution plan</p>
+  <h1>Building the Atomic Swap</h1>
+  <p class="standfirst">Option C, phase by phase: what changes, in which file, in what order, and how each phase is proved before the next one starts.</p>
+  <div class="meta">
+    <span><b>Status</b> ready to start</span>
+    <span><b>Decision</b> settled — see PARENT_CHAIN_VERIFICATION §03</span>
+    <span><b>Estimate</b> 2–3 weeks after prerequisites</span>
+    <span><b>Consensus</b> tightening — coordinated deployment</span>
+  </div>
+</header>
+
+<div class="recommend">
+  <p class="eyebrow">The shape of it</p>
+  <p class="rec-lead">One new output variant, two spend rules, a BTC HTLC built entirely in the wallet, and the deletion of the parent-chain observer from anything that decides who gets paid.</p>
+  <p class="rec-sub">Consensus never learns what BTC is. The information travels through a revealed preimage instead of an observation, which is why this is the smallest of the four options rather than the largest. <a href="#phases">Straight to the phases →</a></p>
+</div>
+
+<nav class="toc" aria-label="Contents">
+  <ol>
+    <li><a href="#protocol">The protocol, end to end</a></li>
+    <li><a href="#prereqs">Prerequisites that block the start</a></li>
+    <li><a href="#phases">The phases</a></li>
+    <li><a href="#pitfalls">Three ways to get this wrong</a></li>
+    <li><a href="#tests">How each phase is proved</a></li>
+    <li><a href="#rollout">Rollout</a></li>
+  </ol>
+</nav>
+
+<section class="col" id="protocol">
+  <p class="secnum">01 — The protocol</p>
+  <h2>What we are building</h2>
+  <p class="lede">A hash-timelocked exchange. Both legs lock to the same secret; revealing it on one chain to take payment publishes it on that chain, which lets the counterparty take the other leg.</p>
+  <p>The maker holds Coinshift coins and wants BTC. They pick a secret <code>s</code>, publish <code>H = sha256(s)</code>, and lock their coins so that either the taker can spend them by revealing a preimage of <code>H</code>, or the maker can reclaim them after a deadline. The taker mirrors that on BTC with a standard P2WSH HTLC on the same <code>H</code> and a <em>shorter</em> deadline. The maker takes the BTC — which necessarily publishes <code>s</code> — and the taker reads <code>s</code> off the BTC chain and takes the Coinshift coins.</p>
+  <p>Neither chain ever observes the other. Coinshift consensus checks one thing about the swap's completion: that a supplied preimage hashes to the committed value.</p>
+</section>
+
+<figure class="wide">
+  <div class="figscroll">
+    <svg viewBox="0 0 1000 300" role="img" aria-label="Diagram contrasting the current design, where consensus must observe the BTC chain, with the atomic swap design, where consensus only checks a hash preimage." xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <marker id="p-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--danger)"/></marker>
+        <marker id="p-teal" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--consensus)"/></marker>
+      </defs>
+
+      <text x="0" y="16" font-family="IBM Plex Mono, monospace" font-size="12" letter-spacing="1.4" fill="var(--danger)">TODAY — CONSENSUS MUST LEARN A FACT ABOUT ANOTHER CHAIN</text>
+
+      <rect x="0" y="32" width="210" height="52" rx="5" fill="var(--surface)" stroke="var(--rule)"/>
+      <text x="105" y="63" text-anchor="middle" font-family="IBM Plex Sans, sans-serif" font-size="13" fill="var(--ink)">BTC payment happens</text>
+
+      <line x1="210" y1="58" x2="316" y2="58" stroke="var(--danger)" stroke-width="1.8" marker-end="url(#p-red)"/>
+      <text x="263" y="48" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11" fill="var(--danger)">an RPC says so</text>
+
+      <rect x="322" y="32" width="210" height="52" rx="5" fill="var(--tint-danger)" stroke="var(--danger)" stroke-dasharray="4 4"/>
+      <text x="427" y="56" text-anchor="middle" font-family="IBM Plex Sans, sans-serif" font-size="13" fill="var(--danger)">node-local observation</text>
+      <text x="427" y="74" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11" fill="var(--ink-muted)">differs between nodes</text>
+
+      <line x1="532" y1="58" x2="638" y2="58" stroke="var(--danger)" stroke-width="1.8" marker-end="url(#p-red)"/>
+
+      <rect x="644" y="32" width="356" height="52" rx="5" fill="var(--surface)" stroke="var(--danger)"/>
+      <text x="822" y="56" text-anchor="middle" font-family="IBM Plex Sans, sans-serif" font-size="13" fill="var(--ink)">consensus releases the escrow</text>
+      <text x="822" y="74" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11" fill="var(--danger)">a miner can skip the payment entirely</text>
+
+      <line x1="0" y1="118" x2="1000" y2="118" stroke="var(--rule)"/>
+
+      <text x="0" y="150" font-family="IBM Plex Mono, monospace" font-size="12" letter-spacing="1.4" fill="var(--consensus)">OPTION C — THE FACT TRAVELS AS A SECRET</text>
+
+      <rect x="0" y="166" width="210" height="52" rx="5" fill="var(--surface)" stroke="var(--rule)"/>
+      <text x="105" y="190" text-anchor="middle" font-family="IBM Plex Sans, sans-serif" font-size="13" fill="var(--ink)">maker takes the BTC</text>
+      <text x="105" y="208" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11" fill="var(--ink-muted)">this publishes s</text>
+
+      <line x1="210" y1="192" x2="316" y2="192" stroke="var(--consensus)" stroke-width="1.8" marker-end="url(#p-teal)"/>
+      <text x="263" y="182" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11" fill="var(--ink-faint)">taker reads s</text>
+
+      <rect x="322" y="166" width="210" height="52" rx="5" fill="var(--tint)" stroke="var(--consensus)"/>
+      <text x="427" y="190" text-anchor="middle" font-family="IBM Plex Sans, sans-serif" font-size="13" fill="var(--ink)">s rides in the L2 tx</text>
+      <text x="427" y="208" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11" fill="var(--ink-muted)">it is block data</text>
+
+      <line x1="532" y1="192" x2="638" y2="192" stroke="var(--consensus)" stroke-width="1.8" marker-end="url(#p-teal)"/>
+
+      <rect x="644" y="166" width="356" height="52" rx="5" fill="var(--surface)" stroke="var(--consensus)"/>
+      <text x="822" y="190" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="13" fill="var(--ink)">sha256(s) == H</text>
+      <text x="822" y="208" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11" fill="var(--consensus)">every node computes the same answer</text>
+
+      <text x="0" y="256" font-family="IBM Plex Sans, sans-serif" font-size="14" font-weight="600" fill="var(--ink)">The amber box is not mitigated. It is deleted.</text>
+      <text x="0" y="280" font-family="IBM Plex Sans, sans-serif" font-size="13.5" fill="var(--ink-muted)">Nothing in the release path asks what happened on BTC, so nothing in the release path can be lied to.</text>
+    </svg>
+  </div>
+  <figcaption><strong>Figure 1.</strong> Why this is the smallest option and not the largest. Options A and B keep the top row and work to make the middle box trustworthy; C removes the row.</figcaption>
+</figure>
+
+<hr class="rule">
+
+<section class="col" id="prereqs">
+  <p class="secnum">02 — Before starting</p>
+  <h2>Prerequisites that block the start</h2>
+  <p class="lede">Two of these are open pull requests and one is an open issue. None is optional, and the middle one is a genuine dependency rather than tidiness.</p>
+  <ol>
+    <li><strong>PR #137 — the build fixes.</strong> <code>main</code> does not compile: the rcgen 0.13 → 0.14 bump renamed <code>CertifiedKey::key_pair</code>. Nothing can be built or tested until this lands.</li>
+    <li><strong>PR #138 — expiry decided from block data.</strong> A real dependency. <code>HashLocked</code> refunds are the same class of height-based release that expiry currently gets wrong, gating a consensus decision on node-local state. Land the fix and its regression test first, so the correct pattern is in the tree before a second user of it arrives.</li>
+    <li><strong>Issue #141 — <code>swap_creation_open_fill</code>.</strong> The swap integration test is red. It is also the file the new end-to-end test will be built beside, so it needs to be green to be a baseline.</li>
+  </ol>
+  <div class="note">
+    <span class="label">Worth noticing</span>
+    <p>#141 fails because the test reserves a swap for a freshly generated, unfunded address, and <code>validate_swap_accept</code> requires the reserver to spend an input they own. That failing test is the same fact this whole plan rests on: a taker must already hold Coinshift coins.</p>
+  </div>
+</section>
+
+<hr class="rule">
+
+<section class="col" id="phases">
+  <p class="secnum">03 — The work</p>
+  <h2>The phases</h2>
+  <p class="lede">Ordered so that each phase compiles, is testable on its own, and does not require the next one to be useful.</p>
+</section>
+
+<div class="wide tablewrap">
+  <table>
+    <thead>
+      <tr>
+        <th scope="col">Phase</th>
+        <th scope="col">What changes</th>
+        <th scope="col">Where</th>
+        <th scope="col">Size</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <th scope="row">1 · The output type</th>
+        <td><code>Content::HashLocked { value, hash, claimant, refund_to, timeout_height }</code>, <strong>appended last</strong>, plus a discriminant-stability test</td>
+        <td><span class="mono">lib/types/transaction.rs</span></td>
+        <td>S</td>
+      </tr>
+      <tr>
+        <th scope="row">2 · Preimage carriage</th>
+        <td><code>TxData::HashLockClaim { preimage }</code>, appended last. The open design call — see §04</td>
+        <td><span class="mono">lib/types/transaction.rs</span></td>
+        <td>S</td>
+      </tr>
+      <tr>
+        <th scope="row">3 · Spend rules</th>
+        <td>Claim path (<code>sha256(preimage) == hash</code>, pays <code>claimant</code>) and refund path (<code>validating_height() &gt;= timeout_height</code>, pays <code>refund_to</code>)</td>
+        <td><span class="mono">lib/state/mod.rs:L395</span><br><span class="mono">lib/state/swap.rs</span></td>
+        <td>M</td>
+      </tr>
+      <tr>
+        <th scope="row">4 · Authorization</th>
+        <td>A two-spender output needs the address-match exemption. Factor the triplicated <code>swap_claim_pending</code> pattern rather than adding a fourth copy</td>
+        <td><span class="mono">lib/state/block.rs:L160, L611</span><br><span class="mono">lib/state/mod.rs:L480</span></td>
+        <td>S</td>
+      </tr>
+      <tr>
+        <th scope="row">5 · BTC HTLC</th>
+        <td>Build, fund, watch, claim and refund a P2WSH HTLC. <strong>Zero consensus code</strong> — the <code>bitcoin</code> crate is already a dependency</td>
+        <td><span class="mono">lib/wallet.rs</span><br>new <span class="mono">lib/htlc/</span></td>
+        <td>M</td>
+      </tr>
+      <tr>
+        <th scope="row">6 · Order flow</th>
+        <td><code>SwapCreate</code> carries <code>H</code>; <code>SwapAccept</code> keeps matching unchanged; maker bond against the free-option problem</td>
+        <td><span class="mono">lib/types/swap.rs</span><br><span class="mono">lib/state/swap.rs</span></td>
+        <td>M</td>
+      </tr>
+      <tr>
+        <th scope="row">7 · Demote the observer</th>
+        <td>Delete <code>update_swap_l1_txid</code>; <code>parent_chain_rpc.rs</code> becomes UI-only; <code>SwapState</code> becomes advisory</td>
+        <td><span class="mono">lib/parent_chain_rpc.rs</span><br><span class="mono">app/rpc_server.rs</span>, <span class="mono">rpc-api/lib.rs</span></td>
+        <td>M</td>
+      </tr>
+      <tr>
+        <th scope="row">8 · GUI and CLI</th>
+        <td>Swap creation collects a BTC key; the detail view shows both legs and both deadlines</td>
+        <td><span class="mono">app/gui/swap/</span>, <span class="mono">cli/lib.rs</span></td>
+        <td>M</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="col">
+  <div class="note">
+    <span class="label">Why phase 1 is small and phase 3 is not</span>
+    <p><code>Content</code> has 25 edges and every one of them is inside <code>lib/types/transaction.rs</code>. Adding a variant is exhaustive-match work the compiler drives: <code>DefaultRepr</code> L292, <code>HumanReadableRepr</code> L308, both <code>From</code> impls L390 and L410, <code>GetValue</code> L378, <code>schema_ref</code> L373, Borsh at L470/L481, <code>ToSchema</code> at L491/L497.</p>
+    <p>Phase 3 is where the thought goes, because it is the phase that decides who gets paid.</p>
+  </div>
+</div>
+
+<hr class="rule">
+
+<section class="col" id="pitfalls">
+  <p class="secnum">04 — Care required</p>
+  <h2>Three ways to get this wrong</h2>
+
+  <h3>Use SHA-256, not blake3</h3>
+  <p>The preimage has to satisfy Bitcoin's <code>OP_SHA256</code>. This codebase reaches for blake3 elsewhere — <code>SwapId</code> is a blake3 digest — and copying that habit here produces two locks that cannot be opened by the same secret. The swap then silently stops being atomic: each side is refundable, neither is claimable. Pin it with a test that constructs a real BTC HTLC script and checks the hash matches the L2 output's.</p>
+
+  <h3>The initiator gets the longer timeout</h3>
+  <p>The maker knows <code>s</code>, so the maker's own lock must expire <em>last</em>: <code>T_short</code> on BTC, <code>T_long</code> on Coinshift, with enough margin between them for the taker to see the reveal and act. Invert it and the maker can take the BTC and then reclaim their escrow once the taker's window has closed — a complete theft, from a two-character mistake in a constant.</p>
+  <div class="note warn">
+    <span class="label">Make the margin explicit</span>
+    <p>The gap must cover BTC confirmation latency plus L2 block time plus a safety factor, and it belongs in a named constant with the reasoning in its doc comment — not as two numbers that happen to differ.</p>
+  </div>
+
+  <h3>Append-only, as always</h3>
+  <p>Both <code>Content</code> and <code>TxData</code> are Borsh-encoded by variant index into the block body, and therefore into the merkle root. New variants go at the end. <code>ParentChainType</code> already has <code>borsh_discriminants_are_stable</code> guarding exactly this; both new enums want the same test in the same shape.</p>
+</section>
+
+<hr class="rule">
+
+<section class="col" id="tests">
+  <p class="secnum">05 — Proof</p>
+  <h2>How each phase is proved</h2>
+  <p class="lede">The current swap tests cannot distinguish a working swap from one that merely believes it worked, because the L1 side is fabricated — the integration tests fill swaps with a made-up txid. Under this design that stops being possible, and the tests get correspondingly better.</p>
+  <ul>
+    <li><strong>Phase 1–2.</strong> Borsh round-trip and discriminant stability for both enums.</li>
+    <li><strong>Phase 3.</strong> Claim with a correct preimage succeeds; with a wrong one fails; refund before <code>timeout_height</code> fails; at exactly <code>timeout_height</code> succeeds. The boundary is where this kind of rule usually breaks — <code>reservation_expiry_boundary()</code> at <span class="mono">lib/types/swap.rs:L527</span> is the pattern to copy.</li>
+    <li><strong>Phase 3, consensus parity.</strong> Two states that disagree about everything node-local must reach the same verdict on the same claim — the shape of the regression test in PR #138.</li>
+    <li><strong>Phase 5.</strong> A real regtest BTC HTLC: fund it, claim it with the preimage, and assert the secret is recoverable from the spending transaction. This is the test that proves the two legs share a hash function.</li>
+    <li><strong>End to end.</strong> Both legs on regtest, plus the two unhappy paths — the taker never pays (maker refunds), and the maker never reveals (taker refunds). Neither may lose money.</li>
+  </ul>
+</section>
+
+<hr class="rule">
+
+<section class="col" id="rollout">
+  <p class="secnum">06 — Rollout</p>
+  <h2>Getting it into the world</h2>
+  <p>This tightens consensus: a node running it will reject blocks that older nodes accept, and produce outputs older nodes cannot parse. It needs the same coordinated deployment as <code>#135</code>, and the alpha is the cheap moment to do it.</p>
+  <p>Swaps created under the old scheme have no <code>H</code> and cannot be completed under the new rules. They expire back to their creators and are recreated — the same migration story <code>SwapAccept</code> had, and the reason to do this while the number affected is small.</p>
+  <div class="note">
+    <span class="label">One documentation change ships with it</span>
+    <p>The README calls the swap system trustless. With this merged that becomes true, and the sentence can stay. Until then it should say what is actually the case, which is the one part of this plan that costs nothing and can be done today.</p>
+  </div>
+</section>
+
+</body>
+</html>
