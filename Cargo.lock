@@ -786,7 +786,7 @@ dependencies = [
  "error-fatality",
  "fallible-iterator",
  "futures",
- "hashlink 0.11.0",
+ "hashlink 0.11.1",
  "heed",
  "heed-types",
  "hex",
@@ -887,7 +887,7 @@ dependencies = [
  "base64 0.22.1",
  "bitcoin",
  "educe",
- "hashlink 0.11.0",
+ "hashlink 0.11.1",
  "hex",
  "http",
  "jsonrpsee 0.26.0",
@@ -1303,7 +1303,7 @@ dependencies = [
  "fallible-iterator",
  "futures",
  "governor",
- "hashlink 0.11.0",
+ "hashlink 0.12.1",
  "heed",
  "hex",
  "jsonrpsee 0.25.1",
@@ -1713,7 +1713,7 @@ dependencies = [
  "educe",
  "either",
  "futures",
- "hashlink 0.11.0",
+ "hashlink 0.11.1",
  "imbl",
  "indexmap 2.14.0",
  "jsonrpsee 0.26.0",
@@ -3008,6 +3008,9 @@ name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
+dependencies = [
+ "foldhash 0.2.0",
+]
 
 [[package]]
 name = "hashlink"
@@ -3020,11 +3023,21 @@ dependencies = [
 
 [[package]]
 name = "hashlink"
-version = "0.11.0"
+version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ea0b22561a9c04a7cb1a302c013e0259cd3b4bb619f145b32f72b8b4bcbed230"
+checksum = "824e001ac4f3012dd16a264bec811403a67ca9deb6c102fc5049b32c4574b35f"
 dependencies = [
  "hashbrown 0.16.1",
+ "serde",
+]
+
+[[package]]
+name = "hashlink"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32069d97bb81e38fa67eab65e3393bf804bb85969f2bc06bf13f64aef5aba248"
+dependencies = [
+ "hashbrown 0.17.1",
  "serde",
 ]
 
