@@ -361,7 +361,7 @@
   <h1>Building the Atomic Swap</h1>
   <p class="standfirst">Option C, phase by phase: what changes, in which file, in what order, and how each phase is proved before the next one starts.</p>
   <div class="meta">
-    <span><b>Status</b> ready to start</span>
+    <span><b>Status</b> phase 1 merged, phase 2 next</span>
     <span><b>Decision</b> settled — see PARENT_CHAIN_VERIFICATION §03</span>
     <span><b>Estimate</b> 2–3 weeks after prerequisites</span>
     <span><b>Deployment</b> pre-production — no fork to coordinate</span>
@@ -484,7 +484,7 @@
     </thead>
     <tbody>
       <tr>
-        <th scope="row">1 · The output type</th>
+        <th scope="row">1 · The output type <span class="mono" style="color:var(--consensus);font-weight:400">✓ done</span></th>
         <td><code>Content::HashLocked { value, hash, claimant, refund_to, timeout_height }</code>, <strong>appended last</strong>, plus a discriminant-stability test</td>
         <td><span class="mono">lib/types/transaction.rs</span></td>
         <td>S</td>
@@ -561,7 +561,11 @@
 
   <h3>Append-only — habit now, requirement later</h3>
   <p>Both <code>Content</code> and <code>TxData</code> are Borsh-encoded by variant index into the block body, and therefore into the merkle root. With no production chain, inserting a variant mid-enum would cost nothing today: there are no records written under the old numbering to misread.</p>
-  <p>Append anyway. It is free, it keeps <code>borsh_discriminants_are_stable</code> meaningful rather than something to be edited whenever it complains, and the first time it actually matters will be the first time anyone forgets it. The rule is worth having as muscle memory before it is worth having as a constraint.</p>
+  <p>Append anyway. It is free, and the first time it actually matters will be the first time someone forgets it. The rule is worth having as muscle memory before it is worth having as a constraint.</p>
+  <div class="note warn">
+    <span class="label">Correction</span>
+    <p>An earlier draft said <code>ParentChainType</code> already has a <code>borsh_discriminants_are_stable</code> test to copy. It does not — that test lives only on <code>feat/parent-chain-phase-9-docs</code> and has never been on <code>main</code>. Phase 1 therefore writes the guard rather than copying one: <code>output_content_borsh_discriminants_are_stable</code> in <span class="mono">lib/types/transaction.rs</span>, which pins each variant's index and names the consequence in its assertion message.</p>
+  </div>
 </section>
 
 <hr class="rule">
