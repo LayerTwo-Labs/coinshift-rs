@@ -233,7 +233,8 @@ impl Sidechain for PostSetup {
                 && match &utxo.output.content {
                     OutputContent::Value(utxo_value) => *utxo_value == value,
                     OutputContent::Withdrawal { .. }
-                    | OutputContent::SwapPending { .. } => false,
+                    | OutputContent::SwapPending { .. }
+                    | OutputContent::HashLocked { .. } => false,
                 }
                 && match utxo.outpoint {
                     OutPoint::Deposit(outpoint) => outpoint.txid == txid,
