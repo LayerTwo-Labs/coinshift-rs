@@ -253,7 +253,6 @@ mod tests {
                     value: bitcoin::Amount::ZERO,
                     hash: [0u8; 32],
                     claimant: Address([1u8; 20]),
-                    refund_to: Address([2u8; 20]),
                     timeout_height: 0,
                 },
                 3,
@@ -367,7 +366,6 @@ mod content {
             value: bitcoin::Amount,
             hash: [u8; 32],
             claimant: crate::types::Address,
-            refund_to: crate::types::Address,
             timeout_height: u32,
         },
     }
@@ -410,7 +408,6 @@ mod content {
             #[schema(value_type = String)]
             hash: [u8; 32],
             claimant: crate::types::Address,
-            refund_to: crate::types::Address,
             timeout_height: u32,
         },
     }
@@ -441,9 +438,14 @@ mod content {
         },
         /// Escrow for one leg of an atomic swap, spendable two ways.
         ///
-        /// `claimant` may spend it by revealing a preimage of `hash`;
-        /// `refund_to` may reclaim it once the chain reaches `timeout_height`.
-        /// Both are decided from block data alone, which is the whole point:
+        /// `claimant` may spend it by revealing a preimage of `hash`; the
+        /// output's own `Output::address` may reclaim it once the chain reaches
+        /// `timeout_height`. There is deliberately no separate `refund_to`
+        /// field — the address that authorises a refund and the address a
+        /// refund pays have to be the same one, and carrying both only creates
+        /// a way for them to disagree.
+        ///
+        /// Both paths are decided from block data alone, which is the point:
         /// completing a cross-chain swap stops requiring any node to observe
         /// the other chain (see docs/specs/ATOMIC_SWAP_PLAN.html).
         ///
@@ -455,7 +457,6 @@ mod content {
             value: bitcoin::Amount,
             hash: [u8; 32],
             claimant: crate::types::Address,
-            refund_to: crate::types::Address,
             timeout_height: u32,
         },
     }
@@ -511,13 +512,11 @@ mod content {
                     value,
                     hash,
                     claimant,
-                    refund_to,
                     timeout_height,
                 } => Self::HashLocked {
                     value,
                     hash,
                     claimant,
-                    refund_to,
                     timeout_height,
                 },
             }
@@ -544,13 +543,11 @@ mod content {
                     value,
                     hash,
                     claimant,
-                    refund_to,
                     timeout_height,
                 } => Self::HashLocked {
                     value,
                     hash,
                     claimant,
-                    refund_to,
                     timeout_height,
                 },
             }
@@ -577,13 +574,11 @@ mod content {
                     value,
                     hash,
                     claimant,
-                    refund_to,
                     timeout_height,
                 } => Self::HashLocked {
                     value,
                     hash,
                     claimant,
-                    refund_to,
                     timeout_height,
                 },
             }
@@ -610,13 +605,11 @@ mod content {
                     value,
                     hash,
                     claimant,
-                    refund_to,
                     timeout_height,
                 } => Self::HashLocked {
                     value,
                     hash,
                     claimant,
-                    refund_to,
                     timeout_height,
                 },
             }
@@ -712,6 +705,23 @@ pub enum TxData {
         /// spend an input owned by this address, which proves control of it.
         l2_claimer_address: Address,
     },
+    /// Spend a [`crate::types::OutputContent::HashLocked`] output by revealing
+    /// the secret it is locked to.
+    ///
+    /// This is the whole of the cross-chain mechanism on our side. The taker
+    /// learns `preimage` by watching the maker claim the Bitcoin leg — taking
+    /// that leg necessarily publishes it — and hands it to us here. Consensus
+    /// checks `sha256(preimage) == hash` and nothing else, so no node ever has
+    /// to observe Bitcoin, and there is no observation for anyone to lie about.
+    ///
+    /// Fixed at 32 bytes rather than a `Vec<u8>`. It is the conventional secret
+    /// size for an HTLC, a fixed width cannot be padded into a second encoding
+    /// of the same preimage, and it leaves no room to grow a transaction with
+    /// megabytes of ignored bytes.
+    ///
+    /// Must be appended last: borsh encodes the variant index, so inserting
+    /// above would renumber every variant after it.
+    HashLockClaim { preimage: [u8; 32] },
 }
 
 // Manual ToSchema implementation for TxData

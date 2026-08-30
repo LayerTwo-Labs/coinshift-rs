@@ -11,7 +11,7 @@ use crate::{
 };
 
 /// Total value of the outputs paying `recipient`.
-fn amount_paid_to(
+pub(in crate::state) fn amount_paid_to(
     transaction: &Transaction,
     recipient: &Address,
 ) -> Result<bitcoin::Amount, Error> {
@@ -497,15 +497,38 @@ pub fn validate_block_transaction(
 ) -> Result<(), Error> {
     match &transaction.data {
         TxData::SwapCreate { .. } => {
+            crate::state::hash_lock::reject_hash_locked_inputs(
+                filled_transaction,
+            )?;
             validate_swap_create(state, rotxn, transaction, filled_transaction)
         }
         TxData::SwapClaim { .. } => {
+            crate::state::hash_lock::reject_hash_locked_inputs(
+                filled_transaction,
+            )?;
             validate_swap_claim_consensus(state, rotxn, transaction)
         }
         TxData::SwapAccept { .. } => {
+            crate::state::hash_lock::reject_hash_locked_inputs(
+                filled_transaction,
+            )?;
             validate_swap_accept(state, rotxn, transaction, filled_transaction)
         }
+        TxData::HashLockClaim { .. } => {
+            crate::state::hash_lock::validate_hash_lock_claim(
+                transaction,
+                filled_transaction,
+            )
+        }
         TxData::Regular => {
+            // An ordinary transaction may reclaim a hash lock once it has timed
+            // out; anything else it spends is governed as before.
+            crate::state::hash_lock::validate_hash_lock_refund(
+                state,
+                rotxn,
+                transaction,
+                filled_transaction,
+            )?;
             validate_no_locked_outputs(state, rotxn, transaction)
         }
     }

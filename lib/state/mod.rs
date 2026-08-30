@@ -29,6 +29,7 @@ use crate::{
 
 mod block;
 mod error;
+mod hash_lock;
 mod rollback;
 mod swap;
 mod two_way_peg_data;
@@ -156,6 +157,32 @@ pub struct State {
     pub swap_reservations:
         DatabaseUnique<SerdeBincode<SwapId>, SerdeBincode<SwapReservation>>,
     _version: DatabaseUnique<UnitKey, SerdeBincode<Version>>,
+}
+
+/// Input positions exempt from "the authorization must match the spent output's
+/// address".
+///
+/// Two transaction kinds legitimately spend outputs their signer does not own,
+/// because a dedicated validator has already decided who is entitled to the
+/// value:
+///
+/// - `SwapClaim` spends the creator's `SwapPending` escrow, and
+///   `validate_swap_claim_consensus` decides who it must be paid to.
+/// - `HashLockClaim` spends a `HashLocked` output, and `hash_lock` requires a
+///   preimage of the committed hash plus payment to the named claimant.
+///
+/// This rule was open-coded in three places, which is two more than a consensus
+/// rule of this shape should live in — a fourth spender type is the moment to
+/// stop copying it.
+pub(in crate::state) fn address_check_is_exempt(
+    data: &TxData,
+    spent_utxo: &crate::types::Output,
+) -> bool {
+    match data {
+        TxData::SwapClaim { .. } => spent_utxo.content.is_swap_pending(),
+        TxData::HashLockClaim { .. } => spent_utxo.content.is_hash_locked(),
+        _ => false,
+    }
 }
 
 impl State {
@@ -454,7 +481,20 @@ impl State {
                     &filled_transaction,
                 )?;
             }
+            TxData::HashLockClaim { .. } => {
+                hash_lock::validate_hash_lock_claim(
+                    &transaction.transaction,
+                    &filled_transaction,
+                )?;
+            }
             TxData::Regular => {
+                // An ordinary transaction may reclaim a timed-out hash lock.
+                hash_lock::validate_hash_lock_refund(
+                    self,
+                    rotxn,
+                    &transaction.transaction,
+                    &filled_transaction,
+                )?;
                 // Validate that regular transactions don't spend locked outputs
                 swap::validate_no_locked_outputs(
                     self,
@@ -464,20 +504,15 @@ impl State {
             }
         }
 
-        let is_swap_claim =
-            matches!(transaction.transaction.data, TxData::SwapClaim { .. });
         for (authorization, spent_utxo) in transaction
             .authorizations
             .iter()
             .zip(filled_transaction.spent_utxos.iter())
         {
-            // For SwapClaim transactions, SwapPending inputs are owned by
-            // the swap creator but spent by the claimer.  The swap
-            // validation (validate_swap_claim) already ensures the claim
-            // is legitimate (ReadyToClaim, correct recipient, locked
-            // output), so we skip the address-matching check for those
-            // inputs.
-            if is_swap_claim && spent_utxo.content.is_swap_pending() {
+            if address_check_is_exempt(
+                &transaction.transaction.data,
+                spent_utxo,
+            ) {
                 continue;
             }
             if authorization.get_address() != spent_utxo.address {
@@ -2009,7 +2044,9 @@ impl State {
                             );
                         }
                     }
-                    TxData::Regular => {}
+                    // A hash-lock claim moves value through the UTXO set and touches
+                    // no swap record, so connect/disconnect have nothing to do for it.
+                    TxData::HashLockClaim { .. } | TxData::Regular => {}
                 }
             }
 
