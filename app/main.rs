@@ -223,6 +223,11 @@ fn write_l1_config_from_flags(
 }
 
 fn main() -> anyhow::Result<()> {
+    // Pick the TLS backend before anything can build a config with it. See
+    // `coinshift::install_default_crypto_provider`: without this the node
+    // panics in `make_server_endpoint` whenever the build graph happens to
+    // contain a second rustls provider.
+    coinshift::install_default_crypto_provider();
     // Configure the allocator before Tokio spins up worker threads.
     configure_mimalloc();
     let cli = cli::Cli::parse();

@@ -115,7 +115,7 @@ fn configure_client()
 fn configure_server() -> Result<(ServerConfig, Vec<u8>), Error> {
     let cert_key =
         rcgen::generate_simple_self_signed(vec!["localhost".into()])?;
-    let keypair_der = cert_key.key_pair.serialize_der();
+    let keypair_der = cert_key.signing_key.serialize_der();
     let priv_key = rustls::pki_types::PrivateKeyDer::Pkcs8(keypair_der.into());
     let cert_der = cert_key.cert.der().to_vec();
     let cert_chain = vec![cert_key.cert.into()];
@@ -581,5 +581,36 @@ impl Net {
                     tracing::warn!("Failed to push tx {txid} to peer at {addr}")
                 }
             })
+    }
+}
+
+#[cfg(test)]
+mod crypto_provider_tests {
+    use super::{configure_client, configure_server};
+
+    /// Building the QUIC TLS configs must not panic.
+    ///
+    /// Both build their rustls config from the *process-level* provider. When
+    /// the build graph offers more than one — which it does whenever
+    /// `integration_tests` is compiled, because `bdk_electrum` pulls in
+    /// `aws-lc-rs` alongside our `ring` — rustls refuses to choose and panics
+    /// here, at node startup, from a workspace that built without a single
+    /// warning.
+    ///
+    /// [`crate::install_default_crypto_provider`] is what settles it, and every
+    /// binary calls it first thing in `main`. This test pins that arrangement:
+    /// drop the call and this panics, rather than the node doing it in front of
+    /// an operator a release later.
+    ///
+    /// The endpoint itself is not built here — `quinn::Endpoint::server` wants
+    /// a Tokio reactor, and everything this is about happens before that.
+    #[test]
+    fn tls_configs_build_once_a_provider_is_installed() {
+        crate::install_default_crypto_provider();
+        let (_server_config, cert) =
+            configure_server().expect("server config should build");
+        assert!(!cert.is_empty(), "server config should yield a certificate");
+        let _client_config =
+            configure_client().expect("client config should build");
     }
 }
