@@ -450,6 +450,76 @@ mod tests {
         assert!(reject_hash_locked_inputs(&plain).is_ok());
     }
 
+    /// The atomicity property, end to end across both layers: a secret that
+    /// opens the Bitcoin leg must open the Coinshift leg, and one that opens
+    /// neither must open neither.
+    ///
+    /// This is the test that would have caught a blake3 commitment. The two
+    /// halves live in different modules and are written at different layers —
+    /// `htlc` builds a Bitcoin script, `hash_lock` validates an L2 transaction
+    /// — so nothing but a test that spans them can notice they have drifted
+    /// apart. And the failure mode if they do is not an error: both legs simply
+    /// become unclaimable and refund, which looks like bad luck rather than a
+    /// bug.
+    #[test]
+    fn a_secret_that_opens_the_bitcoin_leg_opens_ours() {
+        use crate::htlc::{HtlcParams, Secret};
+
+        let secret = Secret::from_bytes(SECRET);
+        let secp = bitcoin::secp256k1::Secp256k1::new();
+        let key = |byte: u8| {
+            let sk =
+                bitcoin::secp256k1::SecretKey::from_slice(&[byte; 32]).unwrap();
+            bitcoin::PublicKey::new(sk.public_key(&secp))
+        };
+
+        // The Bitcoin leg the taker funds.
+        let htlc = HtlcParams {
+            hash: secret.hash(),
+            claim_pubkey: key(1),
+            refund_pubkey: key(2),
+            timeout_height: 800_100,
+        };
+
+        // The Coinshift leg the maker locks, committing to the same value.
+        let (owner, claimant) = (Address([1u8; 20]), Address([2u8; 20]));
+        let locked = Output {
+            address: owner,
+            content: OutputContent::HashLocked {
+                value: sat(50_000),
+                hash: htlc.hash,
+                claimant,
+                timeout_height: 200,
+            },
+        };
+
+        let tx = tx_paying(
+            TxData::HashLockClaim {
+                preimage: *secret.as_bytes(),
+            },
+            claimant,
+            50_000,
+        );
+        assert!(
+            validate_hash_lock_claim(&tx, &filled(&tx, vec![locked.clone()]))
+                .is_ok(),
+            "the secret committed in the Bitcoin script must open our lock"
+        );
+
+        let wrong = tx_paying(
+            TxData::HashLockClaim {
+                preimage: [0xFFu8; 32],
+            },
+            claimant,
+            50_000,
+        );
+        assert!(
+            validate_hash_lock_claim(&wrong, &filled(&wrong, vec![locked]))
+                .is_err(),
+            "and nothing else may"
+        );
+    }
+
     /// The one that would silently break atomicity: our lock and the Bitcoin
     /// HTLC must agree on the hash function. Bitcoin's OP_SHA256 is SHA-256,
     /// and this codebase reaches for blake3 elsewhere.

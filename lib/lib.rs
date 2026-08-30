@@ -32,6 +32,7 @@ pub fn install_default_crypto_provider() {
 
 pub mod archive;
 pub mod authorization;
+pub mod htlc;
 pub mod mempool;
 pub mod miner;
 pub mod net;
