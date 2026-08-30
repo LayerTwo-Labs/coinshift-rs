@@ -374,17 +374,50 @@
   @media (prefers-reduced-motion: reduce) {
     * { animation: none !important; transition: none !important; }
   }
+
+
+  /* ---- shared document nav — keep identical across the three protocol docs ---- */
+  nav.docnav {
+    max-width: var(--figure-w);
+    margin: 0 auto;
+    padding: 20px 0 0;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 6px 18px;
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 12.5px;
+  }
+  nav.docnav a {
+    color: var(--ink-faint);
+    text-decoration: none;
+    padding-bottom: 2px;
+    border-bottom: 1px solid transparent;
+  }
+  nav.docnav a:hover { color: var(--consensus); border-bottom-color: var(--consensus); }
+  nav.docnav a:focus-visible { outline: 2px solid var(--consensus); outline-offset: 3px; }
+  nav.docnav a[aria-current="page"] { color: var(--ink); border-bottom-color: var(--consensus); }
+  nav.docnav .sep { color: var(--rule); }
 </style>
 
 </head>
 <body>
+<nav class="docnav" aria-label="Protocol documents">
+  <a href="../index.html">All docs</a>
+  <span class="sep" aria-hidden="true">/</span>
+  <a href="SWAP_MECHANICS.html">Swap Mechanics</a>
+  <a href="L1_PAYMENT_PROOFS.html" aria-current="page">L1 Payment Proofs</a>
+  <a href="PARENT_CHAIN_VERIFICATION.html">Proving the Parent Chain</a>
+</nav>
+
+
 <header class="masthead">
   <p class="eyebrow">coinshift-rs · spec · for decision</p>
   <h1>L1 Payment Proofs</h1>
   <p class="standfirst">Making the parent-chain half of a swap something every node checks, instead of something each node takes on faith.</p>
   <div class="meta">
     <span><b>status</b> proposal, not implemented</span>
-    <span><b>extends</b> <a href="../SWAP_MECHANICS.html">SWAP_MECHANICS.html</a></span>
+    <span><b>extends</b> <a href="SWAP_MECHANICS.html">SWAP_MECHANICS.html</a></span>
     <span><b>decision</b> scope — see §7</span>
   </div>
 </header>
@@ -678,7 +711,7 @@
 </main>
 
 <footer>
-  coinshift-rs · spec, not implemented · extends docs/SWAP_MECHANICS.html<br>
+  coinshift-rs · spec, not implemented · extends docs/specs/SWAP_MECHANICS.html<br>
   Recommendation: Option B. Awaiting a scope decision before any code is written.
 </footer>
 

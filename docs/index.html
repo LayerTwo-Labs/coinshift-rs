@@ -1,0 +1,315 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Coinshift Docs</title>
+<meta name="description" content="Index of the Coinshift documentation: protocol documents, operational guides, and what lives on which branch.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Spectral:ital,wght@0,600;0,700;1,400&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+
+<style>
+  :root {
+    --ground:      #F4F7F6;
+    --surface:     #FFFFFF;
+    --ink:         #0F1719;
+    --ink-muted:   #55666B;
+    --ink-faint:   #7C8D92;
+    --rule:        #D5DEDC;
+    --rule-soft:   #E4EBE9;
+    --consensus:   #0E6F68;
+    --local:       #A25A12;
+    --danger:      #A32E23;
+    --tint:        #E1EDEA;
+    --tint-local:  #F6EBDA;
+
+    --measure: 68ch;
+    --figure-w: 1080px;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:      #0B1214;
+      --surface:     #111A1C;
+      --ink:         #E2EAE9;
+      --ink-muted:   #93A5A8;
+      --ink-faint:   #6E8185;
+      --rule:        #223034;
+      --rule-soft:   #1A2528;
+      --consensus:   #4FD8C9;
+      --local:       #E8A845;
+      --danger:      #F0776C;
+      --tint:        #13282A;
+      --tint-local:  #2A2113;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ground:      #0B1214;
+    --surface:     #111A1C;
+    --ink:         #E2EAE9;
+    --ink-muted:   #93A5A8;
+    --ink-faint:   #6E8185;
+    --rule:        #223034;
+    --rule-soft:   #1A2528;
+    --consensus:   #4FD8C9;
+    --local:       #E8A845;
+    --danger:      #F0776C;
+    --tint:        #13282A;
+    --tint-local:  #2A2113;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+    font-size: 17px;
+    line-height: 1.65;
+    margin: 0;
+    padding: 0 24px 110px;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap { max-width: var(--figure-w); margin-inline: auto; }
+
+  header.masthead {
+    padding: 80px 0 36px;
+    border-bottom: 1px solid var(--rule);
+  }
+
+  .eyebrow {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 12px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--consensus);
+    margin: 0 0 18px;
+  }
+
+  h1 {
+    font-family: Spectral, Georgia, serif;
+    font-weight: 700;
+    font-size: clamp(36px, 5.5vw, 54px);
+    line-height: 1.05;
+    letter-spacing: -0.02em;
+    margin: 0 0 18px;
+  }
+
+  .standfirst {
+    font-family: Spectral, Georgia, serif;
+    font-size: clamp(18px, 2.2vw, 22px);
+    font-style: italic;
+    line-height: 1.5;
+    color: var(--ink-muted);
+    max-width: 60ch;
+    margin: 0;
+    text-wrap: pretty;
+  }
+
+  section { padding-top: 60px; }
+
+  h2 {
+    font-family: Spectral, Georgia, serif;
+    font-weight: 600;
+    font-size: clamp(23px, 3vw, 29px);
+    line-height: 1.2;
+    margin: 0 0 6px;
+  }
+
+  .sectionnote {
+    color: var(--ink-muted);
+    max-width: var(--measure);
+    margin: 0 0 26px;
+  }
+
+  .grid { display: grid; gap: 14px; grid-template-columns: 1fr; }
+  @media (min-width: 760px) { .grid.two { grid-template-columns: 1fr 1fr; } }
+
+  a.card {
+    display: block;
+    padding: 20px 22px;
+    border: 1px solid var(--rule);
+    border-radius: 6px;
+    background: var(--surface);
+    text-decoration: none;
+    color: inherit;
+    transition: border-color .12s ease, transform .12s ease;
+  }
+  a.card:hover { border-color: var(--consensus); transform: translateY(-1px); }
+  a.card:focus-visible { outline: 2px solid var(--consensus); outline-offset: 3px; }
+  @media (prefers-reduced-motion: reduce) {
+    a.card { transition: none; }
+    a.card:hover { transform: none; }
+  }
+
+  a.card .name {
+    font-family: Spectral, Georgia, serif;
+    font-size: 21px;
+    font-weight: 600;
+    line-height: 1.25;
+    display: block;
+    margin-bottom: 4px;
+  }
+  a.card .path {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 12px;
+    color: var(--ink-faint);
+    display: block;
+    margin-bottom: 10px;
+    word-break: break-all;
+  }
+  a.card .blurb {
+    font-size: 15.5px;
+    line-height: 1.55;
+    color: var(--ink-muted);
+    margin: 0;
+  }
+
+  .tag {
+    display: inline-block;
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 2px 8px;
+    border-radius: 100px;
+    background: var(--tint);
+    color: var(--consensus);
+    margin-left: 8px;
+    vertical-align: 2px;
+  }
+  .tag.decide { background: var(--tint-local); color: var(--local); }
+
+  ul.plain { list-style: none; padding: 0; margin: 0; display: grid; gap: 2px; }
+  ul.plain li {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 4px 14px;
+    padding: 11px 2px;
+    border-bottom: 1px solid var(--rule-soft);
+  }
+  ul.plain a {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 14px;
+    color: var(--ink);
+    text-decoration: none;
+    border-bottom: 1px solid var(--rule);
+  }
+  ul.plain a:hover { color: var(--consensus); border-bottom-color: var(--consensus); }
+  ul.plain a:focus-visible { outline: 2px solid var(--consensus); outline-offset: 3px; }
+  ul.plain .blurb { color: var(--ink-muted); font-size: 15px; }
+
+  .note {
+    border-left: 3px solid var(--local);
+    background: var(--tint-local);
+    padding: 16px 20px;
+    border-radius: 0 4px 4px 0;
+    max-width: var(--measure);
+    margin: 0;
+  }
+  .note .label {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 11.5px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--local);
+    display: block;
+    margin-bottom: 6px;
+  }
+  .note p { margin: 0; }
+  .note code {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 0.88em;
+    background: var(--surface);
+    padding: 1px 5px;
+    border-radius: 3px;
+  }
+
+  footer {
+    margin-top: 70px;
+    padding-top: 22px;
+    border-top: 1px solid var(--rule);
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 12.5px;
+    color: var(--ink-faint);
+  }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+
+<header class="masthead">
+  <p class="eyebrow">coinshift-rs</p>
+  <h1>Documentation</h1>
+  <p class="standfirst">Protocol documents explain how the thing works and why. Guides get it running. Start with whichever question you actually have.</p>
+</header>
+
+<section>
+  <h2>Protocol documents</h2>
+  <p class="sectionnote">Long-form, illustrated, and the place where design decisions are argued out. Read them in this order if you are new.</p>
+  <div class="grid two">
+    <a class="card" href="specs/SWAP_MECHANICS.html">
+      <span class="name">Swap Mechanics</span>
+      <span class="path">docs/specs/SWAP_MECHANICS.html</span>
+      <p class="blurb">How an L2 ↔ L1 swap works end to end. The boundary between block data and node-local observation, why there are two claim validators, and what the L1 leg still takes on faith.</p>
+    </a>
+    <a class="card" href="specs/L1_PAYMENT_PROOFS.html">
+      <span class="name">L1 Payment Proofs<span class="tag">proposal</span></span>
+      <span class="path">docs/specs/L1_PAYMENT_PROOFS.html</span>
+      <p class="blurb">Making the parent-chain half of a swap something every node checks rather than something each node takes on faith. Proof-carrying claims, a deterministic depth anchor, and three scope options.</p>
+    </a>
+    <a class="card" href="specs/PARENT_CHAIN_VERIFICATION.html">
+      <span class="name">Proving the Parent Chain<span class="tag decide">for decision</span></span>
+      <span class="path">docs/specs/PARENT_CHAIN_VERIFICATION.html</span>
+      <p class="blurb">Four ways to close the L1 gap for a BTC parent chain, given that our mainchain is eCash. Sequence diagrams for each, what they cost, and the one product question that decides between them.</p>
+    </a>
+    <a class="card" href="specs/swap-implementation-spec.md">
+      <span class="name">Swap Implementation Spec</span>
+      <span class="path">docs/specs/swap-implementation-spec.md</span>
+      <p class="blurb">The original written specification for the swap subsystem: types, states, and the RPC surface.</p>
+    </a>
+  </div>
+</section>
+
+<section>
+  <h2>Architecture</h2>
+  <ul class="plain">
+    <li><a href="COINSHIFT_HOW_IT_WORKS.md">COINSHIFT_HOW_IT_WORKS.md</a><span class="blurb">Architecture and swap flow, in prose.</span></li>
+    <li><a href="ADDING_PARENT_CHAINS.md">ADDING_PARENT_CHAINS.md</a><span class="blurb">Supported L1 chains, and what adding one actually requires.</span></li>
+  </ul>
+</section>
+
+<section>
+  <h2>Running it</h2>
+  <ul class="plain">
+    <li><a href="SETUP_ORDER.md">SETUP_ORDER.md</a><span class="blurb">Step-by-step regtest setup: mainchain, enforcer, wallets, mining.</span></li>
+    <li><a href="SETUP_COMMANDS.md">SETUP_COMMANDS.md</a><span class="blurb">Copy-paste commands for signet and regtest.</span></li>
+    <li><a href="MANUAL_SETUP_SWAP_REGTEST.md">MANUAL_SETUP_SWAP_REGTEST.md</a><span class="blurb">A manual regtest swap, walked through as Alice and Bob.</span></li>
+    <li><a href="ENFORCER_WALLET_GUIDE.md">ENFORCER_WALLET_GUIDE.md</a><span class="blurb">Creating and using the enforcer wallet.</span></li>
+    <li><a href="create_sidechain_proposal.json">create_sidechain_proposal.json</a><span class="blurb">Sidechain proposal payload used during setup.</span></li>
+  </ul>
+</section>
+
+<section>
+  <h2>Not on this branch</h2>
+  <p class="sectionnote">Documents that exist elsewhere in the repository. Listed so they are findable rather than rediscovered.</p>
+  <div class="note">
+    <span class="label">branch: feat/parent-chain-phase-9-docs</span>
+    <p><code>docs/PARENT_CHAIN_ROADMAP.md</code> — the parent-chain abstraction work phase by phase, with its own risk register. <code>docs/OPERATIONS.md</code> — what has to be running, what degrades when it is not, and how to tell which. Both arrive on <code>main</code> when that branch is rebased and merged.</p>
+  </div>
+</section>
+
+<footer>
+  Every document here is plain HTML or Markdown — open them directly, no build step.<br>
+  The three protocol documents share one stylesheet convention: teal is block data, amber is node-local, red is a failure path.
+</footer>
+
+</div>
+
+</body>
+</html>
