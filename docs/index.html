@@ -242,11 +242,11 @@
 </header>
 
 <section>
-  <h2>What we are building next</h2>
+  <h2>What we are building</h2>
   <p class="sectionnote">One decision drove the current work, and it gates the security of every swap.</p>
   <div class="callout">
-    <p class="callout-lead">The BTC leg of a swap is not checked by consensus, so a miner can take an escrow without paying. The fix is <strong>atomic swaps</strong> — settled, because a taker must already hold Coinshift outputs to reserve a swap, which rules out the header-relay alternative on the facts.</p>
-    <p class="callout-sub"><a href="specs/ATOMIC_SWAP_PLAN.html">The execution plan →</a> &nbsp;·&nbsp; <a href="specs/PARENT_CHAIN_VERIFICATION.html#codesays">why the other options are out →</a></p>
+    <p class="callout-lead">The BTC leg of a swap was not checked by consensus, so a miner could take an escrow without paying. The fix is <strong>atomic swaps</strong>, and the Coinshift half of one now works end to end on regtest — lock, claim, refund, and the two refusals that matter.</p>
+    <p class="callout-sub"><a href="specs/ATOMIC_SWAP_PLAN.html#runit">Run it yourself →</a> &nbsp;·&nbsp; <a href="specs/ATOMIC_SWAP_PLAN.html">the plan and what it caught →</a> &nbsp;·&nbsp; <a href="specs/PARENT_CHAIN_VERIFICATION.html#codesays">why the other options are out →</a></p>
   </div>
 </section>
 
@@ -270,9 +270,9 @@
       <p class="blurb">Four ways to close the L1 gap for a BTC parent chain, given that our mainchain is eCash. Sequence diagrams for each, what they cost, and why the code itself rules out three of them.</p>
     </a>
     <a class="card" href="specs/ATOMIC_SWAP_PLAN.html">
-      <span class="name">Building the Atomic Swap<span class="tag">plan</span></span>
+      <span class="name">Building the Atomic Swap<span class="tag">plan + runbook</span></span>
       <span class="path">docs/specs/ATOMIC_SWAP_PLAN.html</span>
-      <p class="blurb">The execution plan for the decision above: eight phases, what changes in which file, the three ways to get it wrong, and how each phase is proved before the next begins.</p>
+      <p class="blurb">The execution plan for the decision above, plus a runbook: how to run the end-to-end test and drive a hash lock by hand, and the two real bugs that test caught on its first run.</p>
     </a>
     <a class="card" href="specs/swap-implementation-spec.md">
       <span class="name">Swap Implementation Spec</span>

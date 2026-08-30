@@ -361,7 +361,7 @@
   <h1>Building the Atomic Swap</h1>
   <p class="standfirst">Option C, phase by phase: what changes, in which file, in what order, and how each phase is proved before the next one starts.</p>
   <div class="meta">
-    <span><b>Status</b> phase 1 merged, phase 2 next</span>
+    <span><b>Status</b> phases 1–5 built, Coinshift leg green on regtest</span>
     <span><b>Decision</b> settled — see PARENT_CHAIN_VERIFICATION §03</span>
     <span><b>Estimate</b> 2–3 weeks after prerequisites</span>
     <span><b>Deployment</b> pre-production — no fork to coordinate</span>
@@ -381,6 +381,8 @@
     <li><a href="#phases">The phases</a></li>
     <li><a href="#pitfalls">Three ways to get this wrong</a></li>
     <li><a href="#tests">How each phase is proved</a></li>
+    <li><a href="#runit">Running it yourself</a></li>
+    <li><a href="#found">What the test found</a></li>
     <li><a href="#rollout">Rollout</a></li>
   </ol>
 </nav>
@@ -490,25 +492,25 @@
         <td>S</td>
       </tr>
       <tr>
-        <th scope="row">2 · Preimage carriage</th>
+        <th scope="row">2 · Preimage carriage <span class="mono" style="color:var(--consensus);font-weight:400">✓ done</span></th>
         <td><code>TxData::HashLockClaim { preimage }</code>, appended last. The open design call — see §04</td>
         <td><span class="mono">lib/types/transaction.rs</span></td>
         <td>S</td>
       </tr>
       <tr>
-        <th scope="row">3 · Spend rules</th>
+        <th scope="row">3 · Spend rules <span class="mono" style="color:var(--consensus);font-weight:400">✓ done</span></th>
         <td>Claim path (<code>sha256(preimage) == hash</code>, pays <code>claimant</code>) and refund path (<code>validating_height() &gt;= timeout_height</code>, pays <code>refund_to</code>)</td>
         <td><span class="mono">lib/state/mod.rs:L395</span><br><span class="mono">lib/state/swap.rs</span></td>
         <td>M</td>
       </tr>
       <tr>
-        <th scope="row">4 · Authorization</th>
+        <th scope="row">4 · Authorization <span class="mono" style="color:var(--consensus);font-weight:400">✓ done</span></th>
         <td>A two-spender output needs the address-match exemption. Factor the triplicated <code>swap_claim_pending</code> pattern rather than adding a fourth copy</td>
         <td><span class="mono">lib/state/block.rs:L160, L611</span><br><span class="mono">lib/state/mod.rs:L480</span></td>
         <td>S</td>
       </tr>
       <tr>
-        <th scope="row">5 · BTC HTLC</th>
+        <th scope="row">5 · BTC HTLC <span class="mono" style="color:var(--consensus);font-weight:400">✓ done</span></th>
         <td>Build, fund, watch, claim and refund a P2WSH HTLC. <strong>Zero consensus code</strong> — the <code>bitcoin</code> crate is already a dependency</td>
         <td><span class="mono">lib/wallet.rs</span><br>new <span class="mono">lib/htlc/</span></td>
         <td>M</td>
@@ -585,8 +587,89 @@
 
 <hr class="rule">
 
+<section class="col" id="runit">
+  <p class="secnum">06 — Try it</p>
+  <h2>Running it yourself</h2>
+  <p class="lede">Two ways in: the automated end-to-end test, or the CLI by hand. The test is the faster answer to "does this work"; the CLI is how you get a feel for the shape of a swap.</p>
+
+  <h3>The end-to-end test</h3>
+  <p>One command, about forty seconds once the dependencies are built. It stands up a real regtest stack — bitcoind, the BIP300 enforcer, electrs, a Coinshift node — locks an escrow, claims it with the secret, then locks a second one and refunds it past its deadline.</p>
+  <pre class="codeblock"><code>scripts/run_integration_tests.sh --tests hash_lock_lifecycle</code></pre>
+  <p>Expect <code>test hash_lock_lifecycle ... ok</code>. The first run compiles the enforcer and electrs from source and takes several minutes; after that they are cached and it is quick.</p>
+  <div class="note warn">
+    <span class="label">If it dies with "unexpected argument"</span>
+    <p><code>error: unexpected argument '--serve-json-rpc-addr' found</code> means you are on a branch without the runner fix. The suite downloads the published <em>latest</em> enforcer while the test harness is pinned to <code>a9ca43d</code>, the two disagree on the CLI, and nothing runs at all. Fixed on this branch and in isolation as a one-file change against <code>main</code>.</p>
+  </div>
+
+  <h3>By hand, with the CLI</h3>
+  <p>The node needs the enforcer running, so bring up the regtest stack first (<span class="mono">docs/SETUP_ORDER.md</span>). Then, with <code>C="coinshift_app_cli --rpc-url http://127.0.0.1:6255"</code>:</p>
+
+  <p><strong>1. Generate the secret and the Bitcoin contract it commits to.</strong> Keep the secret; publish nothing but the commitment until you are ready to claim.</p>
+  <pre class="codeblock"><code>$C new-swap-secret \
+    --claim-pubkey &lt;taker btc pubkey&gt; \
+    --refund-pubkey &lt;taker btc pubkey for refund&gt; \
+    --bitcoin-timeout-height &lt;btc height&gt; --network regtest</code></pre>
+  <p>You get back <code>secret_hex</code>, <code>commitment_hex</code>, the P2WSH <code>bitcoin_address</code> the taker funds, and <code>witness_script_hex</code>. Check that script independently — nothing here asks you to take our word for it:</p>
+  <pre class="codeblock"><code>bitcoin-cli decodescript &lt;witness_script_hex&gt;</code></pre>
+
+  <p><strong>2. Get a safe deadline pair.</strong> This derives the Coinshift deadline rather than letting you pick both, because the party holding the secret has to expire last and an argument list is an easy place to swap two numbers.</p>
+  <pre class="codeblock"><code>$C suggest-swap-deadlines --bitcoin-height &lt;btc tip&gt; --bitcoin-blocks 100</code></pre>
+
+  <p><strong>3. Lock the Coinshift leg</strong>, then mine a block.</p>
+  <pre class="codeblock"><code>$C create-hash-lock \
+    --value-sats 5000000 \
+    --commitment-hex &lt;commitment&gt; \
+    --claimant &lt;taker L2 address&gt; \
+    --timeout-height &lt;coinshift_timeout&gt; \
+    --fee-sats 1000</code></pre>
+
+  <p><strong>4. See it</strong>, including whether its deadline has passed:</p>
+  <pre class="codeblock"><code>$C list-hash-locks</code></pre>
+
+  <p><strong>5a. Claim</strong> — the taker, holding the secret:</p>
+  <pre class="codeblock"><code>$C claim-hash-lock &lt;txid&gt; &lt;vout&gt; --secret-hex &lt;secret&gt; --fee-sats 1000</code></pre>
+  <p><strong>5b. Or refund</strong> — the maker, once <code>refundable_now</code> is true:</p>
+  <pre class="codeblock"><code>$C refund-hash-lock &lt;txid&gt; &lt;vout&gt; --fee-sats 1000</code></pre>
+
+  <div class="note">
+    <span class="label">Worth trying the failures too</span>
+    <p>Claim with the wrong secret, or refund before the deadline. Both are refused, and those refusals are the actual product — a system that pays out correctly but also pays out incorrectly is not a swap system. The test asserts both.</p>
+  </div>
+
+  <div class="note local">
+    <span class="label">What you cannot do yet</span>
+    <p>Run a real cross-chain swap. The Bitcoin script and address are built and checkable, but nothing funds or spends the Bitcoin leg — that needs key management and an RPC backend. So today you can exercise the Coinshift half completely and inspect the Bitcoin half, which is enough to see the mechanism but not to move BTC.</p>
+  </div>
+</section>
+
+<hr class="rule">
+
+<section class="col" id="found">
+  <p class="secnum">07 — What it caught</p>
+  <h2>What the test found</h2>
+  <p class="lede">It failed on its first real run, twice, and both were genuine bugs rather than test problems. Recorded because the shape of them is instructive.</p>
+
+  <h3>A claim could not pay a fee</h3>
+  <p>The rule requires the claimant to be paid the lock's value in full; the wallet took the fee out of that payout. Every claim with a non-zero fee was rejected.</p>
+  <p>The rule was right and the wallet was wrong. The claim path is exempt from the address check, so paying the claimant in full is the only thing standing between the secret and the money — it cannot be relaxed to make room for a fee. The claimer now brings an ordinary coin of their own, which is how claiming a Bitcoin HTLC works too.</p>
+
+  <h3>The refund rule was redundant, and the redundancy cost money</h3>
+  <p>Refunds were required to pay the output's own address. But the refund path takes <em>no</em> authorization exemption — <code>Output::address</code> signs for it like any ordinary coin — so only the owner could ever spend it, and where they then send their own money is not consensus's business.</p>
+  <p>The rule added nothing, and by demanding payment in full it left no room for a fee either, so every refund the wallet built was rejected as well. The only rule now is the deadline.</p>
+  <div class="note">
+    <span class="label">The test that replaced it</span>
+    <p>Deleting a rule needs the property that made it safe pinned in its place. <code>the_refund_path_is_not_exempt_from_the_address_check</code> asserts that refunds are not exempt and claims are. If that exemption ever grows to cover refunds, the payout rule has to come back — and this is what fails first.</p>
+  </div>
+
+  <h3>The lesson worth keeping</h3>
+  <p>Both bugs had reasoning written next to them explaining why they were correct. One commit message argued at length that taking the fee from the payout was safe "so no payee is silently underpaid". It was simply wrong, and no amount of re-reading would have found it. A regtest run found both in forty seconds.</p>
+  <p>Which is also the argument for the runner fix: while the suite could not start, none of this was findable. Two real bugs sat behind a harness that died before running anything.</p>
+</section>
+
+<hr class="rule">
+
 <section class="col" id="rollout">
-  <p class="secnum">06 — Rollout</p>
+  <p class="secnum">08 — Rollout</p>
   <h2>Getting it into the world</h2>
   <p class="lede">Nothing is in production, so this ships as an ordinary change rather than a fork. That is the single biggest thing working in this plan's favour, and it has a shelf life.</p>
   <p>The three consensus changes queued up — the expiry fix in <code>#138</code>, the <code>SwapAccept</code> binding already merged in <code>#135</code>, and this one — would each need a coordinated deployment against a live chain. Against no chain they need a merge and a rebuilt regtest. Landing them now costs a fraction of what landing them later will.</p>
