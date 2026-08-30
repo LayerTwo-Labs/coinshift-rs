@@ -7,6 +7,7 @@ use tracing_subscriber::{filter as tracing_filter, layer::SubscriberExt};
 
 mod block_template;
 mod confirmations_block_inclusion;
+mod hash_lock_lifecycle;
 mod ibd;
 mod integration_test;
 mod l1_rpc_dependency;

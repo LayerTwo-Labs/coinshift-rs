@@ -20,6 +20,48 @@ use utoipa::ToSchema;
 
 mod schema;
 
+/// A fresh swap secret, and the Bitcoin contract it commits to.
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct SwapSecretResponse {
+    /// Keep this. Anyone who learns it before the Bitcoin leg is claimed can
+    /// take that leg.
+    pub secret_hex: String,
+    /// SHA-256 of the secret. This is what both legs commit to, and it is safe
+    /// to publish.
+    pub commitment_hex: String,
+    /// The P2WSH address the taker funds on Bitcoin.
+    pub bitcoin_address: String,
+    /// The witness script behind that address, for `bitcoin-cli decodescript`.
+    pub witness_script_hex: String,
+}
+
+/// One hash lock, and what can currently be done with it.
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct HashLockInfo {
+    pub outpoint: OutPoint,
+    pub value_sats: u64,
+    pub commitment_hex: String,
+    /// Who may spend it by revealing the secret.
+    pub claimant: Address,
+    /// Where it returns to on timeout; also the key that authorises the refund.
+    pub refund_to: Address,
+    pub timeout_height: u32,
+    /// Whether the chain has reached `timeout_height` yet.
+    pub refundable_now: bool,
+}
+
+/// A deadline pair that cannot be ordered unsafely.
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct SwapDeadlinesResponse {
+    /// Bitcoin height at which the taker may reclaim their Bitcoin.
+    pub bitcoin_timeout: u32,
+    /// Coinshift height at which the maker may reclaim their escrow. Always the
+    /// later of the two, because the maker holds the secret.
+    pub coinshift_timeout: u32,
+    /// The Coinshift tip this was derived against.
+    pub coinshift_height: u32,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
 pub struct GetBlockTemplateResponse {
     /// Block hash to commit to in a BMM request
@@ -296,6 +338,71 @@ pub trait Rpc {
         swap_id: SwapId,
         l2_claimer_address: Option<Address>, // Required for open swaps
     ) -> RpcResult<Txid>;
+
+    /// Generate a swap secret and the Bitcoin HTLC address it implies.
+    ///
+    /// Returns the secret in the clear — it is the maker's to keep, and
+    /// revealing it before the Bitcoin leg is claimed lets anyone take that
+    /// leg. Nothing on this node stores it.
+    #[open_api_method(output_schema(ToSchema))]
+    #[method(name = "new_swap_secret")]
+    async fn new_swap_secret(
+        &self,
+        claim_pubkey: String,
+        refund_pubkey: String,
+        bitcoin_timeout_height: u32,
+        network: Option<String>,
+    ) -> RpcResult<SwapSecretResponse>;
+
+    /// Lock coins into a hash lock: the Coinshift leg of an atomic swap.
+    ///
+    /// `commitment_hex` is the SHA-256 hash shared with the Bitcoin leg.
+    /// `timeout_height` must be the *later* of the two deadlines — see
+    /// `suggest_swap_deadlines`.
+    #[method(name = "create_hash_lock")]
+    async fn create_hash_lock(
+        &self,
+        value_sats: u64,
+        commitment_hex: String,
+        claimant: Address,
+        timeout_height: u32,
+        fee_sats: Option<u64>,
+    ) -> RpcResult<Txid>;
+
+    /// Spend a hash lock by revealing its secret.
+    #[method(name = "claim_hash_lock")]
+    async fn claim_hash_lock(
+        &self,
+        outpoint: OutPoint,
+        secret_hex: String,
+        fee_sats: Option<u64>,
+    ) -> RpcResult<Txid>;
+
+    /// Reclaim a hash lock whose deadline has passed.
+    #[method(name = "refund_hash_lock")]
+    async fn refund_hash_lock(
+        &self,
+        outpoint: OutPoint,
+        fee_sats: Option<u64>,
+    ) -> RpcResult<Txid>;
+
+    /// Every hash lock this wallet can see, with how it may be spent.
+    #[open_api_method(output_schema(ToSchema))]
+    #[method(name = "list_hash_locks")]
+    async fn list_hash_locks(&self) -> RpcResult<Vec<HashLockInfo>>;
+
+    /// A safe deadline pair for a swap, given how long you want the Bitcoin
+    /// leg to stay open.
+    ///
+    /// The party holding the secret must hold the later deadline, so this
+    /// derives the Coinshift one rather than letting you pick both.
+    #[open_api_method(output_schema(ToSchema))]
+    #[method(name = "suggest_swap_deadlines")]
+    async fn suggest_swap_deadlines(
+        &self,
+        bitcoin_height: u32,
+        bitcoin_blocks: u32,
+    ) -> RpcResult<SwapDeadlinesResponse>;
 
     /// List all swaps
     #[open_api_method(output_schema(ToSchema))]

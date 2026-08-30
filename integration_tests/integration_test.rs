@@ -7,6 +7,7 @@ use futures::{FutureExt, future::BoxFuture};
 use crate::{
     block_template::block_template_trial,
     confirmations_block_inclusion::confirmations_block_inclusion_trial,
+    hash_lock_lifecycle::hash_lock_lifecycle_trial,
     ibd::ibd_trial,
     l1_rpc_dependency::l1_rpc_dependency_trial,
     l1_txid_uniqueness::l1_txid_uniqueness_trial,
@@ -85,6 +86,11 @@ pub fn tests(
             failure_collector.clone(),
         ),
         swap_creation_open_fill_trial(
+            bin_paths.clone(),
+            file_registry.clone(),
+            failure_collector.clone(),
+        ),
+        hash_lock_lifecycle_trial(
             bin_paths.clone(),
             file_registry.clone(),
             failure_collector.clone(),

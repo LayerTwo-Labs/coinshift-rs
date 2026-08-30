@@ -10,7 +10,10 @@ use coinshift::{
     },
     wallet::Balance,
 };
-use coinshift_app_rpc_api::{GetBlockTemplateResponse, RpcServer};
+use coinshift_app_rpc_api::{
+    GetBlockTemplateResponse, HashLockInfo, RpcServer, SwapDeadlinesResponse,
+    SwapSecretResponse,
+};
 use jsonrpsee::{
     core::{RpcResult, async_trait, middleware::RpcServiceBuilder},
     server::Server,
@@ -57,6 +60,54 @@ impl RpcServerImpl {
             Err(state::Error::SwapNotCreator)
         }
     }
+
+    /// The height a transaction submitted now would be validated at.
+    fn validating_height(&self) -> RpcResult<u32> {
+        let height = self
+            .app
+            .node
+            .try_get_height()
+            .map_err(custom_err)?
+            .map_or(0, |height| height + 1);
+        Ok(height)
+    }
+
+    /// Look up a hash lock this wallet owns, by outpoint.
+    fn find_hash_lock(
+        &self,
+        outpoint: &coinshift::types::OutPoint,
+    ) -> RpcResult<coinshift::types::Output> {
+        let utxos = self.app.wallet.get_utxos().map_err(custom_err)?;
+        let output = utxos
+            .into_iter()
+            .find_map(|(candidate, output)| {
+                (candidate == *outpoint).then_some(output)
+            })
+            .ok_or_else(|| {
+                custom_err_msg(format!(
+                    "no such output in this wallet: {outpoint}"
+                ))
+            })?;
+        if !output.content.is_hash_locked() {
+            return Err(custom_err_msg(format!(
+                "{outpoint} is not a hash-locked output"
+            )));
+        }
+        Ok(output)
+    }
+}
+
+/// Parse a 32-byte hex value (a commitment or a secret).
+fn parse_commitment(hex_str: &str) -> RpcResult<[u8; 32]> {
+    let bytes = hex::decode(hex_str)
+        .map_err(|err| custom_err_msg(format!("not hex: {err}")))?;
+    <[u8; 32]>::try_from(bytes.as_slice()).map_err(|_| {
+        custom_err_msg(format!(
+            "expected 32 bytes, got {} — a commitment and a secret are both \
+             32 bytes",
+            bytes.len()
+        ))
+    })
 }
 
 fn custom_err_msg(err_msg: impl Into<String>) -> ErrorObject<'static> {
@@ -673,6 +724,186 @@ impl RpcServer for RpcServerImpl {
         let txid = tx.txid();
         self.app.sign_and_send(tx).map_err(custom_err)?;
         Ok(txid)
+    }
+
+    async fn new_swap_secret(
+        &self,
+        claim_pubkey: String,
+        refund_pubkey: String,
+        bitcoin_timeout_height: u32,
+        network: Option<String>,
+    ) -> RpcResult<SwapSecretResponse> {
+        use coinshift::htlc::{HtlcParams, Secret};
+
+        let parse_key = |hex: &str| -> Result<bitcoin::PublicKey, _> {
+            hex.parse::<bitcoin::PublicKey>()
+        };
+        let claim_pubkey = parse_key(&claim_pubkey).map_err(|err| {
+            custom_err_msg(format!("invalid claim pubkey: {err}"))
+        })?;
+        let refund_pubkey = parse_key(&refund_pubkey).map_err(|err| {
+            custom_err_msg(format!("invalid refund pubkey: {err}"))
+        })?;
+        let network = network
+            .as_deref()
+            .unwrap_or("regtest")
+            .parse::<bitcoin::Network>()
+            .map_err(|err| {
+                custom_err_msg(format!("invalid bitcoin network: {err}"))
+            })?;
+
+        let secret = Secret::random();
+        let params = HtlcParams {
+            hash: secret.hash(),
+            claim_pubkey,
+            refund_pubkey,
+            timeout_height: bitcoin_timeout_height,
+        };
+        Ok(SwapSecretResponse {
+            secret_hex: hex::encode(secret.as_bytes()),
+            commitment_hex: hex::encode(params.hash),
+            bitcoin_address: params.address(network).to_string(),
+            witness_script_hex: hex::encode(params.witness_script().as_bytes()),
+        })
+    }
+
+    async fn create_hash_lock(
+        &self,
+        value_sats: u64,
+        commitment_hex: String,
+        claimant: Address,
+        timeout_height: u32,
+        fee_sats: Option<u64>,
+    ) -> RpcResult<Txid> {
+        let commitment = parse_commitment(&commitment_hex)?;
+        let accumulator =
+            self.app.node.get_tip_accumulator().map_err(custom_err)?;
+        let node = &self.app.node;
+        let is_locked = |outpoint: &coinshift::types::OutPoint| -> bool {
+            let Ok(rotxn) = node.env().read_txn() else {
+                return false;
+            };
+            matches!(
+                node.state().is_output_locked_to_swap(&rotxn, outpoint),
+                Ok(Some(_))
+            )
+        };
+        let refund_to =
+            self.app.wallet.get_new_address().map_err(custom_err)?;
+        let tx = self
+            .app
+            .wallet
+            .create_hash_lock_tx(
+                &accumulator,
+                Amount::from_sat(value_sats),
+                coinshift::htlc::HashLockTerms {
+                    commitment,
+                    claimant,
+                    refund_to,
+                    timeout_height,
+                },
+                Amount::from_sat(fee_sats.unwrap_or(0)),
+                is_locked,
+            )
+            .map_err(custom_err)?;
+        let txid = tx.txid();
+        self.app.sign_and_send(tx).map_err(custom_err)?;
+        Ok(txid)
+    }
+
+    async fn claim_hash_lock(
+        &self,
+        outpoint: coinshift::types::OutPoint,
+        secret_hex: String,
+        fee_sats: Option<u64>,
+    ) -> RpcResult<Txid> {
+        let secret =
+            coinshift::htlc::Secret::from_bytes(parse_commitment(&secret_hex)?);
+        let lock = self.find_hash_lock(&outpoint)?;
+        let accumulator =
+            self.app.node.get_tip_accumulator().map_err(custom_err)?;
+        let tx = self
+            .app
+            .wallet
+            .create_hash_lock_claim_tx(
+                &accumulator,
+                vec![(outpoint, lock)],
+                &secret,
+                Amount::from_sat(fee_sats.unwrap_or(0)),
+            )
+            .map_err(custom_err)?;
+        let txid = tx.txid();
+        self.app.sign_and_send(tx).map_err(custom_err)?;
+        Ok(txid)
+    }
+
+    async fn refund_hash_lock(
+        &self,
+        outpoint: coinshift::types::OutPoint,
+        fee_sats: Option<u64>,
+    ) -> RpcResult<Txid> {
+        let lock = self.find_hash_lock(&outpoint)?;
+        let accumulator =
+            self.app.node.get_tip_accumulator().map_err(custom_err)?;
+        let tx = self
+            .app
+            .wallet
+            .create_hash_lock_refund_tx(
+                &accumulator,
+                vec![(outpoint, lock)],
+                Amount::from_sat(fee_sats.unwrap_or(0)),
+            )
+            .map_err(custom_err)?;
+        let txid = tx.txid();
+        self.app.sign_and_send(tx).map_err(custom_err)?;
+        Ok(txid)
+    }
+
+    async fn list_hash_locks(&self) -> RpcResult<Vec<HashLockInfo>> {
+        let height = self.validating_height()?;
+        let utxos = self.app.wallet.get_utxos().map_err(custom_err)?;
+        Ok(utxos
+            .into_iter()
+            .filter_map(|(outpoint, output)| {
+                let coinshift::types::OutputContent::HashLocked {
+                    value,
+                    hash,
+                    claimant,
+                    timeout_height,
+                } = output.content
+                else {
+                    return None;
+                };
+                Some(HashLockInfo {
+                    outpoint,
+                    value_sats: value.to_sat(),
+                    commitment_hex: hex::encode(hash),
+                    claimant,
+                    refund_to: output.address,
+                    timeout_height,
+                    refundable_now: height >= timeout_height,
+                })
+            })
+            .collect())
+    }
+
+    async fn suggest_swap_deadlines(
+        &self,
+        bitcoin_height: u32,
+        bitcoin_blocks: u32,
+    ) -> RpcResult<SwapDeadlinesResponse> {
+        let coinshift_height = self.validating_height()?;
+        let deadlines = coinshift::htlc::SwapDeadlines::suggested(
+            coinshift_height,
+            bitcoin_height,
+            bitcoin_blocks,
+        )
+        .map_err(custom_err)?;
+        Ok(SwapDeadlinesResponse {
+            bitcoin_timeout: deadlines.bitcoin_timeout,
+            coinshift_timeout: deadlines.coinshift_timeout,
+            coinshift_height,
+        })
     }
 
     async fn list_swaps(&self) -> RpcResult<Vec<Swap>> {
