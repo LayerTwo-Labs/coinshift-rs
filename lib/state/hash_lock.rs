@@ -81,6 +81,12 @@ where
 
 /// Validate a [`TxData::HashLockClaim`]: spending hash locks by revealing the
 /// secret.
+///
+/// The claimant must be paid the lock's value **in full**. Unlike the refund
+/// path this one is exempt from the address check — anyone holding the preimage
+/// can build it — so this payout rule is the only thing standing between the
+/// secret and the money, and it cannot be relaxed to make room for a fee.
+/// A claimer funds the fee from an input of their own.
 pub fn validate_hash_lock_claim(
     transaction: &Transaction,
     filled_transaction: &FilledTransaction,
@@ -138,40 +144,33 @@ pub fn validate_hash_lock_claim(
 /// Validate an ordinary transaction that spends one or more hash locks: the
 /// refund path.
 ///
-/// Refunds are allowed only once the chain has reached each lock's
-/// `timeout_height`, and must return the value to the output's own address.
+/// The only rule is the deadline. There is deliberately no requirement about
+/// where the value goes, because the refund path takes **no** authorization
+/// exemption: `Output::address` has to sign for it like any ordinary coin. The
+/// owner is the only party who can spend it, and once they can, where they send
+/// their own money is not consensus's business.
+///
+/// An earlier version did constrain the payout, which was redundant with that
+/// signature and had a real cost: it left no room for a fee, so every refund
+/// this wallet built was rejected. Found by `hash_lock_lifecycle`.
+///
 /// A transaction that spends no hash locks passes trivially.
 pub fn validate_hash_lock_refund(
     state: &State,
     rotxn: &RoTxn,
-    transaction: &Transaction,
+    _transaction: &Transaction,
     filled_transaction: &FilledTransaction,
 ) -> Result<(), Error> {
     let height = validating_height(state, rotxn)?;
 
-    let mut refunds = Vec::new();
     for utxo in &filled_transaction.spent_utxos {
-        let OutputContent::HashLocked {
-            value,
-            timeout_height,
-            ..
-        } = &utxo.content
+        let OutputContent::HashLocked { timeout_height, .. } = &utxo.content
         else {
             continue;
         };
         if height < *timeout_height {
             return Err(Error::InvalidTransaction(format!(
                 "hash-locked output is not refundable until height {timeout_height}, and this block is {height}"
-            )));
-        }
-        refunds.push((utxo.address, *value));
-    }
-
-    for (address, owed) in owed_by_address(refunds.into_iter())? {
-        let paid = amount_paid_to(transaction, &address)?;
-        if paid < owed {
-            return Err(Error::InvalidTransaction(format!(
-                "refund of a hash-locked output must pay at least {owed} to {address}, but pays {paid}"
             )));
         }
     }
@@ -389,22 +388,51 @@ mod tests {
         }
     }
 
-    /// A refund that pays someone other than the output's owner is rejected,
-    /// even after the timeout.
+    /// The refund path constrains only the deadline — and this is what makes
+    /// that safe.
+    ///
+    /// It takes no authorization exemption, so `Output::address` has to sign
+    /// for it like any ordinary coin. Only the owner can spend it, and where
+    /// they then send their own money is not consensus's business. An earlier
+    /// version also required the payout to go back to that same address, which
+    /// was redundant with the signature and left no room for a fee — so every
+    /// refund the wallet built was rejected. `hash_lock_lifecycle` found it.
+    ///
+    /// If the exemption ever grows to cover this path, the payout rule has to
+    /// come back with it. This test is what fails first if that happens.
     #[test]
-    fn a_refund_must_pay_the_outputs_own_address() {
-        let owner = Address([1u8; 20]);
-        let claimant = Address([2u8; 20]);
-        let attacker = Address([3u8; 20]);
-        let tx = tx_paying(TxData::Regular, attacker, 50_000);
-        let f = filled(&tx, vec![locked_utxo(owner, claimant, 50_000, 0)]);
+    fn the_refund_path_is_not_exempt_from_the_address_check() {
+        let (owner, claimant) = (Address([1u8; 20]), Address([2u8; 20]));
+        let locked = locked_utxo(owner, claimant, 50_000, 0);
 
+        assert!(
+            !crate::state::address_check_is_exempt(&TxData::Regular, &locked),
+            "a refund must be signed by the output's owner"
+        );
+        assert!(
+            crate::state::address_check_is_exempt(
+                &TxData::HashLockClaim { preimage: SECRET },
+                &locked
+            ),
+            "a claim is exempt, which is why it must pay the claimant in full"
+        );
+
+        // With the deadline passed, the owner may send the value anywhere.
+        let elsewhere = Address([3u8; 20]);
+        let tx = tx_paying(TxData::Regular, elsewhere, 49_000);
         let (_dir, env, state) = test_state();
         let rotxn = env.read_txn().unwrap();
-        assert!(matches!(
-            validate_hash_lock_refund(&state, &rotxn, &tx, &f),
-            Err(Error::InvalidTransaction(_))
-        ));
+        assert!(
+            validate_hash_lock_refund(
+                &state,
+                &rotxn,
+                &tx,
+                &filled(&tx, vec![locked])
+            )
+            .is_ok(),
+            "past the deadline the owner's signature is the whole rule, so a \
+             fee and a different destination are both fine"
+        );
     }
 
     /// A claim that spends no hash lock at all is not a claim.

@@ -144,23 +144,39 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 2. bip300301-enforcer
+# 2. bip300301-enforcer (built from the rev this workspace pins)
+#
+# NOT the published "latest" build. The integration tests drive the enforcer
+# *binary* using the harness from `bip300301_enforcer_integration_tests`, which
+# is pinned in Cargo.toml, and the two have to agree on the CLI. They already
+# don't: the pinned rev takes `--serve-json-rpc-addr`, while latest renamed it
+# to `--serve-rpc-addr`, so a downloaded binary fails at startup with
+# "unexpected argument". Building the pinned rev keeps them in lockstep.
 # ---------------------------------------------------------------------------
-ENF_BIN="$DEPS_DIR/bip300301-enforcer"
-if [[ $FORCE_DOWNLOAD -eq 1 || ! -x "$ENF_BIN" ]]; then
-  rm -f "$ENF_BIN"
-  rm -rf "$DEPS_DIR/bip300301-enforcer-latest-$ENF_TARGET"
-  fetch_zip "bip300301-enforcer-latest-$ENF_TARGET.zip"
-  # The zip dir contains a single binary named bip300301-enforcer-*-<target>
-  inner="$(find "$DEPS_DIR/bip300301-enforcer-latest-$ENF_TARGET" -type f -name "bip300301-enforcer-*-$ENF_TARGET" | head -1)"
-  [[ -n "$inner" ]] || die "could not locate enforcer binary in extracted archive"
-  mv "$inner" "$ENF_BIN"
-  rm -rf "$DEPS_DIR/bip300301-enforcer-latest-$ENF_TARGET"
-  chmod +x "$ENF_BIN"
-  ok "bip300301-enforcer ready ($ENF_TARGET)"
-else
-  ok "bip300301-enforcer already present (use --force-download to refresh)"
+ENFORCER_REPO="https://github.com/LayerTwo-Labs/bip300301_enforcer"
+ENFORCER_REV="$(awk -F'"' '
+  /^\[workspace\.dependencies\.bip300301_enforcer_lib\]/ { f = 1 }
+  f && /^rev[[:space:]]*=/ { print $2; exit }
+' "$REPO_DIR/Cargo.toml")"
+[[ -n "$ENFORCER_REV" ]] || die "could not read the pinned enforcer rev from Cargo.toml"
+
+ENF_SRC="$DEPS_DIR/enforcer-src"
+ENF_BIN="$ENF_SRC/target/release/bip300301_enforcer"
+if [[ ! -d "$ENF_SRC/.git" ]]; then
+  step "Cloning bip300301-enforcer"
+  git clone "$ENFORCER_REPO" "$ENF_SRC"
 fi
+ENF_HAVE="$(cd "$ENF_SRC" && git rev-parse HEAD 2>/dev/null || echo none)"
+if [[ "$ENF_HAVE" != "$ENFORCER_REV" || ! -x "$ENF_BIN" ]]; then
+  step "Building bip300301-enforcer at ${ENFORCER_REV:0:12} — this can take a few minutes"
+  ( cd "$ENF_SRC" && git fetch --quiet origin "$ENFORCER_REV" 2>/dev/null || true )
+  ( cd "$ENF_SRC" && git checkout --quiet "$ENFORCER_REV" )
+  ( cd "$ENF_SRC" && cargo build --release --bin bip300301_enforcer )
+  ok "bip300301-enforcer built at ${ENFORCER_REV:0:12}"
+else
+  ok "bip300301-enforcer already built at ${ENFORCER_REV:0:12}"
+fi
+[[ -x "$ENF_BIN" ]] || die "enforcer binary not found at $ENF_BIN"
 
 # Clear Gatekeeper quarantine on downloaded binaries (defensive; curl usually
 # doesn't set it, but unsigned binaries can otherwise be blocked).

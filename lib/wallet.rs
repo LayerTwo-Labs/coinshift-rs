@@ -106,6 +106,22 @@ pub struct Wallet {
     _version: DatabaseUnique<UnitKey, SerdeBincode<Version>>,
 }
 
+/// Accumulate what each address is owed, so that paying one address twice
+/// cannot settle another's share.
+fn add_owed(
+    owed: &mut Vec<(Address, bitcoin::Amount)>,
+    address: Address,
+    value: bitcoin::Amount,
+) -> Result<(), Error> {
+    match owed.iter_mut().find(|(existing, _)| *existing == address) {
+        Some((_, total)) => {
+            *total = total.checked_add(value).ok_or(AmountOverflowError)?;
+        }
+        None => owed.push((address, value)),
+    }
+    Ok(())
+}
+
 impl Wallet {
     pub const NUM_DBS: u32 = 6;
 
@@ -611,92 +627,105 @@ impl Wallet {
 
     /// Spend a hash lock by revealing the secret: the taker's claim.
     ///
-    /// The taker learns the preimage by watching the maker take the Bitcoin
-    /// leg, which necessarily publishes it. Consensus checks only that it
-    /// hashes to the committed value and that `claimant` is paid.
-    pub fn create_hash_lock_claim_tx(
+    /// The claimant is paid the lock's value **in full**, and the fee comes
+    /// from an ordinary coin of this wallet rather than out of the payout. It
+    /// cannot come out of the payout: the claim path is exempt from the address
+    /// check, so paying the claimant in full is the only thing standing between
+    /// the secret and the money, and consensus will not accept a penny less.
+    /// Claiming a Bitcoin HTLC works the same way — the claimer brings their own
+    /// input for fees.
+    pub fn create_hash_lock_claim_tx<F>(
         &self,
         accumulator: &Accumulator,
         locks: Vec<(OutPoint, Output)>,
         secret: &crate::htlc::Secret,
         fee: bitcoin::Amount,
-    ) -> Result<Transaction, Error> {
-        Self::spend_hash_locks(
-            accumulator,
-            locks,
-            fee,
-            TxData::HashLockClaim {
+        is_locked: F,
+    ) -> Result<Transaction, Error>
+    where
+        F: Fn(&OutPoint) -> bool,
+    {
+        if locks.is_empty() {
+            return Err(Error::NotEnoughFunds);
+        }
+
+        let mut inputs = Vec::new();
+        let mut owed: Vec<(Address, bitcoin::Amount)> = Vec::new();
+        for (outpoint, output) in locks {
+            let OutputContent::HashLocked {
+                value, claimant, ..
+            } = output.content
+            else {
+                return Err(Error::NotEnoughFunds);
+            };
+            add_owed(&mut owed, claimant, value)?;
+            inputs.push((outpoint, hash(&PointedOutput { outpoint, output })));
+        }
+
+        // Fee inputs are kept separate from the locks so the payout stays whole.
+        let mut outputs: Vec<Output> = Vec::new();
+        if fee > bitcoin::Amount::ZERO {
+            let (total, coins) =
+                self.select_coins_with_filter(fee, is_locked)?;
+            for (outpoint, output) in coins {
+                inputs.push((
+                    outpoint,
+                    hash(&PointedOutput { outpoint, output }),
+                ));
+            }
+            let change = total.checked_sub(fee).ok_or(AmountUnderflowError)?;
+            if change > bitcoin::Amount::ZERO {
+                outputs.push(Output {
+                    address: self.get_new_address()?,
+                    content: OutputContent::Value(change),
+                });
+            }
+        }
+
+        outputs.extend(owed.into_iter().map(|(address, value)| Output {
+            address,
+            content: OutputContent::Value(value),
+        }));
+
+        let input_utxo_hashes: Vec<BitcoinNodeHash> =
+            inputs.iter().map(|(_, hash)| hash.into()).collect();
+        let proof = accumulator.prove(&input_utxo_hashes)?;
+
+        Ok(Transaction {
+            inputs,
+            proof,
+            outputs,
+            data: TxData::HashLockClaim {
                 preimage: *secret.as_bytes(),
             },
-            |content| match content {
-                OutputContent::HashLocked { claimant, .. } => Some(*claimant),
-                _ => None,
-            },
-        )
+        })
     }
 
     /// Reclaim a hash lock whose deadline has passed: the maker's refund.
     ///
-    /// Only valid from `timeout_height` onwards, and the value has to go back
-    /// to the output's own address — which is also the key that signs for it,
-    /// so there is only one address involved and no way for the two to
-    /// disagree.
+    /// Only valid from `timeout_height` onwards. The owner signs for this like
+    /// any ordinary coin, so consensus does not constrain where the value goes
+    /// and the fee comes straight out of it.
     pub fn create_hash_lock_refund_tx(
         &self,
         accumulator: &Accumulator,
         locks: Vec<(OutPoint, Output)>,
         fee: bitcoin::Amount,
     ) -> Result<Transaction, Error> {
-        Self::spend_hash_locks(accumulator, locks, fee, TxData::Regular, |_| {
-            None
-        })
-    }
-
-    /// Shared body of the claim and refund builders.
-    ///
-    /// `payee` picks who each lock owes: the named claimant for a claim, and
-    /// the output's own address for a refund. The fee comes off the largest
-    /// payout rather than being spread, so no payee is silently underpaid
-    /// below what the spend rules require.
-    fn spend_hash_locks<P>(
-        accumulator: &Accumulator,
-        locks: Vec<(OutPoint, Output)>,
-        fee: bitcoin::Amount,
-        data: TxData,
-        payee: P,
-    ) -> Result<Transaction, Error>
-    where
-        P: Fn(&OutputContent) -> Option<Address>,
-    {
         if locks.is_empty() {
             return Err(Error::NotEnoughFunds);
         }
 
-        let mut owed: Vec<(Address, bitcoin::Amount)> = Vec::new();
         let mut inputs = Vec::new();
-        for (outpoint, output) in &locks {
+        let mut owed: Vec<(Address, bitcoin::Amount)> = Vec::new();
+        for (outpoint, output) in locks {
             if !output.content.is_hash_locked() {
                 return Err(Error::NotEnoughFunds);
             }
-            let to = payee(&output.content).unwrap_or(output.address);
-            let value = output.get_value();
-            match owed.iter_mut().find(|(address, _)| *address == to) {
-                Some((_, total)) => {
-                    *total =
-                        total.checked_add(value).ok_or(AmountOverflowError)?
-                }
-                None => owed.push((to, value)),
-            }
-            let utxo_hash = hash(&PointedOutput {
-                outpoint: *outpoint,
-                output: output.clone(),
-            });
-            inputs.push((*outpoint, utxo_hash));
+            add_owed(&mut owed, output.address, output.get_value())?;
+            inputs.push((outpoint, hash(&PointedOutput { outpoint, output })));
         }
 
-        // Take the fee from the largest single payout. Spreading it would
-        // underpay every payee, and the spend rules require each to be paid in
-        // full.
         owed.sort_by_key(|(_, value)| std::cmp::Reverse(*value));
         let (_, largest) = owed.first_mut().ok_or(Error::NotEnoughFunds)?;
         *largest = largest.checked_sub(fee).ok_or(AmountUnderflowError)?;
@@ -704,20 +733,19 @@ impl Wallet {
         let input_utxo_hashes: Vec<BitcoinNodeHash> =
             inputs.iter().map(|(_, hash)| hash.into()).collect();
         let proof = accumulator.prove(&input_utxo_hashes)?;
-        let outputs = owed
-            .into_iter()
-            .filter(|(_, value)| *value > bitcoin::Amount::ZERO)
-            .map(|(address, value)| Output {
-                address,
-                content: OutputContent::Value(value),
-            })
-            .collect();
 
         Ok(Transaction {
             inputs,
             proof,
-            outputs,
-            data,
+            outputs: owed
+                .into_iter()
+                .filter(|(_, value)| *value > bitcoin::Amount::ZERO)
+                .map(|(address, value)| Output {
+                    address,
+                    content: OutputContent::Value(value),
+                })
+                .collect(),
+            data: TxData::Regular,
         })
     }
 

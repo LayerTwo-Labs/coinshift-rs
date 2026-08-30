@@ -822,6 +822,16 @@ impl RpcServer for RpcServerImpl {
         let lock = self.find_hash_lock(&outpoint)?;
         let accumulator =
             self.app.node.get_tip_accumulator().map_err(custom_err)?;
+        let node = &self.app.node;
+        let is_locked = |outpoint: &coinshift::types::OutPoint| -> bool {
+            let Ok(rotxn) = node.env().read_txn() else {
+                return false;
+            };
+            matches!(
+                node.state().is_output_locked_to_swap(&rotxn, outpoint),
+                Ok(Some(_))
+            )
+        };
         let tx = self
             .app
             .wallet
@@ -830,6 +840,7 @@ impl RpcServer for RpcServerImpl {
                 vec![(outpoint, lock)],
                 &secret,
                 Amount::from_sat(fee_sats.unwrap_or(0)),
+                is_locked,
             )
             .map_err(custom_err)?;
         let txid = tx.txid();
