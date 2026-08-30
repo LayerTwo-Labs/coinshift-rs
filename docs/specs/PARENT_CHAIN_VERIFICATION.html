@@ -910,7 +910,7 @@ if !filled_transaction.spent_utxos.iter()
 </div>
 
 <div class="col">
-  <p style="font-size:14.5px;color:var(--ink-faint);margin-top:6px;">Sizes are for the consensus and wallet work only, and exclude coordinated-deployment planning. All three real options tighten consensus and need a coordinated rollout.</p>
+  <p style="font-size:14.5px;color:var(--ink-faint);margin-top:6px;">Sizes are for the consensus and wallet work only. All three real options tighten consensus — which, with nothing in production, means a merge and a rebuilt regtest rather than a coordinated fork.</p>
 </div>
 
 <hr class="rule">
@@ -951,6 +951,8 @@ if !filled_transaction.spent_utxos.iter()
   <h3>What would reopen it</h3>
   <p>Only one thing: a decision that a taker should be able to fill an order holding no Coinshift coins at all. That is a change to <code>validate_swap_accept</code> as much as to this document, and it would mean building the relay — on top of a system that is by then already trustless, which is a far better place to start from than today.</p>
 
+  <h3>Why now rather than later</h3>
+  <p>Nothing is in production, so this is a merge rather than a fork: no activation height, no migration for existing swaps, no window in which two rule sets must both be tolerated. Every one of those is a place bugs live, and right now none of them has to be built. That is a property with a shelf life.</p>
   <h3>In the meantime</h3>
   <p>Until this lands the README says "trustless" about a leg that is not. Either say so plainly or ship a bonded attester set and describe it as the federation it would be. Being wrong in the documentation is the one option with no upside.</p>
 </section>

@@ -364,7 +364,7 @@
     <span><b>Status</b> ready to start</span>
     <span><b>Decision</b> settled — see PARENT_CHAIN_VERIFICATION §03</span>
     <span><b>Estimate</b> 2–3 weeks after prerequisites</span>
-    <span><b>Consensus</b> tightening — coordinated deployment</span>
+    <span><b>Deployment</b> pre-production — no fork to coordinate</span>
   </div>
 </header>
 
@@ -559,8 +559,9 @@
     <p>The gap must cover BTC confirmation latency plus L2 block time plus a safety factor, and it belongs in a named constant with the reasoning in its doc comment — not as two numbers that happen to differ.</p>
   </div>
 
-  <h3>Append-only, as always</h3>
-  <p>Both <code>Content</code> and <code>TxData</code> are Borsh-encoded by variant index into the block body, and therefore into the merkle root. New variants go at the end. <code>ParentChainType</code> already has <code>borsh_discriminants_are_stable</code> guarding exactly this; both new enums want the same test in the same shape.</p>
+  <h3>Append-only — habit now, requirement later</h3>
+  <p>Both <code>Content</code> and <code>TxData</code> are Borsh-encoded by variant index into the block body, and therefore into the merkle root. With no production chain, inserting a variant mid-enum would cost nothing today: there are no records written under the old numbering to misread.</p>
+  <p>Append anyway. It is free, it keeps <code>borsh_discriminants_are_stable</code> meaningful rather than something to be edited whenever it complains, and the first time it actually matters will be the first time anyone forgets it. The rule is worth having as muscle memory before it is worth having as a constraint.</p>
 </section>
 
 <hr class="rule">
@@ -583,8 +584,13 @@
 <section class="col" id="rollout">
   <p class="secnum">06 — Rollout</p>
   <h2>Getting it into the world</h2>
-  <p>This tightens consensus: a node running it will reject blocks that older nodes accept, and produce outputs older nodes cannot parse. It needs the same coordinated deployment as <code>#135</code>, and the alpha is the cheap moment to do it.</p>
-  <p>Swaps created under the old scheme have no <code>H</code> and cannot be completed under the new rules. They expire back to their creators and are recreated — the same migration story <code>SwapAccept</code> had, and the reason to do this while the number affected is small.</p>
+  <p class="lede">Nothing is in production, so this ships as an ordinary change rather than a fork. That is the single biggest thing working in this plan's favour, and it has a shelf life.</p>
+  <p>The three consensus changes queued up — the expiry fix in <code>#138</code>, the <code>SwapAccept</code> binding already merged in <code>#135</code>, and this one — would each need a coordinated deployment against a live chain. Against no chain they need a merge and a rebuilt regtest. Landing them now costs a fraction of what landing them later will.</p>
+  <p>There is a caveat worth knowing rather than worrying about: the README advertises a node at <span class="mono">coinshift.bip300.xyz</span>, and <code>lib/net/mod.rs</code> compiles in signet seed nodes. Any chain those hold will not survive these changes. If that data is disposable, this is free; if it is not, it is the one thing to check before merging.</p>
+  <div class="note">
+    <span class="label">What this buys the plan</span>
+    <p>No migration path for existing swaps. No activation height. No version negotiation between old and new nodes. No window during which both rule sets must be tolerated. Every one of those is a place bugs live, and none of them has to be built.</p>
+  </div>
   <div class="note">
     <span class="label">One documentation change ships with it</span>
     <p>The README calls the swap system trustless. With this merged that becomes true, and the sentence can stay. Until then it should say what is actually the case, which is the one part of this plan that costs nothing and can be done today.</p>
