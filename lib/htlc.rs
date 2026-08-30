@@ -148,6 +148,26 @@ impl HtlcParams {
     }
 }
 
+/// The Coinshift leg's terms — the mirror of [`HtlcParams`].
+///
+/// The two are kept next to each other deliberately: a swap is correct exactly
+/// when they agree on `commitment` and their deadlines are ordered so the party
+/// holding the secret expires last. Seeing them together is the cheapest way to
+/// notice when they do not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HashLockTerms {
+    /// SHA-256 of the swap secret. Must equal [`HtlcParams::hash`].
+    pub commitment: [u8; 32],
+    /// The taker, who can only spend this by revealing the preimage.
+    pub claimant: crate::types::Address,
+    /// Where the escrow goes if it times out. Becomes the output's own address,
+    /// so it is also the key that authorises the refund.
+    pub refund_to: crate::types::Address,
+    /// Coinshift height at which the refund becomes spendable. Must be the
+    /// *later* of the two deadlines — see [`SwapDeadlines`].
+    pub timeout_height: u32,
+}
+
 /// Expected wall-clock seconds per Bitcoin block.
 pub const BITCOIN_BLOCK_SECS: u32 = 600;
 
