@@ -204,14 +204,36 @@ those two is what made open-swap claims unenforceable in the first place.
 | **Open-swap entitlement** | ✅ | `SwapAccept` records the claimer on-chain; claims must pay the holder of a live reservation |
 | **Reservation is controlled by the reserver** | ✅ | `validate_swap_accept()` requires an input owned by `l2_claimer_address` |
 
-### Not implemented (doc vs code)
+### What the parent-chain leg still trusts
 
-| Check | Doc claim | Code reality |
-|-------|-----------|--------------|
-| **L1 transaction uniqueness** | “Check L1 tx not already used by another swap; `L1TransactionAlreadyUsed`” | ❌ **Not implemented.** `get_swap_by_l1_txid()` exists but is **never** called before accepting an L1 tx. Saving a swap with a new `l1_txid` does not check if that `(parent_chain, l1_txid)` is already used by a *different* swap. |
-| **Reject confirmations == 0** | “Only confirmed transactions accepted” | ❌ **Not implemented.** `query_and_update_swap()` does not reject when `confirmations == 0`. |
-| **Block inclusion** | “Transaction must have block height” | ❌ **Not implemented.** `TransactionInfo` has `blockheight: Option<u32>` but it is not passed into `query_and_update_swap()` and there is no “must have block height” check. |
-| **Error `L1TransactionAlreadyUsed`** | Listed in errors | ❌ **Does not exist** in `lib/state/error.rs`. |
+The three checks below *are* implemented — `update_swap_l1_txid` rejects
+`confirmations == 0` and a reused `(parent_chain, l1_txid)`, and
+`query_and_update_swap` requires `blockheight.is_some()`. Each has an
+integration test (`l1_txid_uniqueness`, `confirmations_block_inclusion`).
+
+> An earlier version of this section listed all three as *not implemented*,
+> while "Current Limitations" below listed the same three as enforced. The
+> table was stale; this note replaces it rather than leaving the reader to
+> pick a side.
+
+What they cannot do is make the parent-chain leg trustworthy, because every
+one of them runs against a **node-local RPC answer**:
+
+| Check | Where it runs | What it is worth |
+|-------|---------------|------------------|
+| L1 transaction uniqueness | `swaps_by_l1_txid`, node-local | Constrains only the node holding the index |
+| Reject `confirmations == 0` | the configured RPC's answer | As honest as that endpoint |
+| Block inclusion | the configured RPC's answer | As honest as that endpoint |
+
+Consensus asks none of them. `validate_swap_claim_consensus` never inspects
+an L1 fact, so a miner can include a `SwapClaim` for a payment that never
+happened and every node will accept the block.
+
+That is the gap [docs/specs/PARENT_CHAIN_VERIFICATION.html](specs/PARENT_CHAIN_VERIFICATION.html)
+decides how to close, and [docs/specs/ATOMIC_SWAP_PLAN.html](specs/ATOMIC_SWAP_PLAN.html)
+is closing: an atomic swap replaces the question "did a payment happen on
+another chain?" — which consensus cannot answer — with "does this preimage
+hash to the committed value?", which it can.
 
 ---
 

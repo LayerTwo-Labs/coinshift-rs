@@ -538,8 +538,8 @@
 
   <h3>A taker already has to hold Coinshift coins</h3>
   <p><code>validate_swap_accept</code> requires the reserver to spend an input owned by the address they are reserving for — <code>lib/state/swap.rs:L288</code>:</p>
-  <pre class="codeblock"><code>// Proof that the reserver controls the address they are reserving for:
-// spend an input owned by it.
+  <pre class="codeblock"><code>// Proof that the reserver controls the address they
+// are reserving for: spend an input owned by it.
 if !filled_transaction.spent_utxos.iter()
     .any(|utxo| utxo.address == *l2_claimer_address)</code></pre>
   <p>So a taker must run Coinshift software <em>and</em> already own funded Coinshift outputs, before they pay anything on BTC. The failing integration test <code>swap_creation_open_fill</code> is the empirical proof: it reserves for a freshly generated address and dies with <code>"not enough funds"</code>.</p>
@@ -550,31 +550,34 @@ if !filled_transaction.spent_utxos.iter()
   </div>
 
   <h3>Three more findings, all favouring C</h3>
-  <div class="tablewrap">
-    <table>
-      <thead>
-        <tr><th scope="col">Finding</th><th scope="col">Where</th><th scope="col">Consequence</th></tr>
-      </thead>
-      <tbody>
-        <tr>
-          <th scope="row">The deterministic clock already exists</th>
-          <td><code>validating_height()</code><br><span class="mono">lib/state/swap.rs:L219</span></td>
-          <td>Its doc: <em>"prevalidate_block, connect_block and the mempool path all run against the same tip, so they all agree."</em> <code>SwapAccept</code> expiry already uses it. C's timeouts reuse it — <strong>the mainchain watermark in §09 is not needed at all</strong>.</td>
-        </tr>
-        <tr>
-          <th scope="row">The validator cannot see the archive</th>
-          <td><code>validate_swap_claim_consensus(state, rotxn, transaction)</code><br><span class="mono">lib/state/swap.rs:L397</span></td>
-          <td>No <code>Archive</code> parameter. A and B must widen this signature and thread a header view through every call site — the piece <span class="mono">L1_PAYMENT_PROOFS</span> calls awkward. C never needs it: <code>sha256(s) == H</code> is a pure function of the transaction.</td>
-        </tr>
-        <tr>
-          <th scope="row">The type change is contained to one file</th>
-          <td><code>Content</code><br><span class="mono">lib/types/transaction.rs:L342</span></td>
-          <td>Degree 25, every edge inside that file except the <code>Output</code> back-reference. Adding <code>HashLocked</code> touches ten exhaustive sites the compiler finds for you.</td>
-        </tr>
-      </tbody>
-    </table>
-  </div>
+</section>
 
+<div class="wide tablewrap">
+  <table>
+    <thead>
+      <tr><th scope="col">Finding</th><th scope="col">Where</th><th scope="col">Consequence</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <th scope="row">The deterministic clock already exists</th>
+        <td><code>validating_height()</code><br><span class="mono">lib/state/swap.rs:L219</span></td>
+        <td>Its doc: <em>"prevalidate_block, connect_block and the mempool path all run against the same tip, so they all agree."</em> <code>SwapAccept</code> expiry already uses it. C's timeouts reuse it — <strong>the mainchain watermark in §09 is not needed at all</strong>.</td>
+      </tr>
+      <tr>
+        <th scope="row">The validator cannot see the archive</th>
+        <td><code>validate_swap_claim_consensus(state, rotxn, transaction)</code><br><span class="mono">lib/state/swap.rs:L397</span></td>
+        <td>No <code>Archive</code> parameter. A and B must widen this signature and thread a header view through every call site — the piece <span class="mono">L1_PAYMENT_PROOFS</span> calls awkward. C never needs it: <code>sha256(s) == H</code> is a pure function of the transaction.</td>
+      </tr>
+      <tr>
+        <th scope="row">The type change is contained to one file</th>
+        <td><code>Content</code><br><span class="mono">lib/types/transaction.rs:L342</span></td>
+        <td>Degree 25, every edge inside that file except the <code>Output</code> back-reference. Adding <code>HashLocked</code> touches ten exhaustive sites the compiler finds for you.</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<section class="col">
   <p>A fourth is structural rather than textual: <code>parent_chain_rpc.rs</code> clusters into the <em>L1 Config Panel</em> community alongside the GUI, not into <em>Swap Claim Validation</em>. The RPC observer is already peripheral in the real dependency graph, so demoting it to pure UI is a cut, not a surgery.</p>
 </section>
 

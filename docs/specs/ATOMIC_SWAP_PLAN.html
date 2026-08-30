@@ -613,7 +613,8 @@
   <pre class="codeblock"><code>bitcoin-cli decodescript &lt;witness_script_hex&gt;</code></pre>
 
   <p><strong>2. Get a safe deadline pair.</strong> This derives the Coinshift deadline rather than letting you pick both, because the party holding the secret has to expire last and an argument list is an easy place to swap two numbers.</p>
-  <pre class="codeblock"><code>$C suggest-swap-deadlines --bitcoin-height &lt;btc tip&gt; --bitcoin-blocks 100</code></pre>
+  <pre class="codeblock"><code>$C suggest-swap-deadlines \
+    --bitcoin-height &lt;btc tip&gt; --bitcoin-blocks 100</code></pre>
 
   <p><strong>3. Lock the Coinshift leg</strong>, then mine a block.</p>
   <pre class="codeblock"><code>$C create-hash-lock \
@@ -627,7 +628,8 @@
   <pre class="codeblock"><code>$C list-hash-locks</code></pre>
 
   <p><strong>5a. Claim</strong> — the taker, holding the secret:</p>
-  <pre class="codeblock"><code>$C claim-hash-lock &lt;txid&gt; &lt;vout&gt; --secret-hex &lt;secret&gt; --fee-sats 1000</code></pre>
+  <pre class="codeblock"><code>$C claim-hash-lock &lt;txid&gt; &lt;vout&gt; \
+    --secret-hex &lt;secret&gt; --fee-sats 1000</code></pre>
   <p><strong>5b. Or refund</strong> — the maker, once <code>refundable_now</code> is true:</p>
   <pre class="codeblock"><code>$C refund-hash-lock &lt;txid&gt; &lt;vout&gt; --fee-sats 1000</code></pre>
 

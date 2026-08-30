@@ -1,6 +1,15 @@
 # Coinshift
 
-Coinshift is a [BIP300](https://en.bitcoin.it/wiki/BIP_0300)-style sidechain node with a trustless **L2 <-> L1 swap** system. Exchange sidechain (L2) coins for parent-chain (L1) assets such as BTC, BCH, or LTC, and vice versa. The app includes a JSON-RPC server, CLI, and GUI.
+Coinshift is a [BIP300](https://en.bitcoin.it/wiki/BIP_0300)-style sidechain node with an **L2 <-> L1 swap** system. Exchange sidechain (L2) coins for parent-chain (L1) assets such as BTC, BCH, or LTC, and vice versa. The app includes a JSON-RPC server, CLI, and GUI.
+
+> **The swap system is not yet trustless, and this README used to say it was.**
+> The L2 side is enforced by consensus, but nothing checks the parent-chain
+> payment: `validate_swap_claim_consensus` never inspects an L1 fact, so a
+> miner can claim an escrow for a payment that never happened. The fix is
+> atomic swaps — see [the decision](docs/specs/PARENT_CHAIN_VERIFICATION.html)
+> and [the plan and runbook](docs/specs/ATOMIC_SWAP_PLAN.html). The Coinshift
+> half already works end to end on regtest; the Bitcoin half is not yet wired.
+> Nothing is in production, so this is a merge rather than a fork.
 
 - **Live node:** [coinshift.bip300.xyz](https://coinshift.bip300.xyz)
 - **Built by:** [Layer Two Labs](https://layertwolabs.com)
