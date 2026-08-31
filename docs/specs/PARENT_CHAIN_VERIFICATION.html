@@ -76,7 +76,14 @@
     -webkit-font-smoothing: antialiased;
   }
 
-  .col { max-width: var(--measure); margin-inline: auto; }
+  /* One left edge for the whole page.
+     `.col` spans the same width as figures and the masthead, and its children
+     are capped at the reading measure — so prose starts where the headings and
+     diagrams start, instead of being centred independently and landing a couple
+     of hundred pixels to their right. */
+  .col { max-width: var(--figure-w); margin-inline: auto; }
+  .col > * { max-width: var(--measure); }
+  .col > .tablewrap, .col > figure { max-width: none; }
   .wide { max-width: var(--figure-w); margin-inline: auto; }
 
   header.masthead {

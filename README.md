@@ -2,33 +2,47 @@
 
 Coinshift is a [BIP300](https://en.bitcoin.it/wiki/BIP_0300)-style sidechain node with an **L2 <-> L1 swap** system. Exchange sidechain (L2) coins for parent-chain (L1) assets such as BTC, BCH, or LTC, and vice versa. The app includes a JSON-RPC server, CLI, and GUI.
 
-> ### The swap system is not yet trustless
+> ### What is and is not trustless here
 >
-> **This README said it was, in this sentence, for a long time.** That was
-> wrong, and it is worth saying plainly rather than quietly deleting.
+> **This README used to call the swap system trustless, in the sentence above.**
+> It was not, and the correction is worth making carefully rather than swapping
+> one overclaim for another.
 >
-> The L2 side is enforced by consensus: the escrow is locked when `SwapCreate`
-> connects, and only the address named by a live `SwapAccept` reservation can
-> be paid. The parent-chain side is checked by nothing that binds.
+> **Today.** The L2 side is enforced by consensus: escrow locks when
+> `SwapCreate` connects, and only the address named by a live `SwapAccept`
+> reservation can be paid. The parent-chain side is enforced by nothing.
 > `validate_swap_claim_consensus` never inspects an L1 fact, so **a miner can
-> claim a swap escrow for a Bitcoin payment that never happened**, and every
-> node will accept the block.
+> claim a swap escrow for a Bitcoin payment that never happened** and every
+> node accepts the block. The checks that do exist — txid uniqueness, rejecting
+> zero confirmations, block inclusion — all run against a node-local RPC
+> answer, so they are as honest as whichever endpoint you configured, and
+> consensus consults none of them.
 >
-> The checks that do exist — L1 txid uniqueness, rejecting zero confirmations,
-> requiring block inclusion — all run against a *node-local RPC answer*. They
-> are as honest as whichever endpoint you configured, they differ between
-> nodes, and consensus consults none of them.
+> **With atomic swaps** ([in progress](docs/specs/ATOMIC_SWAP_PLAN.html); both
+> legs pass on regtest today) that vector is gone, because there is no longer
+> any such thing as a claim based on an alleged payment. Consensus checks
+> `sha256(preimage) == commitment` and nothing else — pure block data, the same
+> answer on every node. No trusted third party, no oracle, no relay, and a
+> lying Bitcoin RPC can only cause its own operator to miss a deadline.
 >
-> **The fix is atomic swaps**, and it is underway: the Coinshift leg works end
-> to end on regtest today. See [the decision](docs/specs/PARENT_CHAIN_VERIFICATION.html)
-> for why that option and not the other three, and [the plan and
-> runbook](docs/specs/ATOMIC_SWAP_PLAN.html) for how to run it yourself.
-> Nothing is in production, so this lands as a merge rather than a fork.
+> **What that still does not mean.** "Trustless" in the precise sense — no
+> trusted party — will be true. "No counterparty risk" will not:
 >
-> That document's [§08](docs/specs/ATOMIC_SWAP_PLAN.html) also records the
-> other places our documentation asserted something untrue — including one
-> file that contradicted itself 130 lines apart — because a contradiction that
-> gets quietly patched teaches nobody anything and grows back.
+> | Remains | Why |
+> |---|---|
+> | **You must watch** | After the maker reveals the secret to take the Bitcoin, the taker has to claim before the Coinshift escrow expires. Miss that window and the maker refunds it and keeps both legs. Nobody broke a rule; you looked away. |
+> | **The maker holds a free option** | They choose whether to reveal at all. If the price moves they can walk, and the taker refunds — whole, but out fees and a round trip. |
+> | **Deadline ordering is ours to get right** | `SwapDeadlines` refuses an unsafe pair, but consensus sees one leg and cannot check the relationship between two chains. A buggy wallet can still build a bad one. |
+> | **Deep reorgs** | A reorg past the confirmation depth on either chain, after one leg has settled, breaks the atomicity. |
+>
+> So: **trustless, not risk-free, and it requires participation.** That is a
+> better trade than trusting an endpoint, and it is not the same as "safe to
+> start and forget".
+>
+> [The decision](docs/specs/PARENT_CHAIN_VERIFICATION.html) covers why this
+> option and not the other three. [The plan](docs/specs/ATOMIC_SWAP_PLAN.html)
+> covers how to run it, and records the places our own documentation has
+> asserted things that were not true — including this sentence.
 
 - **Live node:** [coinshift.bip300.xyz](https://coinshift.bip300.xyz)
 - **Built by:** [Layer Two Labs](https://layertwolabs.com)

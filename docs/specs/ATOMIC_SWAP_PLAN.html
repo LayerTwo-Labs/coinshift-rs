@@ -76,7 +76,14 @@
     -webkit-font-smoothing: antialiased;
   }
 
-  .col { max-width: var(--measure); margin-inline: auto; }
+  /* One left edge for the whole page.
+     `.col` spans the same width as figures and the masthead, and its children
+     are capped at the reading measure — so prose starts where the headings and
+     diagrams start, instead of being centred independently and landing a couple
+     of hundred pixels to their right. */
+  .col { max-width: var(--figure-w); margin-inline: auto; }
+  .col > * { max-width: var(--measure); }
+  .col > .tablewrap, .col > figure { max-width: none; }
   .wide { max-width: var(--figure-w); margin-inline: auto; }
 
   header.masthead {
@@ -384,6 +391,7 @@
     <li><a href="#tests">How each phase is proved</a></li>
     <li><a href="#runit">Running it yourself</a></li>
     <li><a href="#found">What the test found</a></li>
+    <li><a href="#residual">What is still not trustless</a></li>
     <li><a href="#lied">Where the documentation lied</a></li>
     <li><a href="#rollout">Rollout</a></li>
   </ol>
@@ -672,8 +680,65 @@
 
 <hr class="rule">
 
+<section class="col" id="residual">
+  <p class="secnum">08 — Honest limits</p>
+  <h2>What is still not trustless</h2>
+  <p class="lede">An atomic swap removes the trusted party. It does not remove counterparty risk, and saying "this makes it trustless" without the rest would be the same overclaim the README spent a year making.</p>
+
+  <h3>What genuinely goes away</h3>
+  <ul>
+    <li><strong>A miner claiming an escrow without paying.</strong> There is no longer any such thing as a claim based on an alleged payment, so there is nothing to fabricate.</li>
+    <li><strong>A lying RPC deciding who gets paid.</strong> Consensus checks a hash preimage and nothing else. An endpoint that lies to you can only cause <em>you</em> to miss a deadline.</li>
+    <li><strong>Node-local state gating consensus.</strong> Every input to a spend decision is derivable from blocks.</li>
+  </ul>
+</section>
+
+<div class="wide tablewrap">
+  <table>
+    <thead>
+      <tr><th scope="col">What remains</th><th scope="col">Why it cannot be designed away</th><th scope="col">What reduces it</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <th scope="row">You have to watch</th>
+        <td>Once the maker reveals the secret to take the Bitcoin, the taker must claim before the Coinshift escrow expires. Miss the window and the maker refunds it <em>and</em> keeps the Bitcoin. Nobody broke a rule — the taker looked away.</td>
+        <td><code>REVEAL_SAFETY_BLOCKS</code>, and an automated watcher rather than a person.</td>
+      </tr>
+      <tr>
+        <th scope="row">The maker holds a free option</th>
+        <td>They choose whether to reveal at all. If the price moves against them they walk; the taker refunds, whole but out fees and a round trip. Inherent to who generates the secret.</td>
+        <td>Short windows, a forfeitable maker bond, reputation.</td>
+      </tr>
+      <tr>
+        <th scope="row">Deadline ordering is ours to get right</th>
+        <td>Consensus on either chain sees one leg and cannot check the relationship between two. Nothing on-chain can catch an inverted pair.</td>
+        <td><code>SwapDeadlines</code> refuses to construct one — but it is our code, not a rule.</td>
+      </tr>
+      <tr>
+        <th scope="row">Deep reorgs</th>
+        <td>A reorg past the confirmation depth on either chain, after one leg has settled, leaves the two legs disagreeing. Depth is the only mitigation anyone has.</td>
+        <td>Confirmation depth, chosen against reorg cost.</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="col">
+  <div class="note warn">
+    <span class="label">The parameter this turns on</span>
+    <p><code>REVEAL_SAFETY_BLOCKS</code> is how long a taker may look away, and it was <strong>12 blocks — two hours</strong>, which is comfortable for a daemon and far too short for a person. It is now 144, roughly a day.</p>
+    <p>The cost is locked capital on both sides when a swap is abandoned. That is a product decision rather than an engineering one, and it belongs with whoever knows how this will actually be used — the same bucket as the maker bond.</p>
+  </div>
+
+  <h3>The claim we can actually make</h3>
+  <p><strong>Trustless, not risk-free, and it requires participation.</strong> There is no third party to trust and no endpoint whose honesty matters to anyone but its own operator. There is still a counterparty who can waste your time, and a window you have to stay awake for.</p>
+  <p>That is a straightforwardly better trade than trusting an RPC. It is not the same as safe to start and forget, and the README now says so in those words.</p>
+</div>
+
+<hr class="rule">
+
 <section class="col" id="lied">
-  <p class="secnum">08 — Corrections</p>
+  <p class="secnum">09 — Corrections</p>
   <h2>Where the documentation lied</h2>
   <p class="lede">Three places where a document asserted something that was not true, found while doing this work. Recorded rather than quietly corrected, because a contradiction that is silently patched teaches nobody anything, and the same one grows back.</p>
 
@@ -715,7 +780,7 @@
 <hr class="rule">
 
 <section class="col" id="rollout">
-  <p class="secnum">09 — Rollout</p>
+  <p class="secnum">10 — Rollout</p>
   <h2>Getting it into the world</h2>
   <p class="lede">Nothing is in production, so this ships as an ordinary change rather than a fork. That is the single biggest thing working in this plan's favour, and it has a shelf life.</p>
   <p>The three consensus changes queued up — the expiry fix in <code>#138</code>, the <code>SwapAccept</code> binding already merged in <code>#135</code>, and this one — would each need a coordinated deployment against a live chain. Against no chain they need a merge and a rebuilt regtest. Landing them now costs a fraction of what landing them later will.</p>

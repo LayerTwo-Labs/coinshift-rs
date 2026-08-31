@@ -79,7 +79,10 @@
     -webkit-font-smoothing: antialiased;
   }
 
-  .col { max-width: var(--measure); margin-inline: auto; }
+  /* One left edge for the whole page — see the note in the other specs. */
+  .col { max-width: var(--figure-w); margin-inline: auto; }
+  .col > * { max-width: var(--measure); }
+  .col > .tablewrap, .col > figure, .col > .plate { max-width: none; }
 
   header.masthead {
     max-width: var(--figure-w);
@@ -391,6 +394,10 @@
 
 
 
+
+
+
+
   /* ---- shared document nav — keep identical across the protocol docs ---- */
   nav.docnav {
     max-width: var(--figure-w);
@@ -426,6 +433,10 @@
   <a href="ATOMIC_SWAP_PLAN.html">Building the Atomic Swap</a>
   <a href="COINSHIFT_HOW_IT_WORKS.html">How Coinshift Works</a>
 </nav>
+
+
+
+
 
 
 

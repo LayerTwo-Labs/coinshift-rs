@@ -298,10 +298,27 @@ pub const COINSHIFT_BLOCK_SECS: u32 = 600;
 
 /// Slack, in Coinshift blocks, between the two deadlines.
 ///
+/// # This is a security parameter, not a comfort margin
+///
 /// After the maker reveals the secret by taking the Bitcoin leg, the taker has
-/// to notice it and get their own claim mined. This is how much room they get
-/// to do it, on top of the nominal conversion between the two block times.
-pub const REVEAL_SAFETY_BLOCKS: u32 = 12;
+/// to notice and get their own claim mined. If they do not manage it before
+/// the Coinshift escrow expires, the maker refunds that escrow **and keeps the
+/// Bitcoin** — a complete loss for the taker, caused by inattention rather
+/// than by anyone breaking a rule.
+///
+/// So this number is how long a taker may look away. At twelve blocks it was
+/// two hours, which is fine for a daemon and far too short for a person. 144
+/// blocks is roughly a day, which a human can survive and an automated watcher
+/// does not mind.
+///
+/// The cost is locked capital: both sides wait longer for a refund when a swap
+/// is abandoned. That is the trade, and it is the kind of number that should be
+/// set from how this is actually used rather than left at whatever the first
+/// draft happened to pick.
+///
+/// **A taker still needs to watch.** No margin removes that requirement; this
+/// only decides how demanding it is.
+pub const REVEAL_SAFETY_BLOCKS: u32 = 144;
 
 /// The two deadlines of a swap, in a shape that cannot hold an unsafe pair.
 ///
