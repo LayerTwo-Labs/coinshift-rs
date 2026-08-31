@@ -62,17 +62,6 @@ jobs:
           chmod +x bitcoin-patched-bins/bitcoin-cli
           popd
 
-      - name: Download latest bip300301_enforcer
-        run: |
-          pushd ..
-          wget https://releases.drivechain.info/bip300301-enforcer-latest-x86_64-unknown-linux-gnu.zip
-          unzip bip300301-enforcer-latest-x86_64-unknown-linux-gnu.zip
-          rm bip300301-enforcer-latest-x86_64-unknown-linux-gnu.zip
-          mv bip300301-enforcer-latest-x86_64-unknown-linux-gnu/bip300301-enforcer-*-x86_64-unknown-linux-gnu bip300301-enforcer
-          rm -r bip300301-enforcer-latest-x86_64-unknown-linux-gnu
-          chmod +x bip300301-enforcer
-          popd
-
       - name: Checkout electrs
         run: |
           pushd ..
@@ -105,13 +94,50 @@ jobs:
         with:
           shared-key: x86_64-unknown-linux-gnu
 
+      # The test harness comes from bip300301_enforcer_integration_tests, pinned
+      # to a rev in Cargo.toml, and it has to agree with the enforcer binary on
+      # the CLI. A downloaded "latest" build does not: the pinned rev takes
+      # --serve-json-rpc-addr, latest renamed it to --serve-rpc-addr, and the
+      # enforcer exits 2 before a single test runs. Reading the rev out of
+      # Cargo.toml keeps harness and binary in lockstep by construction.
+      - name: Resolve the pinned enforcer rev
+        id: enforcer
+        run: |
+          rev="$(awk -F'"' '
+            /^\[workspace\.dependencies\.bip300301_enforcer_lib\]/ { f = 1 }
+            f && /^rev[[:space:]]*=/ { print $2; exit }
+          ' Cargo.toml)"
+          [ -n "$rev" ] || { echo "could not read the pinned enforcer rev from Cargo.toml" >&2; exit 1; }
+          echo "rev=$rev" >> "$GITHUB_OUTPUT"
+          echo "Pinned enforcer rev: $rev"
+
+      - name: Checkout bip300301_enforcer at the pinned rev
+        run: |
+          pushd ..
+          git clone https://github.com/LayerTwo-Labs/bip300301_enforcer.git enforcer-src
+          cd enforcer-src
+          git checkout --quiet ${{ steps.enforcer.outputs.rev }}
+          popd
+
+      - name: Rust Cache (enforcer)
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "v0-rust-enforcer-${{ steps.enforcer.outputs.rev }}"
+          workspaces: ../enforcer-src -> target
+
+      - name: Build bip300301_enforcer
+        run: |
+          pushd ../enforcer-src
+          cargo build --release --bin bip300301_enforcer
+          popd
+
       - name: Build (debug)
         run: cargo build
 
       - name: Run integration tests
         id: runIntegrationTests
         run: |
-          export BIP300301_ENFORCER='../bip300301-enforcer'
+          export BIP300301_ENFORCER='../enforcer-src/target/release/bip300301_enforcer'
           export BITCOIND='../bitcoin-patched-bins/bitcoind'
           export BITCOIN_CLI='../bitcoin-patched-bins/bitcoin-cli'
           export ELECTRS='../electrs/target/release/electrs'
