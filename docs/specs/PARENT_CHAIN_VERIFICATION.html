@@ -296,6 +296,7 @@
   tr.pick td, tr.pick th { background: var(--tint); }
   td .yes { color: var(--consensus); font-weight: 600; }
   td .no  { color: var(--danger); font-weight: 600; }
+  td .mid { color: var(--local); font-weight: 600; }
 
   /* ---- decision block ---- */
   .decision {
@@ -322,6 +323,51 @@
     font-size: 13px;
     line-height: 1.6;
   }
+
+  /* ---- recommendation panel ---- */
+  .recommend {
+    max-width: var(--figure-w);
+    margin: 44px auto 0;
+    border: 1px solid var(--consensus);
+    border-radius: 6px;
+    background: var(--tint);
+    padding: 26px 30px;
+  }
+  .recommend .eyebrow { margin-bottom: 12px; }
+  .rec-lead {
+    font-family: Spectral, Georgia, serif;
+    font-size: clamp(20px, 2.5vw, 26px);
+    line-height: 1.38;
+    margin: 0 0 12px;
+    max-width: 62ch;
+    text-wrap: pretty;
+  }
+  .rec-lead a { font-weight: 600; text-decoration-thickness: 1px; }
+  .rec-sub { font-size: 15.5px; color: var(--ink-muted); margin: 0; max-width: 72ch; }
+
+  /* ---- contents ---- */
+  nav.toc { margin: 44px auto 0; padding: 0; max-width: var(--figure-w); }
+  nav.toc ol {
+    list-style: none; padding: 0; margin: 0;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+    gap: 2px 32px;
+    counter-reset: toc;
+  }
+  nav.toc li { margin: 0; counter-increment: toc; }
+  nav.toc a {
+    display: flex; gap: 12px; padding: 9px 0;
+    border-bottom: 1px solid var(--rule-soft);
+    color: var(--ink); text-decoration: none; font-size: 15px;
+  }
+  nav.toc a::before {
+    content: counter(toc, decimal-leading-zero);
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 12px; color: var(--consensus); padding-top: 2px;
+  }
+  nav.toc a:hover { color: var(--consensus); }
+
+  section[id] { scroll-margin-top: 24px; }
 
   hr.rule {
     border: 0;
