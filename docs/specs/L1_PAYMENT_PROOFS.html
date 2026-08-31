@@ -83,6 +83,7 @@
   .col { max-width: var(--figure-w); margin-inline: auto; }
   .col > * { max-width: var(--measure); }
   .col > .tablewrap, .col > figure, .col > .plate { max-width: none; }
+  .wide { max-width: var(--figure-w); margin-inline: auto; }
 
   header.masthead {
     max-width: var(--figure-w);
@@ -267,7 +268,7 @@
     margin-right: 10px;
   }
 
-  .table-wrap { overflow-x: auto; margin: 28px 0; }
+  .tablewrap { overflow-x: auto; margin: 28px 0; }
   table {
     border-collapse: collapse;
     width: 100%;
@@ -650,7 +651,7 @@
 <section id="consequences" class="col">
   <span class="kicker">06 — Consequences</span>
   <h2>What this changes elsewhere</h2>
-  <div class="table-wrap">
+  <div class="wide tablewrap">
     <table>
       <thead><tr><th>Today</th><th>After</th></tr></thead>
       <tbody>
@@ -722,7 +723,7 @@
   <span class="kicker">08 — Estimate</span>
   <h2>Work breakdown</h2>
   <p>For Option B, roughly in dependency order.</p>
-  <div class="table-wrap">
+  <div class="wide tablewrap">
     <table>
       <thead><tr><th>Piece</th><th>Where</th><th>Size</th></tr></thead>
       <tbody>

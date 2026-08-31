@@ -836,7 +836,11 @@ if !filled_transaction.spent_utxos.iter()
 
 <div class="col">
   <h3>What it costs in the codebase</h3>
-  <p>There is no scripting engine and no timelock primitive today — <code>OutputContent</code> is <code>Value | Withdrawal | SwapPending</code>. You would add one variant, roughly <code>HashLocked { value, hash, claimant, refund_to, timeout_height }</code>, with two spend rules: claimant-with-preimage, or refund-after-height. No interpreter, no relay, no oracle. On the BTC side nothing is built into consensus at all — the wallet constructs and watches a standard P2WSH HTLC.</p>
+  <p>There was no scripting engine and no timelock primitive when this was written &mdash; <code>OutputContent</code> was <code>Value | Withdrawal | SwapPending</code>. It takes one added variant, with two spend rules: claimant-with-preimage, or refund-after-height. No interpreter, no relay, no oracle. On the BTC side nothing is built into consensus at all &mdash; the wallet constructs and watches a standard P2WSH HTLC.</p>
+  <div class="note">
+    <span class="label">Now built</span>
+    <p>This is now built. The shipped variant is <code>HashLocked { value, hash, claimant, timeout_height }</code> &mdash; no <code>refund_to</code>, because <code>Output::address</code> already names the maker and a refund takes no authorization exemption. See <a href="ATOMIC_SWAP_PLAN.html">the execution plan</a> for what is done and what is not.</p>
+  </div>
   <p><code>SwapAccept</code> survives, doing what it is actually good for: matching a taker to a posted order on-chain, so you keep open orders rather than needing an out-of-band handshake.</p>
   <div class="note local">
     <span class="label">The real trade</span>

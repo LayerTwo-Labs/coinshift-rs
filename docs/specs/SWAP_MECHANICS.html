@@ -88,6 +88,7 @@
   }
   .col > * { max-width: var(--measure); }
   .col > .tablewrap, .col > figure, .col > .plate { max-width: none; }
+  .wide { max-width: var(--figure-w); margin-inline: auto; }
 
   /* ---------- masthead ---------- */
 
@@ -271,7 +272,7 @@
 
   /* ---------- tables ---------- */
 
-  .table-wrap { overflow-x: auto; margin: 28px 0; }
+  .tablewrap { overflow-x: auto; margin: 28px 0; }
 
   table {
     border-collapse: collapse;
@@ -555,7 +556,7 @@
   <h2>Two validators, one payout rule</h2>
   <p>Because of that boundary, a <code>SwapClaim</code> is checked by two different functions depending on where it arrives.</p>
 
-  <div class="table-wrap">
+  <div class="wide tablewrap">
     <table>
       <thead>
         <tr><th>&nbsp;</th><th>Mempool</th><th>Block validation</th></tr>
@@ -760,7 +761,7 @@ sequenceDiagram
   <p>In both cases the maker loses the escrow. The reservation machinery does its job — it decides <em>who</em> may be paid, and that part is now enforced by every node — but nothing in block validation asks whether the other leg of the trade ever happened. The L1 leg is secured by whoever is watching and by the cost of misbehaving, not by consensus.</p>
   <p>Closing it means proving the parent-chain payment <em>to</em> consensus: per-chain header sync, proof-of-work validation, and a merkle proof of the payment inside a parent-chain block, carried by the claim. That is a substantial project, and it is the honest price of the word "trustless" for the L1 leg.</p>
 
-  <div class="table-wrap">
+  <div class="wide tablewrap">
     <table>
       <thead>
         <tr><th>Parent chain</th><th>Ticker</th><th>Confirmations</th><th>Accept window</th><th>Preset config shipped</th></tr>
@@ -819,7 +820,7 @@ stateDiagram-v2
   <h2>Rules and code map</h2>
 
   <h3>What consensus enforces</h3>
-  <div class="table-wrap">
+  <div class="wide tablewrap">
     <table>
       <thead>
         <tr><th>Transaction</th><th>Rule</th></tr>
@@ -838,7 +839,7 @@ stateDiagram-v2
   </div>
 
   <h3>Where it lives</h3>
-  <div class="table-wrap">
+  <div class="wide tablewrap">
     <table>
       <thead>
         <tr><th>Path</th><th>Responsibility</th></tr>

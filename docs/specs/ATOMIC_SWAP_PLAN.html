@@ -543,7 +543,7 @@
     <tbody>
       <tr>
         <th scope="row">1 · The output type <span class="mono" style="color:var(--consensus);font-weight:400">✓ done</span></th>
-        <td><code>Content::HashLocked { value, hash, claimant, refund_to, timeout_height }</code>, <strong>appended last</strong>, plus a discriminant-stability test</td>
+        <td><code>Content::HashLocked { value, hash, claimant, timeout_height }</code>, <strong>appended last</strong>, plus a discriminant-stability test. No <code>refund_to</code> &mdash; <code>Output::address</code> already names the maker</td>
         <td><span class="mono">lib/types/transaction.rs</span></td>
         <td>S</td>
       </tr>
@@ -555,7 +555,7 @@
       </tr>
       <tr>
         <th scope="row">3 · Spend rules <span class="mono" style="color:var(--consensus);font-weight:400">✓ done</span></th>
-        <td>Claim path (<code>sha256(preimage) == hash</code>, pays <code>claimant</code>) and refund path (<code>validating_height() &gt;= timeout_height</code>, pays <code>refund_to</code>)</td>
+        <td>Claim path (<code>sha256(preimage) == hash</code>, pays <code>claimant</code>) and refund path (<code>validating_height() &gt;= timeout_height</code>, and nothing else &mdash; a refund takes no authorization exemption, so the ordinary address check already decides who is paid)</td>
         <td><span class="mono">lib/state/mod.rs:L395</span><br><span class="mono">lib/state/swap.rs</span></td>
         <td>M</td>
       </tr>
