@@ -180,6 +180,7 @@ documents live on other branches. Open it directly; there is no build step.
 
 | Doc | Description |
 |-----|-------------|
+| [COINSHIFT_HOW_IT_WORKS.html](docs/specs/COINSHIFT_HOW_IT_WORKS.html) | Architecture: the two chains the node talks to, the two-way peg, the swap lifecycle, and what confirms a payment |
 | [SWAP_MECHANICS.html](docs/specs/SWAP_MECHANICS.html) | Illustrated swap protocol: sequence diagrams, the consensus / node-local boundary, and what the L1 leg still trusts |
 | [L1_PAYMENT_PROOFS.html](docs/specs/L1_PAYMENT_PROOFS.html) | Proposal: verifying the parent-chain leg of a swap in consensus |
 | [PARENT_CHAIN_VERIFICATION.html](docs/specs/PARENT_CHAIN_VERIFICATION.html) | Decided: four ways to close the L1 gap for a BTC parent chain, and why the code rules out three |
@@ -192,7 +193,6 @@ documents live on other branches. Open it directly; there is no build step.
 |-----|-------------|
 | [SETUP_ORDER.md](docs/SETUP_ORDER.md) | Step-by-step regtest setup (mainchain, enforcer, wallets, mining) |
 | [ADDING_PARENT_CHAINS.md](docs/ADDING_PARENT_CHAINS.md) | Supported L1 chains and how to add new ones |
-| [COINSHIFT_HOW_IT_WORKS.md](docs/COINSHIFT_HOW_IT_WORKS.md) | Architecture and swap flow |
 | [MANUAL_SETUP_SWAP_REGTEST.md](docs/MANUAL_SETUP_SWAP_REGTEST.md) | Manual regtest + swap (Alice & Bob) |
 | [ENFORCER_WALLET_GUIDE.md](docs/ENFORCER_WALLET_GUIDE.md) | Enforcer wallet creation and usage |
 | [SETUP_COMMANDS.md](docs/SETUP_COMMANDS.md) | Copy-paste setup commands (signet/regtest) |

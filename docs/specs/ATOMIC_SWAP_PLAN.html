@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Building the Atomic Swap</title>
-<meta name="description" content="Phase-by-phase execution plan for the Coinshift atomic swap: what changes, in which file, in what order, and how each phase is proved.">
+<meta name="description" content="Phase-by-phase execution plan and runbook for the Coinshift atomic swap: what changes, how to run the end-to-end test, and what it caught.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Spectral:ital,wght@0,600;0,700;1,400&display=swap">
@@ -354,6 +354,7 @@
   <a href="L1_PAYMENT_PROOFS.html">L1 Payment Proofs</a>
   <a href="PARENT_CHAIN_VERIFICATION.html">Proving the Parent Chain</a>
   <a href="ATOMIC_SWAP_PLAN.html" aria-current="page">Building the Atomic Swap</a>
+  <a href="COINSHIFT_HOW_IT_WORKS.html">How Coinshift Works</a>
 </nav>
 
 <header class="masthead">
@@ -680,7 +681,7 @@
   <p>First sentence, first line: <em>"a BIP300-style sidechain node with a trustless L2 &lt;-&gt; L1 swap system"</em>. It was not trustless. <code>validate_swap_claim_consensus</code> never inspected a parent-chain fact, so a miner could claim an escrow for a payment that never happened — the vulnerability this entire branch exists to close.</p>
   <p>Every document in <span class="mono">docs/specs/</span> had been saying so for some time. The README, which is what anyone reads first, said the opposite. The claim is now replaced by a note that states what is actually true and says the README used to say otherwise.</p>
 
-  <h3>COINSHIFT_HOW_IT_WORKS.md contradicted itself, 130 lines apart</h3>
+  <h3><a href="COINSHIFT_HOW_IT_WORKS.html">COINSHIFT_HOW_IT_WORKS</a> contradicted itself, 130 lines apart</h3>
 </section>
 
 <div class="wide tablewrap">
