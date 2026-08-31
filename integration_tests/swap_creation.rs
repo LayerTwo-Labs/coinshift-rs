@@ -45,7 +45,11 @@ const DEPOSIT_AMOUNT: bitcoin::Amount = bitcoin::Amount::from_sat(21_000_000);
 const DEPOSIT_FEE: bitcoin::Amount = bitcoin::Amount::from_sat(1_000_000);
 const SWAP_L2_AMOUNT: u64 = 10_000_000; // 0.1 BTC
 const SWAP_L1_AMOUNT: u64 = 5_000_000; // 0.05 BTC
-const SWAP_FEE: u64 = 1_000; // 0.00001 BTC
+const SWAP_FEE: u64 = 1_000;
+/// Enough for the reserver to own an input, which `validate_swap_accept`
+/// requires as proof they control the address they are reserving for.
+const ACCEPT_FUNDING: u64 = 100_000;
+const ACCEPT_FEE: u64 = 1_000; // 0.00001 BTC
 
 /// Verify that a swap was created successfully
 async fn verify_swap_created(
@@ -493,6 +497,22 @@ async fn swap_creation_open_fill_task(
     // unlike the L1 payment. Taking it after paying would let anyone watching
     // front-run him.
     let claimer_address = sidechain.rpc_client.get_new_address().await?;
+
+    // Fund that address first. `validate_swap_accept` requires the reservation
+    // to spend an input owned by the address it reserves for — that is what
+    // proves control of it, and without the rule anyone could park every open
+    // swap for free. A freshly generated address owns nothing, so coin
+    // selection has nothing to offer and the accept fails with "not enough
+    // funds". Paying Bob before he reserves is also what a real taker does:
+    // he has to hold Coinshift coins to be in this trade at all.
+    let () = sidechain
+        .rpc_client
+        .transfer(claimer_address, ACCEPT_FUNDING, ACCEPT_FEE)
+        .await
+        .map(|_| ())?;
+    sidechain.bmm_single(&mut enforcer_post_setup).await?;
+    sleep(std::time::Duration::from_millis(500)).await;
+
     let accept_txid = sidechain
         .rpc_client
         .accept_swap(swap_id, Some(claimer_address), Some(0))
