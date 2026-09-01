@@ -116,6 +116,22 @@ pub struct State {
         SerdeBincode<M6id>,
         SerdeBincode<(WithdrawalBundleInfo, RollBack<WithdrawalBundleStatus>)>,
     >,
+    /// Height of the sidechain block that created each withdrawal bundle,
+    /// keyed by m6id.
+    ///
+    /// `pending_withdrawal_bundle` carries this height while the bundle is
+    /// pending, but that record is deleted once the bundle's M3 is seen, so
+    /// the height would otherwise be lost.
+    /// `disconnect_withdrawal_bundle_submitted` needs it to restore the
+    /// pending bundle exactly as it was. It cannot be reconstructed as "the
+    /// block before the submission": an M3 is a coinbase message and can land
+    /// an arbitrary number of blocks after the bundle was created (#146).
+    ///
+    /// Kept in its own database rather than added to the `withdrawal_bundles`
+    /// record so that databases written by earlier versions keep
+    /// deserializing; a missing entry falls back to the old reconstruction.
+    pub withdrawal_bundle_creation_heights:
+        DatabaseUnique<SerdeBincode<M6id>, SerdeBincode<u32>>,
     /// deposit blocks and the height at which they were applied, keyed sequentially
     pub deposit_blocks: DatabaseUnique<
         SerdeBincode<u32>,
@@ -159,7 +175,7 @@ pub struct State {
 }
 
 impl State {
-    pub const NUM_DBS: u32 = 17;
+    pub const NUM_DBS: u32 = 18;
 
     pub fn new(env: &sneed::Env) -> Result<Self, Error> {
         let mut rwtxn = env.write_txn().map_err(EnvError::from)?;
@@ -186,6 +202,12 @@ impl State {
         let withdrawal_bundles =
             DatabaseUnique::create(env, &mut rwtxn, "withdrawal_bundles")
                 .map_err(EnvError::from)?;
+        let withdrawal_bundle_creation_heights = DatabaseUnique::create(
+            env,
+            &mut rwtxn,
+            "withdrawal_bundle_creation_heights",
+        )
+        .map_err(EnvError::from)?;
         let deposit_blocks =
             DatabaseUnique::create(env, &mut rwtxn, "deposit_blocks")
                 .map_err(EnvError::from)?;
@@ -235,6 +257,7 @@ impl State {
             pending_withdrawal_bundle,
             latest_failed_withdrawal_bundle,
             withdrawal_bundles,
+            withdrawal_bundle_creation_heights,
             deposit_blocks,
             withdrawal_bundle_event_blocks,
             utreexo_accumulator,
