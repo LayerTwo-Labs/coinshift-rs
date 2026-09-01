@@ -119,7 +119,24 @@ fn connect_withdrawal_bundle_submitted(
         .map_err(DbError::from)?
         && bundle.compute_m6id() == m6id
     {
-        assert_eq!(bundle_block_height, block_height - 1);
+        // An M3 is a coinbase message: it reaches the mainchain only when the
+        // sidechain operator themself mines a mainchain block, so it can land
+        // an arbitrary number of blocks after the one that created the bundle.
+        // (An M8 is an ordinary transaction any miner's enforcer relays, which
+        // is why that path does not have this problem.) This used to be
+        // `assert_eq!(bundle_block_height, block_height - 1)`, which panicked
+        // the net task for the rest of the process's lifetime — no crash, no
+        // restart, just a node with no peers that never connects another tip.
+        // Nothing below reads `bundle_block_height`, so a delayed submission is
+        // logged and applied rather than fatal. See issue #146.
+        if bundle_block_height != block_height.saturating_sub(1) {
+            tracing::warn!(
+                %bundle_block_height,
+                %block_height,
+                %m6id,
+                "Withdrawal bundle submitted later than the block after the one that created it"
+            );
+        }
 
         // Calculate total withdrawal amount from bundle outputs
         let total_withdrawal_value: bitcoin::Amount = bundle
@@ -1078,9 +1095,28 @@ fn disconnect_withdrawal_bundle_submitted(
                 });
                 accumulator_diff.insert(utxo_hash.into());
             }
+            // The bundle's creation height is not stored anywhere once it
+            // moves out of `pending_withdrawal_bundle`, so it is reconstructed
+            // here as "the block before the submission". That is only exact
+            // when the M3 landed in the very next block — the same assumption
+            // that used to be asserted in `connect_withdrawal_bundle_submitted`
+            // (issue #146). `saturating_sub` keeps a submission at height 0
+            // from panicking here the way the assert did there.
+            //
+            // The reconstructed height is read by the pending-bundle cleanup in
+            // `disconnect`, which deletes the bundle when it equals
+            // `block_height - 1`. After a delayed M3 that comparison fires at
+            // the wrong height. Fixing it properly means persisting the real
+            // creation height, which changes the `withdrawal_bundles` record
+            // format, so it is left as-is here rather than smuggled into a
+            // panic fix.
             state
                 .pending_withdrawal_bundle
-                .put(rwtxn, &(), &(bundle, bundle_status.height - 1))
+                .put(
+                    rwtxn,
+                    &(),
+                    &(bundle, bundle_status.height.saturating_sub(1)),
+                )
                 .map_err(DbError::from)?;
         }
     }
@@ -1677,6 +1713,134 @@ mod withdrawal_bundle_reversal_tests {
         assert!(
             state.stxos.try_get(&rwtxn, &key).unwrap().is_none(),
             "disconnect must not re-spend the UTXO restored by the expiry"
+        );
+    }
+
+    /// Build a one-input, one-output bundle and register it as pending at
+    /// `created_at`. Returns the outpoint, its output, and the bundle's m6id.
+    fn pending_bundle_at(
+        state: &State,
+        rwtxn: &mut RwTxn,
+        created_at: u32,
+    ) -> (OutPoint, Output, M6id) {
+        let outpoint = OutPoint::Regular {
+            txid: Txid([7u8; 32]),
+            vout: 0,
+        };
+        let output = Output {
+            address: Address([2u8; 20]),
+            content: OutputContent::Value(sat(30_000)),
+        };
+        let bundle = WithdrawalBundle::new(
+            created_at,
+            sat(1_000),
+            BTreeMap::from([(outpoint, output.clone())]),
+            vec![bitcoin::TxOut {
+                value: sat(29_000),
+                script_pubkey: bitcoin::ScriptBuf::new(),
+            }],
+        )
+        .unwrap();
+        let m6id = bundle.compute_m6id();
+        state
+            .utxos
+            .put(rwtxn, &OutPointKey::from(&outpoint), &output)
+            .unwrap();
+        state
+            .pending_withdrawal_bundle
+            .put(rwtxn, &(), &(bundle, created_at))
+            .unwrap();
+        (outpoint, output, m6id)
+    }
+
+    /// An M3 is a coinbase message, so it reaches the mainchain only when the
+    /// sidechain operator mines a mainchain block themself — an arbitrary
+    /// number of blocks after the one that created the bundle. Connecting that
+    /// late submission must apply the bundle normally, not panic the worker
+    /// thread running the net task.
+    ///
+    /// Heights are the ones observed on eCash alphanet slot 255 in issue #146:
+    /// the bundle was created at sidechain height 11 and its M3 was not seen
+    /// until height 25.
+    #[test]
+    fn delayed_bundle_submission_applies_instead_of_panicking() {
+        let (_dir, env, state) = test_state();
+        let mut rwtxn = env.write_txn().unwrap();
+        let (outpoint, output, m6id) =
+            pending_bundle_at(&state, &mut rwtxn, 11);
+        let key = OutPointKey::from(&outpoint);
+        let mut accumulator_diff = AccumulatorDiff::default();
+
+        connect_withdrawal_bundle_event(
+            &state,
+            &mut rwtxn,
+            25,
+            &mut accumulator_diff,
+            &bitcoin::BlockHash::all_zeros(),
+            &bundle_event(m6id, WithdrawalBundleStatus::Submitted),
+        )
+        .expect("a submission 14 blocks after bundle creation must be applied");
+
+        let (_bundle, bundle_status) = state
+            .withdrawal_bundles
+            .try_get(&rwtxn, &m6id)
+            .unwrap()
+            .expect("the bundle must be recorded as submitted");
+        assert_eq!(
+            bundle_status.latest().value,
+            WithdrawalBundleStatus::Submitted
+        );
+        assert_eq!(
+            bundle_status.latest().height,
+            25,
+            "the submission is recorded at the height that saw the M3"
+        );
+        assert!(
+            state
+                .pending_withdrawal_bundle
+                .try_get(&rwtxn, &())
+                .unwrap()
+                .is_none(),
+            "the bundle is no longer pending once submitted"
+        );
+        assert!(
+            state.utxos.try_get(&rwtxn, &key).unwrap().is_none(),
+            "the bundle's inputs must be spent"
+        );
+        assert_eq!(
+            state.stxos.try_get(&rwtxn, &key).unwrap().map(|s| s.output),
+            Some(output),
+            "the spent input must be recorded as an stxo"
+        );
+    }
+
+    /// The old `block_height - 1` also underflowed when a submission was
+    /// connected at height 0, panicking before the comparison could even run.
+    #[test]
+    fn bundle_submission_at_height_zero_does_not_underflow() {
+        let (_dir, env, state) = test_state();
+        let mut rwtxn = env.write_txn().unwrap();
+        let (_outpoint, _output, m6id) =
+            pending_bundle_at(&state, &mut rwtxn, 0);
+        let mut accumulator_diff = AccumulatorDiff::default();
+
+        connect_withdrawal_bundle_event(
+            &state,
+            &mut rwtxn,
+            0,
+            &mut accumulator_diff,
+            &bitcoin::BlockHash::all_zeros(),
+            &bundle_event(m6id, WithdrawalBundleStatus::Submitted),
+        )
+        .expect("a submission at height 0 must not underflow");
+
+        assert!(
+            state
+                .withdrawal_bundles
+                .try_get(&rwtxn, &m6id)
+                .unwrap()
+                .is_some(),
+            "the bundle must still be recorded"
         );
     }
 }
