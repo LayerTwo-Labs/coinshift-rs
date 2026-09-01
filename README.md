@@ -1,6 +1,48 @@
 # Coinshift
 
-Coinshift is a [BIP300](https://en.bitcoin.it/wiki/BIP_0300)-style sidechain node with a trustless **L2 <-> L1 swap** system. Exchange sidechain (L2) coins for parent-chain (L1) assets such as BTC, BCH, or LTC, and vice versa. The app includes a JSON-RPC server, CLI, and GUI.
+Coinshift is a [BIP300](https://en.bitcoin.it/wiki/BIP_0300)-style sidechain node with an **L2 <-> L1 swap** system. Exchange sidechain (L2) coins for parent-chain (L1) assets such as BTC, BCH, or LTC, and vice versa. The app includes a JSON-RPC server, CLI, and GUI.
+
+> ### What is and is not trustless here
+>
+> **This README used to call the swap system trustless, in the sentence above.**
+> It was not, and the correction is worth making carefully rather than swapping
+> one overclaim for another.
+>
+> **Today.** The L2 side is enforced by consensus: escrow locks when
+> `SwapCreate` connects, and only the address named by a live `SwapAccept`
+> reservation can be paid. The parent-chain side is enforced by nothing.
+> `validate_swap_claim_consensus` never inspects an L1 fact, so **a miner can
+> claim a swap escrow for a Bitcoin payment that never happened** and every
+> node accepts the block. The checks that do exist — txid uniqueness, rejecting
+> zero confirmations, block inclusion — all run against a node-local RPC
+> answer, so they are as honest as whichever endpoint you configured, and
+> consensus consults none of them.
+>
+> **With atomic swaps** ([in progress](docs/specs/ATOMIC_SWAP_PLAN.html); both
+> legs pass on regtest today) that vector is gone, because there is no longer
+> any such thing as a claim based on an alleged payment. Consensus checks
+> `sha256(preimage) == commitment` and nothing else — pure block data, the same
+> answer on every node. No trusted third party, no oracle, no relay, and a
+> lying Bitcoin RPC can only cause its own operator to miss a deadline.
+>
+> **What that still does not mean.** "Trustless" in the precise sense — no
+> trusted party — will be true. "No counterparty risk" will not:
+>
+> | Remains | Why |
+> |---|---|
+> | **You must watch** | After the maker reveals the secret to take the Bitcoin, the taker has to claim before the Coinshift escrow expires. Miss that window and the maker refunds it and keeps both legs. Nobody broke a rule; you looked away. |
+> | **The maker holds a free option** | They choose whether to reveal at all. If the price moves they can walk, and the taker refunds — whole, but out fees and a round trip. |
+> | **Deadline ordering is ours to get right** | `SwapDeadlines` refuses an unsafe pair, but consensus sees one leg and cannot check the relationship between two chains. A buggy wallet can still build a bad one. |
+> | **Deep reorgs** | A reorg past the confirmation depth on either chain, after one leg has settled, breaks the atomicity. |
+>
+> So: **trustless, not risk-free, and it requires participation.** That is a
+> better trade than trusting an endpoint, and it is not the same as "safe to
+> start and forget".
+>
+> [The decision](docs/specs/PARENT_CHAIN_VERIFICATION.html) covers why this
+> option and not the other three. [The plan](docs/specs/ATOMIC_SWAP_PLAN.html)
+> covers how to run it, and records the places our own documentation has
+> asserted things that were not true — including this sentence.
 
 - **Live node:** [coinshift.bip300.xyz](https://coinshift.bip300.xyz)
 - **Built by:** [Layer Two Labs](https://layertwolabs.com)
@@ -145,17 +187,29 @@ The CLI talks to the Coinshift RPC server (default `http://localhost:6255`). Use
 
 ## Documentation
 
+Start at **[docs/index.html](docs/index.html)** — it links everything below and says which
+documents live on other branches. Open it directly; there is no build step.
+
+**Protocol documents** (`docs/specs/`) — illustrated, long-form, and where design decisions get argued out:
+
 | Doc | Description |
 |-----|-------------|
-| [docs/SETUP_ORDER.md](docs/SETUP_ORDER.md) | Step-by-step regtest setup (mainchain, enforcer, wallets, mining) |
-| [docs/ADDING_PARENT_CHAINS.md](docs/ADDING_PARENT_CHAINS.md) | Supported L1 chains and how to add new ones |
-| [docs/COINSHIFT_HOW_IT_WORKS.md](docs/COINSHIFT_HOW_IT_WORKS.md) | Architecture and swap flow |
-| [docs/SWAP_MECHANICS.html](docs/SWAP_MECHANICS.html) | Illustrated swap protocol: sequence diagrams, the consensus / node-local boundary, and what the L1 leg still trusts |
-| [docs/MANUAL_SETUP_SWAP_REGTEST.md](docs/MANUAL_SETUP_SWAP_REGTEST.md) | Manual regtest + swap (Alice & Bob) |
-| [docs/ENFORCER_WALLET_GUIDE.md](docs/ENFORCER_WALLET_GUIDE.md) | Enforcer wallet creation and usage |
-| [docs/SETUP_COMMANDS.md](docs/SETUP_COMMANDS.md) | Copy-paste setup commands (signet/regtest) |
-| [docs/specs/swap-implementation-spec.md](docs/specs/swap-implementation-spec.md) | Swap implementation specification |
-| [docs/specs/L1_PAYMENT_PROOFS.html](docs/specs/L1_PAYMENT_PROOFS.html) | Proposal: verifying the parent-chain leg of a swap in consensus (awaiting a scope decision) |
+| [COINSHIFT_HOW_IT_WORKS.html](docs/specs/COINSHIFT_HOW_IT_WORKS.html) | Architecture: the two chains the node talks to, the two-way peg, the swap lifecycle, and what confirms a payment |
+| [SWAP_MECHANICS.html](docs/specs/SWAP_MECHANICS.html) | Illustrated swap protocol: sequence diagrams, the consensus / node-local boundary, and what the L1 leg still trusts |
+| [L1_PAYMENT_PROOFS.html](docs/specs/L1_PAYMENT_PROOFS.html) | Proposal: verifying the parent-chain leg of a swap in consensus |
+| [PARENT_CHAIN_VERIFICATION.html](docs/specs/PARENT_CHAIN_VERIFICATION.html) | Decided: four ways to close the L1 gap for a BTC parent chain, and why the code rules out three |
+| [ATOMIC_SWAP_PLAN.html](docs/specs/ATOMIC_SWAP_PLAN.html) | Execution plan for the atomic swap: phases, files, pitfalls, tests, rollout |
+| [swap-implementation-spec.md](docs/specs/swap-implementation-spec.md) | Swap implementation specification |
+
+**Guides** (`docs/`):
+
+| Doc | Description |
+|-----|-------------|
+| [SETUP_ORDER.md](docs/SETUP_ORDER.md) | Step-by-step regtest setup (mainchain, enforcer, wallets, mining) |
+| [ADDING_PARENT_CHAINS.md](docs/ADDING_PARENT_CHAINS.md) | Supported L1 chains and how to add new ones |
+| [MANUAL_SETUP_SWAP_REGTEST.md](docs/MANUAL_SETUP_SWAP_REGTEST.md) | Manual regtest + swap (Alice & Bob) |
+| [ENFORCER_WALLET_GUIDE.md](docs/ENFORCER_WALLET_GUIDE.md) | Enforcer wallet creation and usage |
+| [SETUP_COMMANDS.md](docs/SETUP_COMMANDS.md) | Copy-paste setup commands (signet/regtest) |
 
 ## Scripts
 

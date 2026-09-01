@@ -210,6 +210,68 @@ mod tests {
     use super::{OUTPOINT_KEY_SIZE, OutPoint, OutPointKey};
     use bitcoin::hashes::Hash as BitcoinHash;
 
+    /// `Content` is Borsh-encoded **by variant index** into every `Output`, and
+    /// outputs are hashed into the block's merkle root. Reordering a variant, or
+    /// inserting one above another, silently changes the encoding of every block
+    /// that carries it — the kind of break that shows up as an inexplicable
+    /// merkle-root mismatch rather than as a compile error.
+    ///
+    /// So: append only, and pin the numbering here. A new variant adds a row to
+    /// the bottom of this table; it never renumbers an existing one.
+    ///
+    /// Nothing is in production yet, so today this guard costs nothing to
+    /// satisfy. It is here so that the discipline predates the moment it starts
+    /// to matter.
+    #[test]
+    fn output_content_borsh_discriminants_are_stable() {
+        use super::content::Content;
+        use crate::types::Address;
+
+        let main_address = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"
+            .parse::<bitcoin::Address<_>>()
+            .expect("valid bech32 address");
+
+        let expected: &[(Content, u8)] = &[
+            (Content::Value(bitcoin::Amount::ZERO), 0),
+            (
+                Content::Withdrawal {
+                    value: bitcoin::Amount::ZERO,
+                    main_fee: bitcoin::Amount::ZERO,
+                    main_address,
+                },
+                1,
+            ),
+            (
+                Content::SwapPending {
+                    value: bitcoin::Amount::ZERO,
+                    swap_id: [0u8; 32],
+                },
+                2,
+            ),
+            (
+                Content::HashLocked {
+                    value: bitcoin::Amount::ZERO,
+                    hash: [0u8; 32],
+                    claimant: Address([1u8; 20]),
+                    timeout_height: 0,
+                },
+                3,
+            ),
+        ];
+
+        for (content, discriminant) in expected {
+            let encoded =
+                borsh::to_vec(content).expect("Content should Borsh-encode");
+            assert_eq!(
+                encoded.first().copied(),
+                Some(*discriminant),
+                "{content:?} must encode as variant {discriminant}; \
+                 a changed index rewrites the merkle root of every block \
+                 carrying this output type"
+            );
+        }
+    }
+
     #[test]
     fn check_outpoint_key_size() -> anyhow::Result<()> {
         let variants = [
@@ -300,6 +362,12 @@ mod content {
             value: bitcoin::Amount,
             swap_id: [u8; 32],
         },
+        HashLocked {
+            value: bitcoin::Amount,
+            hash: [u8; 32],
+            claimant: crate::types::Address,
+            timeout_height: u32,
+        },
     }
 
     /// Human-readable representation for Serde
@@ -331,6 +399,17 @@ mod content {
             #[schema(value_type = String)]
             swap_id: [u8; 32],
         },
+        HashLocked {
+            #[serde(with = "bitcoin::amount::serde::as_sat")]
+            #[serde(rename = "value_sats")]
+            #[schema(value_type = u64)]
+            value: bitcoin::Amount,
+            #[serde(with = "hex::serde")]
+            #[schema(value_type = String)]
+            hash: [u8; 32],
+            claimant: crate::types::Address,
+            timeout_height: u32,
+        },
     }
 
     type SerdeRepr = serde_with::IfIsHumanReadable<
@@ -357,6 +436,29 @@ mod content {
             value: bitcoin::Amount,
             swap_id: [u8; 32],
         },
+        /// Escrow for one leg of an atomic swap, spendable two ways.
+        ///
+        /// `claimant` may spend it by revealing a preimage of `hash`; the
+        /// output's own `Output::address` may reclaim it once the chain reaches
+        /// `timeout_height`. There is deliberately no separate `refund_to`
+        /// field — the address that authorises a refund and the address a
+        /// refund pays have to be the same one, and carrying both only creates
+        /// a way for them to disagree.
+        ///
+        /// Both paths are decided from block data alone, which is the point:
+        /// completing a cross-chain swap stops requiring any node to observe
+        /// the other chain (see docs/specs/ATOMIC_SWAP_PLAN.html).
+        ///
+        /// `hash` is **SHA-256**, not blake3, because the counterparty leg is a
+        /// Bitcoin HTLC gated on `OP_SHA256` and the two must open to the same
+        /// secret.
+        HashLocked {
+            #[borsh(serialize_with = "super::borsh_serialize_bitcoin_amount")]
+            value: bitcoin::Amount,
+            hash: [u8; 32],
+            claimant: crate::types::Address,
+            timeout_height: u32,
+        },
     }
 
     impl Content {
@@ -368,6 +470,9 @@ mod content {
         }
         pub fn is_swap_pending(&self) -> bool {
             matches!(self, Self::SwapPending { .. })
+        }
+        pub fn is_hash_locked(&self) -> bool {
+            matches!(self, Self::HashLocked { .. })
         }
 
         pub(in crate::types) fn schema_ref() -> utoipa::openapi::Ref {
@@ -382,6 +487,7 @@ mod content {
                 Self::Value(value) => *value,
                 Self::Withdrawal { value, .. } => *value,
                 Self::SwapPending { value, .. } => *value,
+                Self::HashLocked { value, .. } => *value,
             }
         }
     }
@@ -402,6 +508,17 @@ mod content {
                 Content::SwapPending { value, swap_id } => {
                     Self::SwapPending { value, swap_id }
                 }
+                Content::HashLocked {
+                    value,
+                    hash,
+                    claimant,
+                    timeout_height,
+                } => Self::HashLocked {
+                    value,
+                    hash,
+                    claimant,
+                    timeout_height,
+                },
             }
         }
     }
@@ -422,6 +539,17 @@ mod content {
                 Content::SwapPending { value, swap_id } => {
                     Self::SwapPending { value, swap_id }
                 }
+                Content::HashLocked {
+                    value,
+                    hash,
+                    claimant,
+                    timeout_height,
+                } => Self::HashLocked {
+                    value,
+                    hash,
+                    claimant,
+                    timeout_height,
+                },
             }
         }
     }
@@ -442,6 +570,17 @@ mod content {
                 DefaultRepr::SwapPending { value, swap_id } => {
                     Self::SwapPending { value, swap_id }
                 }
+                DefaultRepr::HashLocked {
+                    value,
+                    hash,
+                    claimant,
+                    timeout_height,
+                } => Self::HashLocked {
+                    value,
+                    hash,
+                    claimant,
+                    timeout_height,
+                },
             }
         }
     }
@@ -462,6 +601,17 @@ mod content {
                 HumanReadableRepr::SwapPending { value, swap_id } => {
                     Self::SwapPending { value, swap_id }
                 }
+                HumanReadableRepr::HashLocked {
+                    value,
+                    hash,
+                    claimant,
+                    timeout_height,
+                } => Self::HashLocked {
+                    value,
+                    hash,
+                    claimant,
+                    timeout_height,
+                },
             }
         }
     }
@@ -555,6 +705,23 @@ pub enum TxData {
         /// spend an input owned by this address, which proves control of it.
         l2_claimer_address: Address,
     },
+    /// Spend a [`crate::types::OutputContent::HashLocked`] output by revealing
+    /// the secret it is locked to.
+    ///
+    /// This is the whole of the cross-chain mechanism on our side. The taker
+    /// learns `preimage` by watching the maker claim the Bitcoin leg — taking
+    /// that leg necessarily publishes it — and hands it to us here. Consensus
+    /// checks `sha256(preimage) == hash` and nothing else, so no node ever has
+    /// to observe Bitcoin, and there is no observation for anyone to lie about.
+    ///
+    /// Fixed at 32 bytes rather than a `Vec<u8>`. It is the conventional secret
+    /// size for an HTLC, a fixed width cannot be padded into a second encoding
+    /// of the same preimage, and it leaves no room to grow a transaction with
+    /// megabytes of ignored bytes.
+    ///
+    /// Must be appended last: borsh encodes the variant index, so inserting
+    /// above would renumber every variant after it.
+    HashLockClaim { preimage: [u8; 32] },
 }
 
 // Manual ToSchema implementation for TxData

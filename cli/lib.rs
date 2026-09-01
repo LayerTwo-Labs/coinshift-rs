@@ -183,6 +183,59 @@ pub enum Command {
         #[arg(long, default_value = "")]
         password: String,
     },
+    /// Generate a swap secret and the Bitcoin HTLC address it commits to
+    NewSwapSecret {
+        #[arg(long)]
+        claim_pubkey: String,
+        #[arg(long)]
+        refund_pubkey: String,
+        #[arg(long)]
+        bitcoin_timeout_height: u32,
+        #[arg(long)]
+        network: Option<String>,
+    },
+    /// Lock coins into a hash lock (the Coinshift leg of an atomic swap)
+    CreateHashLock {
+        #[arg(long)]
+        value_sats: u64,
+        #[arg(long)]
+        commitment_hex: String,
+        #[arg(long)]
+        claimant: Address,
+        #[arg(long)]
+        timeout_height: u32,
+        #[arg(long)]
+        fee_sats: Option<u64>,
+    },
+    /// Spend a hash lock by revealing its secret
+    ClaimHashLock {
+        /// Transaction that created the lock
+        txid: coinshift::types::Txid,
+        /// Output index within that transaction
+        vout: u32,
+        #[arg(long)]
+        secret_hex: String,
+        #[arg(long)]
+        fee_sats: Option<u64>,
+    },
+    /// Reclaim a hash lock whose deadline has passed
+    RefundHashLock {
+        /// Transaction that created the lock
+        txid: coinshift::types::Txid,
+        /// Output index within that transaction
+        vout: u32,
+        #[arg(long)]
+        fee_sats: Option<u64>,
+    },
+    /// List every hash lock this wallet can see
+    ListHashLocks,
+    /// Suggest a safe deadline pair for a swap
+    SuggestSwapDeadlines {
+        #[arg(long)]
+        bitcoin_height: u32,
+        #[arg(long)]
+        bitcoin_blocks: u32,
+    },
     /// Get total sidechain wealth
     SidechainWealth,
     /// Stop the node
@@ -498,6 +551,74 @@ where
                 parent_chain.coin_name(),
                 path.display()
             )
+        }
+        Command::NewSwapSecret {
+            claim_pubkey,
+            refund_pubkey,
+            bitcoin_timeout_height,
+            network,
+        } => {
+            let res = rpc_client
+                .new_swap_secret(
+                    claim_pubkey,
+                    refund_pubkey,
+                    bitcoin_timeout_height,
+                    network,
+                )
+                .await?;
+            serde_json::to_string_pretty(&res)?
+        }
+        Command::CreateHashLock {
+            value_sats,
+            commitment_hex,
+            claimant,
+            timeout_height,
+            fee_sats,
+        } => {
+            let txid = rpc_client
+                .create_hash_lock(
+                    value_sats,
+                    commitment_hex,
+                    claimant,
+                    timeout_height,
+                    fee_sats,
+                )
+                .await?;
+            format!("{txid}")
+        }
+        Command::ClaimHashLock {
+            txid,
+            vout,
+            secret_hex,
+            fee_sats,
+        } => {
+            let outpoint = coinshift::types::OutPoint::Regular { txid, vout };
+            let txid = rpc_client
+                .claim_hash_lock(outpoint, secret_hex, fee_sats)
+                .await?;
+            format!("{txid}")
+        }
+        Command::RefundHashLock {
+            txid,
+            vout,
+            fee_sats,
+        } => {
+            let outpoint = coinshift::types::OutPoint::Regular { txid, vout };
+            let txid = rpc_client.refund_hash_lock(outpoint, fee_sats).await?;
+            format!("{txid}")
+        }
+        Command::ListHashLocks => {
+            let locks = rpc_client.list_hash_locks().await?;
+            serde_json::to_string_pretty(&locks)?
+        }
+        Command::SuggestSwapDeadlines {
+            bitcoin_height,
+            bitcoin_blocks,
+        } => {
+            let res = rpc_client
+                .suggest_swap_deadlines(bitcoin_height, bitcoin_blocks)
+                .await?;
+            serde_json::to_string_pretty(&res)?
         }
         Command::SidechainWealth => {
             let sidechain_wealth = rpc_client.sidechain_wealth_sats().await?;

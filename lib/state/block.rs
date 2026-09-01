@@ -152,29 +152,18 @@ pub fn prevalidate(
     if coinbase_value > total_fees {
         return Err(Error::NotEnoughFees);
     }
-    // For SwapClaim transactions, SwapPending inputs are owned by the swap
-    // creator but spent by the claimer (who may be a different wallet).
-    // Skip the address-matching check for those specific inputs — swap
-    // validation already ensures legitimacy.
-    let mut auth_offset = 0usize;
-    let mut swap_claim_pending = std::collections::HashSet::<usize>::new();
-    for filled_tx in &filled_transactions {
-        if matches!(filled_tx.transaction.data, TxData::SwapClaim { .. }) {
-            for (i, utxo) in filled_tx.spent_utxos.iter().enumerate() {
-                if utxo.content.is_swap_pending() {
-                    swap_claim_pending.insert(auth_offset + i);
-                }
-            }
-        }
-        auth_offset += filled_tx.spent_utxos.len();
-    }
-    let spent_utxos = filled_transactions
-        .iter()
-        .flat_map(|t| t.spent_utxos.iter());
-    for (idx, (authorization, spent_utxo)) in
-        body.authorizations.iter().zip(spent_utxos).enumerate()
+    // Some inputs are spent by someone other than their owner; see
+    // `state::address_check_is_exempt` for which, and why that is safe.
+    let spent_utxos = filled_transactions.iter().flat_map(|filled_tx| {
+        filled_tx
+            .spent_utxos
+            .iter()
+            .map(move |utxo| (&filled_tx.transaction.data, utxo))
+    });
+    for (authorization, (data, spent_utxo)) in
+        body.authorizations.iter().zip(spent_utxos)
     {
-        if swap_claim_pending.contains(&idx) {
+        if crate::state::address_check_is_exempt(data, spent_utxo) {
             continue;
         }
         if authorization.get_address() != spent_utxo.address {
@@ -461,7 +450,9 @@ pub fn connect_prevalidated(
                     "Reserved open swap"
                 );
             }
-            TxData::Regular => {}
+            // A hash-lock claim moves value through the UTXO set and touches
+            // no swap record, so connect/disconnect have nothing to do for it.
+            TxData::HashLockClaim { .. } | TxData::Regular => {}
         }
     }
 
@@ -606,26 +597,17 @@ pub fn validate(
     if coinbase_value > total_fees {
         return Err(Error::NotEnoughFees);
     }
-    // Same SwapClaim + SwapPending skip as in prevalidate.
-    let mut auth_offset = 0usize;
-    let mut swap_claim_pending = std::collections::HashSet::<usize>::new();
-    for filled_tx in &filled_transactions {
-        if matches!(filled_tx.transaction.data, TxData::SwapClaim { .. }) {
-            for (i, utxo) in filled_tx.spent_utxos.iter().enumerate() {
-                if utxo.content.is_swap_pending() {
-                    swap_claim_pending.insert(auth_offset + i);
-                }
-            }
-        }
-        auth_offset += filled_tx.spent_utxos.len();
-    }
-    let spent_utxos = filled_transactions
-        .iter()
-        .flat_map(|t| t.spent_utxos.iter());
-    for (idx, (authorization, spent_utxo)) in
-        body.authorizations.iter().zip(spent_utxos).enumerate()
+    // Same address-check exemption as in prevalidate.
+    let spent_utxos = filled_transactions.iter().flat_map(|filled_tx| {
+        filled_tx
+            .spent_utxos
+            .iter()
+            .map(move |utxo| (&filled_tx.transaction.data, utxo))
+    });
+    for (authorization, (data, spent_utxo)) in
+        body.authorizations.iter().zip(spent_utxos)
     {
-        if swap_claim_pending.contains(&idx) {
+        if crate::state::address_check_is_exempt(data, spent_utxo) {
             continue;
         }
         if authorization.get_address() != spent_utxo.address {
@@ -835,7 +817,9 @@ pub fn disconnect_tip(
                 // reverse pass, but an earlier reorg may have removed it.
                 state.clear_swap_reservation(rwtxn, &swap_id)?;
             }
-            TxData::Regular => {}
+            // A hash-lock claim moves value through the UTXO set and touches
+            // no swap record, so connect/disconnect have nothing to do for it.
+            TxData::HashLockClaim { .. } | TxData::Regular => {}
         }
 
         // delete UTXOs, last-to-first

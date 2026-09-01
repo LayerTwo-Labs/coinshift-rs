@@ -725,11 +725,20 @@ fn process_coinshift_transactions(
         Vec::new();
 
     for mut swap in swaps {
-        // Only process L2 → L1 swaps that are pending or waiting for confirmations
-        if !matches!(
-            swap.state,
-            SwapState::Pending | SwapState::WaitingConfirmations(..)
-        ) {
+        // Expiry has to be decided from block data alone, because it releases
+        // the swap's escrow locks and `locked_swap_outputs` is consensus: it
+        // gates `validate_swap_claim_consensus` (a claim must spend an output
+        // locked to its swap) and `validate_no_locked_outputs` (an ordinary
+        // transaction must not).
+        //
+        // `Completed` and `Cancelled` are the only two swap states `connect`
+        // writes deterministically — the first when a `SwapClaim` connects, the
+        // second here. Every other state (`Pending`, `WaitingConfirmations`,
+        // `ReadyToClaim`) records what *this node* saw on a parent chain, so
+        // branching expiry on one makes two honest nodes release different
+        // locks and reject each other's blocks. Skip the deterministic pair and
+        // nothing else.
+        if matches!(swap.state, SwapState::Completed | SwapState::Cancelled) {
             continue;
         }
 
@@ -783,6 +792,17 @@ fn process_coinshift_transactions(
                 unlocked_outpoints,
             ));
             expired_swaps_count += 1;
+            continue;
+        }
+
+        // Everything below is node-local L1 observation rather than consensus,
+        // and only a swap still waiting on its payment has any use for it. A
+        // `ReadyToClaim` swap reaches this loop so that expiry can see it; it
+        // has nothing left to detect.
+        if !matches!(
+            swap.state,
+            SwapState::Pending | SwapState::WaitingConfirmations(..)
+        ) {
             continue;
         }
 
@@ -1456,6 +1476,110 @@ mod expiry_reversal_tests {
         let env = unsafe { Env::open(&opts, dir.path()) }.unwrap();
         let state = State::new(&env).unwrap();
         (dir, env, state)
+    }
+
+    /// Expiry must not depend on what this node saw on the parent chain.
+    ///
+    /// Regression test. Expiry used to run only for `Pending` and
+    /// `WaitingConfirmations` swaps, which skipped any swap the local L1
+    /// observer had already advanced to `ReadyToClaim`. That state is written
+    /// from a parent-chain RPC — by `query_and_update_swap`, or by the
+    /// `update_swap_l1_txid` RPC — so it differs between nodes whenever one
+    /// endpoint is down, is slower, or is simply polled a moment later.
+    ///
+    /// The consequence was a chain split, because expiry releases escrow locks
+    /// and `locked_swap_outputs` is consensus state. A node that skipped expiry
+    /// kept the output locked and accepted the claim that spent it; a node that
+    /// expired the swap rejected that same block, and accepted the creator's
+    /// refund spend that the first node rejected. Two honest nodes, one block,
+    /// opposite verdicts, in both directions.
+    ///
+    /// So: same swap, same height, two nodes that disagree about L1 only. Every
+    /// consensus-visible outcome must match.
+    #[test]
+    fn expiry_ignores_node_local_l1_observation() {
+        let outpoint = OutPoint::Regular {
+            txid: Txid([99u8; 32]),
+            vout: 1,
+        };
+        let swap_id = SwapId([42u8; 32]);
+
+        // One node, distinguished only by the swap state its own parent-chain
+        // observation arrived at before the expiry block connected.
+        let connect_expiry_block_with = |observed: SwapState| {
+            let (dir, env, state) = test_state();
+            let mut swap = Swap::new(
+                swap_id,
+                SwapDirection::L2ToL1,
+                ParentChainType::Regtest,
+                SwapTxId::Hash32([0u8; 32]),
+                None,
+                Some(Address([3u8; 20])),
+                sat(50_000),
+                "rbtc-recipient".to_string(),
+                sat(40_000),
+                0,
+                Some(5), // expires_at_height
+                Some(Address([5u8; 20])),
+            );
+            swap.state = observed;
+
+            let mut rwtxn = env.write_txn().unwrap();
+            state.height.put(&mut rwtxn, &(), &5u32).unwrap();
+            state.save_swap(&mut rwtxn, &swap).unwrap();
+            state
+                .lock_output_to_swap(&mut rwtxn, &outpoint, &swap_id)
+                .unwrap();
+
+            // Both nodes connect the same block, at the expiry height, with no
+            // parent-chain RPC configured on either.
+            process_coinshift_transactions(
+                &state,
+                &mut rwtxn,
+                5,
+                BlockHash([0u8; 32]),
+                None,
+            )
+            .unwrap();
+            rwtxn.commit().unwrap();
+            (dir, env, state)
+        };
+
+        // Node A's endpoint answered in time; node B's did not.
+        let (_dir_a, env_a, state_a) =
+            connect_expiry_block_with(SwapState::ReadyToClaim);
+        let (_dir_b, env_b, state_b) =
+            connect_expiry_block_with(SwapState::Pending);
+
+        let rotxn_a = env_a.read_txn().unwrap();
+        let rotxn_b = env_b.read_txn().unwrap();
+
+        // The lock set is the consensus-visible part, and it has to agree.
+        let locked_a = state_a
+            .is_output_locked_to_swap(&rotxn_a, &outpoint)
+            .unwrap();
+        let locked_b = state_b
+            .is_output_locked_to_swap(&rotxn_b, &outpoint)
+            .unwrap();
+        assert_eq!(
+            locked_a, locked_b,
+            "nodes disagreeing about L1 must still agree about which outputs \
+             are locked; they are what block validation reads"
+        );
+        assert_eq!(
+            locked_a, None,
+            "the expiry height passed, so the escrow is released on both"
+        );
+
+        // And the swap itself lands in the same state on both.
+        assert_eq!(
+            state_a.get_swap(&rotxn_a, &swap_id).unwrap().unwrap().state,
+            SwapState::Cancelled,
+        );
+        assert_eq!(
+            state_b.get_swap(&rotxn_b, &swap_id).unwrap().unwrap().state,
+            SwapState::Cancelled,
+        );
     }
 
     /// Connecting the block that expires a swap unlocks its output and marks it
