@@ -235,7 +235,7 @@ jobs:
           version: ${{ steps.git-tag-name.outputs.git_tag_name }}
 
       - name: Release
-        uses: softprops/action-gh-release@v3.0.2
+        uses: softprops/action-gh-release@v3.0.3
         if: startsWith(github.ref, 'refs/tags/')
         with:
           files: |
