@@ -4,6 +4,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    time::Duration,
 };
 
 use coinshift::{
@@ -51,11 +52,6 @@ pub enum Error {
     NoCusfMainchainWalletClient,
     #[error("Failed to request mainchain ancestor info for {block_hash}")]
     RequestMainchainAncestorInfos { block_hash: bitcoin::BlockHash },
-    #[error("Unable to verify existence of CUSF mainchain service(s) at {url}")]
-    VerifyMainchainServices {
-        url: Box<url::Url>,
-        source: Box<tonic::Status>,
-    },
     #[error("wallet error")]
     Wallet(#[from] wallet::Error),
     #[error("L1 config validation failed: {0}")]
@@ -650,6 +646,37 @@ impl App {
         Ok(has_wallet_service)
     }
 
+    /// Ask the mainchain node for its services until it answers. The node may
+    /// start before the mainchain node. Returns true when the mainchain node
+    /// also serves a wallet.
+    async fn wait_for_proto_support(
+        transport: tonic::transport::channel::Channel,
+        url: &url::Url,
+    ) -> bool {
+        // One check must not hang, so each attempt keeps its own deadline.
+        const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
+        const RETRY_DELAY: Duration = Duration::from_secs(5);
+
+        loop {
+            match tokio::time::timeout(
+                ATTEMPT_TIMEOUT,
+                Self::check_proto_support(transport.clone()),
+            )
+            .await
+            {
+                Ok(Ok(has_wallet_service)) => return has_wallet_service,
+                Ok(Err(status)) => tracing::warn!(
+                    %url, %status, "Waiting for CUSF mainchain service(s)"
+                ),
+                Err(_elapsed) => tracing::warn!(
+                    %url,
+                    "Waiting for CUSF mainchain service(s): the check timed out"
+                ),
+            }
+            tokio::time::sleep(RETRY_DELAY).await;
+        }
+    }
+
     pub fn new(config: &Config) -> Result<Self, Error> {
         // Node launches some tokio tasks for p2p networking, that is why we need a tokio runtime
         // here.
@@ -688,31 +715,18 @@ impl App {
         .unwrap()
         .concurrency_limit(256)
         .connect_lazy();
-        // Add a timeout to the connection check so the GUI can start even if mainchain isn't synced
-        const CONNECTION_TIMEOUT: std::time::Duration =
-            std::time::Duration::from_secs(5);
-        let (cusf_mainchain, cusf_mainchain_wallet) = if runtime
-            .block_on(tokio::time::timeout(
-                CONNECTION_TIMEOUT,
-                Self::check_proto_support(transport.clone()),
-            ))
-            .map_err(|_| Error::VerifyMainchainServices {
-                url: Box::new(config.mainchain_grpc_url.clone()),
-                source: Box::new(tonic::Status::deadline_exceeded(
-                    "Connection check timed out after 5 seconds",
-                )),
-            })?
-            .map_err(|err| Error::VerifyMainchainServices {
-                url: Box::new(config.mainchain_grpc_url.clone()),
-                source: Box::new(err),
-            })? {
-            (
-                mainchain::ValidatorClient::new(transport.clone()),
-                Some(mainchain::WalletClient::new(transport)),
-            )
-        } else {
-            (mainchain::ValidatorClient::new(transport), None)
-        };
+        let (cusf_mainchain, cusf_mainchain_wallet) =
+            if runtime.block_on(Self::wait_for_proto_support(
+                transport.clone(),
+                &config.mainchain_grpc_url,
+            )) {
+                (
+                    mainchain::ValidatorClient::new(transport.clone()),
+                    Some(mainchain::WalletClient::new(transport)),
+                )
+            } else {
+                (mainchain::ValidatorClient::new(transport), None)
+            };
         let miner = cusf_mainchain_wallet
             .clone()
             .map(|wallet| Miner::new(cusf_mainchain.clone(), wallet))
@@ -1268,5 +1282,62 @@ impl App {
 impl Drop for App {
     fn drop(&mut self) {
         self.task.abort()
+    }
+}
+
+#[cfg(test)]
+mod wait_for_proto_support_tests {
+    use std::{net::SocketAddr, time::Duration};
+
+    use coinshift::types::proto::mainchain::generated::validator_service_server;
+    use tokio::time::timeout;
+    use tonic_health::ServingStatus;
+
+    use crate::app::App;
+
+    fn transport(addr: SocketAddr) -> tonic::transport::channel::Channel {
+        tonic::transport::channel::Channel::from_shared(format!(
+            "http://{addr}"
+        ))
+        .unwrap()
+        .connect_lazy()
+    }
+
+    async fn serve_validator_service(addr: SocketAddr) {
+        let (health_reporter, health_service) =
+            tonic_health::server::health_reporter();
+        let () = health_reporter
+            .set_service_status(
+                validator_service_server::SERVICE_NAME,
+                ServingStatus::Serving,
+            )
+            .await;
+        tokio::spawn(
+            tonic::transport::Server::builder()
+                .add_service(health_service)
+                .serve(addr),
+        );
+    }
+
+    /// The node may start before the mainchain node, so it waits for the
+    /// validator service instead of an error.
+    #[tokio::test]
+    async fn wait_for_the_validator_service() -> anyhow::Result<()> {
+        let reserved =
+            reserve_port::ReservedSocketAddr::reserve_random_socket_addr()?;
+        let addr = reserved.socket_addr();
+        let url = format!("http://{addr}").parse()?;
+        let mut has_wallet_service =
+            Box::pin(App::wait_for_proto_support(transport(addr), &url));
+        assert!(
+            timeout(Duration::from_secs(1), &mut has_wallet_service)
+                .await
+                .is_err()
+        );
+        let () = serve_validator_service(addr).await;
+        let has_wallet_service =
+            timeout(Duration::from_secs(30), has_wallet_service).await?;
+        assert!(!has_wallet_service);
+        Ok(())
     }
 }
