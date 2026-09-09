@@ -1178,9 +1178,30 @@ impl NetTask {
                             });
                         }
                         PeerConnectionInfo::Error(err) => {
+                            let bad_magic = err.is_bad_magic();
                             let err = anyhow::anyhow!(err);
                             tracing::error!(%addr, err = format!("{err:#}"), "Peer connection error");
                             let () = self.ctxt.net.remove_active_peer(addr);
+                            // A peer on another network never becomes useful,
+                            // so it must not survive into the next start.
+                            if bad_magic {
+                                let mut rwtxn = self
+                                    .ctxt
+                                    .env
+                                    .write_txn()
+                                    .map_err(EnvError::from)?;
+                                let forgotten = self
+                                    .ctxt
+                                    .net
+                                    .forget_peer(&mut rwtxn, &addr)?;
+                                rwtxn.commit().map_err(RwTxnError::from)?;
+                                if forgotten {
+                                    tracing::warn!(
+                                        %addr,
+                                        "forgot peer: it runs another network"
+                                    );
+                                }
+                            }
                         }
                         PeerConnectionInfo::NeedMainchainAncestors {
                             main_hash,
