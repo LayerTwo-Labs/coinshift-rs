@@ -5,13 +5,16 @@ use bip300301_enforcer_integration_tests::{
 use futures::{FutureExt, future::BoxFuture};
 
 use crate::{
+    block_index::block_index_trial,
     block_template::block_template_trial,
     confirmations_block_inclusion::confirmations_block_inclusion_trial,
     ibd::ibd_trial,
     l1_rpc_dependency::l1_rpc_dependency_trial,
     l1_txid_uniqueness::l1_txid_uniqueness_trial,
     l1_verification_rpc_only::l1_verification_rpc_only_trial,
+    list_mempool::list_mempool_trial,
     multi_node_verification::multi_node_verification_trial,
+    receive_address::receive_address_trial,
     setup::{Init, PostSetup},
     swap_creation::{
         swap_creation_fixed_trial, swap_creation_open_fill_trial,
@@ -59,6 +62,11 @@ pub fn tests(
     failure_collector: TestFailureCollector,
 ) -> Vec<AsyncTrial<BoxFuture<'static, anyhow::Result<()>>>> {
     vec![
+        block_index_trial(
+            bin_paths.clone(),
+            file_registry.clone(),
+            failure_collector.clone(),
+        ),
         block_template_trial(
             bin_paths.clone(),
             file_registry.clone(),
@@ -105,6 +113,16 @@ pub fn tests(
             failure_collector.clone(),
         ),
         l1_rpc_dependency_trial(
+            bin_paths.clone(),
+            file_registry.clone(),
+            failure_collector.clone(),
+        ),
+        list_mempool_trial(
+            bin_paths.clone(),
+            file_registry.clone(),
+            failure_collector.clone(),
+        ),
+        receive_address_trial(
             bin_paths.clone(),
             file_registry.clone(),
             failure_collector.clone(),
