@@ -956,6 +956,43 @@ impl Wallet {
         Ok(address)
     }
 
+    /// The address to receive at. Derives a new one only once the current one
+    /// receives.
+    pub fn get_receive_address(&self) -> Result<Address, Error> {
+        {
+            let rotxn = self.env.read_txn().map_err(EnvError::from)?;
+            let last =
+                self.index_to_address.last(&rotxn).map_err(DbError::from)?;
+            if let Some((_, address)) = last
+                && !self.address_received(&rotxn, &address)?
+            {
+                return Ok(address);
+            }
+        }
+        self.get_new_address()
+    }
+
+    /// True when any output the wallet holds or held pays this address.
+    fn address_received(
+        &self,
+        rotxn: &RoTxn,
+        address: &Address,
+    ) -> Result<bool, Error> {
+        let mut utxos = self.utxos.iter(rotxn).map_err(DbError::from)?;
+        while let Some((_, output)) = utxos.next().map_err(DbError::from)? {
+            if output.address == *address {
+                return Ok(true);
+            }
+        }
+        let mut stxos = self.stxos.iter(rotxn).map_err(DbError::from)?;
+        while let Some((_, spent)) = stxos.next().map_err(DbError::from)? {
+            if spent.output.address == *address {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     pub fn get_num_addresses(&self) -> Result<u32, Error> {
         let txn = self.env.read_txn().map_err(EnvError::from)?;
         let num = self.index_to_address.len(&txn).map_err(DbError::from)?;
@@ -1206,6 +1243,35 @@ mod tests {
             assert_eq!(address, expected);
             assert_eq!(wallet.get_num_addresses()?, index + 1);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn get_receive_address_waits_for_a_payment() -> anyhow::Result<()> {
+        let (_dir, wallet) = test_wallet();
+        wallet.set_seed(&[1u8; 64])?;
+
+        // An address that never received comes back every time.
+        let first = wallet.get_receive_address()?;
+        for _ in 0..10 {
+            assert_eq!(wallet.get_receive_address()?, first);
+        }
+        assert_eq!(wallet.get_addresses()?.len(), 1);
+
+        // A fresh address is still fresh, so a change output never reuses one.
+        let fresh = wallet.get_new_address()?;
+        assert_ne!(fresh, first);
+        assert_eq!(wallet.get_addresses()?.len(), 2);
+
+        // The receive address moves on once it receives.
+        let output = Output {
+            address: wallet.get_receive_address()?,
+            content: OutputContent::Value(sat(1000)),
+        };
+        wallet.put_utxos(&HashMap::from([(regular_outpoint(0), output)]))?;
+        let second = wallet.get_receive_address()?;
+        assert_ne!(second, first);
+        assert_eq!(wallet.get_receive_address()?, second);
         Ok(())
     }
 
