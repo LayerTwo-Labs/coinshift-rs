@@ -169,7 +169,7 @@ impl Wallet {
                 .map_err(DbError::from)?;
         }
         rwtxn.commit().map_err(RwTxnError::from)?;
-        Ok(Self {
+        let wallet = Self {
             env,
             seed: seed_db,
             address_to_index,
@@ -177,7 +177,51 @@ impl Wallet {
             utxos,
             stxos,
             _version: version,
-        })
+        };
+        wallet.adopt_index_zero()?;
+        Ok(wallet)
+    }
+
+    /// An earlier version generated its first address at index 1, so a wallet
+    /// from it never owned index 0 and never saw coins paid there.
+    fn adopt_index_zero(&self) -> Result<(), Error> {
+        let mut txn = self.env.write_txn().map_err(EnvError::from)?;
+        if self
+            .seed
+            .try_get(&txn, &0)
+            .map_err(DbError::from)?
+            .is_none()
+        {
+            return Ok(());
+        }
+        // A wallet with no address derives index 0 by itself.
+        if self
+            .index_to_address
+            .last(&txn)
+            .map_err(DbError::from)?
+            .is_none()
+        {
+            return Ok(());
+        }
+        let index = 0u32.to_be_bytes();
+        if self
+            .index_to_address
+            .try_get(&txn, &index)
+            .map_err(DbError::from)?
+            .is_some()
+        {
+            return Ok(());
+        }
+        let signing_key = self.get_signing_key(&txn, 0)?;
+        let address = get_address(&signing_key.verifying_key());
+        self.index_to_address
+            .put(&mut txn, &index, &address)
+            .map_err(DbError::from)?;
+        self.address_to_index
+            .put(&mut txn, &address, &index)
+            .map_err(DbError::from)?;
+        txn.commit().map_err(RwTxnError::from)?;
+        Ok(())
     }
 
     /// Overwrite the seed, or set it if it does not already exist.
@@ -1162,6 +1206,39 @@ mod tests {
             assert_eq!(address, expected);
             assert_eq!(wallet.get_num_addresses()?, index + 1);
         }
+        Ok(())
+    }
+
+    // An update must show coins paid to index 0, without a seed restore.
+    #[test]
+    fn legacy_wallet_adopts_index_zero() -> anyhow::Result<()> {
+        let dir = temp_dir::TempDir::new()?;
+
+        let index_zero = {
+            let wallet = Wallet::new(dir.path())?;
+            wallet.set_seed(&[1u8; 64])?;
+
+            // The earlier version recorded index 1 first, and never index 0.
+            let mut txn = wallet.env.write_txn()?;
+            let one = 1u32.to_be_bytes();
+            let address =
+                get_address(&wallet.get_signing_key(&txn, 1)?.verifying_key());
+            wallet.index_to_address.put(&mut txn, &one, &address)?;
+            wallet.address_to_index.put(&mut txn, &address, &one)?;
+            let zero =
+                get_address(&wallet.get_signing_key(&txn, 0)?.verifying_key());
+            txn.commit()?;
+            assert!(!wallet.get_addresses()?.contains(&zero));
+            zero
+        };
+
+        let wallet = Wallet::new(dir.path())?;
+        assert!(wallet.get_addresses()?.contains(&index_zero));
+        assert_eq!(wallet.get_num_addresses()?, 2);
+
+        // The migration runs twice without a second address.
+        wallet.adopt_index_zero()?;
+        assert_eq!(wallet.get_num_addresses()?, 2);
         Ok(())
     }
 
