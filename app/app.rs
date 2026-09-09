@@ -154,8 +154,16 @@ impl App {
         // Track whether we've successfully recovered addresses.
         // If the chain was empty at startup, we need to recover
         // once blocks start arriving.
-        let mut needs_recovery = wallet.get_addresses()?.is_empty()
-            && wallet.has_seed().unwrap_or(false);
+        let mut needs_recovery = match wallet.get_addresses() {
+            Ok(addresses) => {
+                addresses.is_empty() && wallet.has_seed().unwrap_or(false)
+            }
+            Err(err) => {
+                let err = anyhow::Error::from(err);
+                tracing::warn!("Failed to read wallet addresses: {err:#}");
+                false
+            }
+        };
         while let Some(()) = state_changes.next().await {
             if needs_recovery {
                 match recover_wallet_addresses(&node, &wallet) {
