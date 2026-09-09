@@ -165,6 +165,15 @@ const SIGNET_SEED_NODE_ADDRS: &[SocketAddr] = {
     &[SIGNET_MINING_SERVER, BIP300_XYZ]
 };
 
+const ALPHANET_SEED_NODE_ADDRS: &[SocketAddr] = {
+    // The alphanet server runs a node for this chain.
+    const ALPHANET_SERVER: SocketAddr = SocketAddr::new(
+        std::net::IpAddr::V4(std::net::Ipv4Addr::new(204, 168, 254, 113)),
+        4000 + THIS_SIDECHAIN as u16,
+    );
+    &[ALPHANET_SERVER]
+};
+
 /// Add every seed address the network names that the database does not hold.
 /// A datadir made before a seed existed would otherwise never learn it.
 fn add_seed_peers(
@@ -183,8 +192,7 @@ fn add_seed_peers(
 
 const fn seed_node_addrs(network: Network) -> &'static [SocketAddr] {
     match network {
-        // No seed runs on alphanet yet.
-        Network::Alphanet => &[],
+        Network::Alphanet => ALPHANET_SEED_NODE_ADDRS,
         Network::Signet => SIGNET_SEED_NODE_ADDRS,
         Network::Regtest => &[],
     }
