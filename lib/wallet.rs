@@ -115,7 +115,9 @@ impl Wallet {
             use heed::EnvFlags;
             let mut env_open_options = heed::EnvOpenOptions::new();
             env_open_options
-                .map_size(10 * 1024 * 1024) // 10MB
+                // The wallet keeps every spent output, so a node that bids
+                // for every mainchain block fills 10MB in weeks.
+                .map_size(1024 * 1024 * 1024) // 1GB
                 .max_dbs(Self::NUM_DBS);
             // Apply LMDB "fast" flags consistent with our benchmark setup:
             // - WRITE_MAP lets us write directly into the memory map instead of
