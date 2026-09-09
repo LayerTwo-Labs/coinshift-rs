@@ -225,6 +225,20 @@ impl std::fmt::Display for M6id {
     }
 }
 
+impl utoipa::PartialSchema for M6id {
+    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
+        let obj =
+            utoipa::openapi::Object::with_type(utoipa::openapi::Type::String);
+        utoipa::openapi::RefOr::T(utoipa::openapi::Schema::Object(obj))
+    }
+}
+
+impl utoipa::ToSchema for M6id {
+    fn name() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed("M6id")
+    }
+}
+
 pub fn hash<T>(data: &T) -> Hash
 where
     T: BorshSerialize + ?Sized,

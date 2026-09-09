@@ -158,6 +158,53 @@ impl RpcServer for RpcServerImpl {
         Ok(Some(block))
     }
 
+    async fn get_block_hash(
+        &self,
+        height: u32,
+    ) -> RpcResult<Option<coinshift::types::BlockHash>> {
+        self.app.node.try_get_block_hash(height).map_err(custom_err)
+    }
+
+    async fn get_block_index(
+        &self,
+        block_hash: coinshift::types::BlockHash,
+    ) -> RpcResult<coinshift::types::BlockIndex> {
+        let body = self.app.node.get_body(block_hash).map_err(custom_err)?;
+        let txs = body
+            .transactions
+            .iter()
+            .map(|tx| coinshift::types::BlockIndexTx {
+                txid: tx.txid(),
+                size: tx.canonical_size(),
+                raw: hex::encode(tx.canonical_encoding()),
+            })
+            .collect();
+        let events = self
+            .app
+            .node
+            .get_block_index_events(block_hash)
+            .map_err(custom_err)?;
+        Ok(coinshift::types::BlockIndex {
+            txs,
+            deposits: events
+                .deposits
+                .into_iter()
+                .map(|(outpoint, output)| coinshift::types::BlockIndexDeposit {
+                    outpoint,
+                    output,
+                })
+                .collect(),
+            bundle_spends: events
+                .bundle_spends
+                .into_iter()
+                .map(|(outpoint, m6id)| coinshift::types::BlockIndexSpend {
+                    outpoint,
+                    m6id,
+                })
+                .collect(),
+        })
+    }
+
     async fn get_block_template(&self) -> RpcResult<GetBlockTemplateResponse> {
         let template = self
             .app

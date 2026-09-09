@@ -7,9 +7,9 @@ use std::net::SocketAddr;
 use coinshift::{
     net::Peer,
     types::{
-        Address, Block, BlockHash, MerkleRoot, OutPoint, Output, OutputContent,
-        ParentChainType, PointedOutput, Swap, SwapId, SwapState, Txid,
-        WithdrawalBundle, schema as coinshift_schema,
+        Address, Block, BlockHash, BlockIndex, MerkleRoot, OutPoint, Output,
+        OutputContent, ParentChainType, PointedOutput, Swap, SwapId, SwapState,
+        Txid, WithdrawalBundle, schema as coinshift_schema,
     },
     wallet::Balance,
 };
@@ -105,6 +105,26 @@ pub trait Rpc {
         &self,
         block_hash: coinshift::types::BlockHash,
     ) -> RpcResult<Option<coinshift::types::Block>>;
+
+    /// Get the block hash at the specified height in the current chain,
+    /// if it exists
+    #[open_api_method(output_schema(
+        PartialSchema = "schema::Optional<coinshift::types::BlockHash>"
+    ))]
+    #[method(name = "get_block_hash")]
+    async fn get_block_hash(
+        &self,
+        height: u32,
+    ) -> RpcResult<Option<coinshift::types::BlockHash>>;
+
+    /// Get the transaction ids, sizes and encodings of a block, with the
+    /// mainchain deposits and withdrawal bundle spends it applied
+    #[open_api_method(output_schema(ToSchema))]
+    #[method(name = "get_block_index")]
+    async fn get_block_index(
+        &self,
+        block_hash: coinshift::types::BlockHash,
+    ) -> RpcResult<BlockIndex>;
 
     /// Assemble a block to blind merge mine, without requesting BMM for it.
     /// The caller requests BMM for `critical_hash` itself, then passes the
