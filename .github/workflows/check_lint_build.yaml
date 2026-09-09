@@ -153,7 +153,9 @@ jobs:
             name: x86_64-unknown-linux-gnu
             binary-suffix: ""
             rustflags: ""
-          - os: macos-latest-large
+          # An Apple Silicon runner cross-compiles this target, and the
+          # larger Intel runner is not available on every account.
+          - os: macos-latest
             name: x86_64-apple-darwin
             binary-suffix: ""
             rustflags: ""
@@ -201,15 +203,30 @@ jobs:
             jq -er '.packages | map(select(.name == "coinshift_app") | .version) | .[0]')
           COINSHIFT_APP_FILENAME="coinshift-${COINSHIFT_APP_VERSION}-${{ matrix.name }}${{ matrix.binary-suffix }}"
           COINSHIFT_CLI_FILENAME="coinshift-cli-${COINSHIFT_APP_VERSION}-${{ matrix.name }}${{ matrix.binary-suffix }}"
+          COINSHIFT_ZIP_FILENAME="coinshift-${COINSHIFT_APP_VERSION}-${{ matrix.name }}.zip"
           echo "COINSHIFT_APP_VERSION=$COINSHIFT_APP_VERSION" >> "$GITHUB_ENV"
           echo "COINSHIFT_APP_FILENAME=$COINSHIFT_APP_FILENAME" >> "$GITHUB_ENV"
           echo "COINSHIFT_CLI_FILENAME=$COINSHIFT_CLI_FILENAME" >> "$GITHUB_ENV"
+          echo "COINSHIFT_ZIP_FILENAME=$COINSHIFT_ZIP_FILENAME" >> "$GITHUB_ENV"
 
       - name: 'Set filenames for release binaries'
         run: |
           pushd "target/${{ matrix.name }}/release/"
           ln -fs "coinshift_app${{ matrix.binary-suffix }}" "${COINSHIFT_APP_FILENAME}"
           ln -fs "coinshift_app_cli${{ matrix.binary-suffix }}" "${COINSHIFT_CLI_FILENAME}"
+          popd
+
+      - name: 'Pack the release zip'
+        # BitWindow downloads one archive per platform and takes the daemon and
+        # its CLI from it. The names inside are bare, which is what its
+        # extractor looks for.
+        run: |
+          pushd "target/${{ matrix.name }}/release/"
+          cp "coinshift_app${{ matrix.binary-suffix }}" "coinshift${{ matrix.binary-suffix }}"
+          cp "coinshift_app_cli${{ matrix.binary-suffix }}" "coinshift-cli${{ matrix.binary-suffix }}"
+          zip -j "${COINSHIFT_ZIP_FILENAME}" \
+            "coinshift${{ matrix.binary-suffix }}" \
+            "coinshift-cli${{ matrix.binary-suffix }}"
           popd
 
       - name: 'Upload Artifacts (coinshift)'
@@ -241,55 +258,7 @@ jobs:
           files: |
             target/${{ matrix.name }}/release/${{ env.COINSHIFT_APP_FILENAME }}
             target/${{ matrix.name }}/release/${{ env.COINSHIFT_CLI_FILENAME }}
+            target/${{ matrix.name }}/release/${{ env.COINSHIFT_ZIP_FILENAME }}
           fail_on_unmatched_files: true
           prerelease: ${{ steps.parse-git-tag-name-semver.outputs.prerelease != '' }}
 
-  parse-semver:
-    name: Parse version info
-    runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
-    outputs:
-      prerelease: ${{ steps.parse-git-tag-name-semver.outputs.prerelease }}
-    steps:
-      - name: Extract Git tag name
-        id: git-tag-name
-        run: |
-          echo "git_tag_name=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
-
-      - name: Parse Git tag name as semver
-        uses: madhead/semver-utils@v5.0.0
-        id: parse-git-tag-name-semver
-        with:
-          version: ${{ steps.git-tag-name.outputs.git_tag_name }}
-
-  upload-releases-to-releases-drivechain-info:
-    name: Upload releases to releases.drivechain.info
-    runs-on: ubuntu-latest
-    needs: [build-release, parse-semver]
-    if: startsWith(github.ref, 'refs/tags/') && needs.parse-semver.outputs.prerelease == ''
-    steps:
-      - name: Download release assets
-        uses: robinraju/release-downloader@v1.13
-        with:
-          tag: ${{ github.ref_name }}
-
-      - name: Create zip files for releases.drivechain.info
-        run: |
-          shopt -s extglob nullglob
-          version='+([0-9]).+([0-9]).+([0-9])?(-+([a-zA-Z0-9.]))'
-          for target in aarch64-apple-darwin x86_64-apple-darwin x86_64-pc-windows-gnu x86_64-unknown-linux-gnu; do
-            ext=""; [[ $target == *windows* ]] && ext=".exe"
-            mv coinshift-${version}-${target}${ext} coinshift-latest-${target}${ext}
-            mv coinshift-cli-${version}-${target}${ext} coinshift-cli-latest-${target}${ext}
-            zip L2-S255-Coinshift-latest-${target}.zip coinshift-latest-${target}${ext} coinshift-cli-latest-${target}${ext}
-          done
-
-      - name: Upload release assets to releases.drivechain.info
-        uses: appleboy/scp-action@v1
-        with:
-          host: 45.33.96.47
-          username: root
-          password: ${{ secrets.RELEASES_SERVER_PW }}
-          port: 22
-          source: 'L2-S255-Coinshift-latest-*.zip'
-          target: '/var/www/html/'
