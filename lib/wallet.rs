@@ -890,15 +890,15 @@ impl Wallet {
         })
     }
 
+    /// Derives an address the wallet never used. A change output takes one of
+    /// these, so two transactions never share a change address.
     pub fn get_new_address(&self) -> Result<Address, Error> {
         let mut txn = self.env.write_txn().map_err(EnvError::from)?;
-        let (last_index, _) = self
-            .index_to_address
-            .last(&txn)
-            .map_err(DbError::from)?
-            .unwrap_or(([0; 4], [0; 20].into()));
-        let last_index = BigEndian::read_u32(&last_index);
-        let index = last_index + 1;
+        let index =
+            match self.index_to_address.last(&txn).map_err(DbError::from)? {
+                Some((last_index, _)) => BigEndian::read_u32(&last_index) + 1,
+                None => 0,
+            };
         let signing_key = self.get_signing_key(&txn, index)?;
         let address = get_address(&signing_key.verifying_key());
         let index = index.to_be_bytes();
