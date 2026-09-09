@@ -165,6 +165,22 @@ const SIGNET_SEED_NODE_ADDRS: &[SocketAddr] = {
     &[SIGNET_MINING_SERVER, BIP300_XYZ]
 };
 
+/// Add every seed address the network names that the database does not hold.
+/// A datadir made before a seed existed would otherwise never learn it.
+fn add_seed_peers(
+    known_peers: &DatabaseUnique<SerdeBincode<SocketAddr>, Unit>,
+    rwtxn: &mut RwTxn,
+    network: Network,
+) -> Result<(), DbError> {
+    for seed_node_addr in seed_node_addrs(network) {
+        if known_peers.try_get(rwtxn, seed_node_addr)?.is_none() {
+            tracing::debug!(seed_node = %seed_node_addr, "adding seed node");
+            known_peers.put(rwtxn, seed_node_addr, &())?;
+        }
+    }
+    Ok(())
+}
+
 const fn seed_node_addrs(network: Network) -> &'static [SocketAddr] {
     match network {
         Network::Signet => SIGNET_SEED_NODE_ADDRS,
@@ -346,28 +362,22 @@ impl Net {
         tracing::debug!("Net::new: Opening database transaction");
         let mut rwtxn = env.write_txn()?;
         tracing::debug!("Net::new: Opening/creating known_peers database");
-        let known_peers = match DatabaseUnique::open(
-            env,
-            &rwtxn,
-            "known_peers",
-        )? {
-            Some(known_peers) => {
-                tracing::debug!(
-                    "Net::new: Found existing known_peers database"
-                );
-                known_peers
-            }
-            None => {
-                tracing::debug!("Net::new: Creating new known_peers database");
-                let known_peers =
-                    DatabaseUnique::create(env, &mut rwtxn, "known_peers")?;
-                for seed_node_addr in seed_node_addrs(network) {
-                    tracing::debug!(seed_node = %seed_node_addr, "Net::new: Adding seed node");
-                    known_peers.put(&mut rwtxn, seed_node_addr, &())?;
+        let known_peers =
+            match DatabaseUnique::open(env, &rwtxn, "known_peers")? {
+                Some(known_peers) => {
+                    tracing::debug!(
+                        "Net::new: Found existing known_peers database"
+                    );
+                    known_peers
                 }
-                known_peers
-            }
-        };
+                None => {
+                    tracing::debug!(
+                        "Net::new: Creating new known_peers database"
+                    );
+                    DatabaseUnique::create(env, &mut rwtxn, "known_peers")?
+                }
+            };
+        let () = add_seed_peers(&known_peers, &mut rwtxn, network)?;
         tracing::debug!("Net::new: Creating net_version database");
         let version = DatabaseUnique::create(env, &mut rwtxn, "net_version")?;
         if version.try_get(&rwtxn, &())?.is_none() {
@@ -612,5 +622,48 @@ mod crypto_provider_tests {
         assert!(!cert.is_empty(), "server config should yield a certificate");
         let _client_config =
             configure_client().expect("client config should build");
+    }
+}
+
+#[cfg(test)]
+mod seed_peer_tests {
+    use heed::types::{SerdeBincode, Unit};
+    use sneed::DatabaseUnique;
+
+    use super::{add_seed_peers, seed_node_addrs};
+    use crate::types::Network;
+
+    /// Every seed reaches a peer table that already exists, and a second call
+    /// writes the same set.
+    #[test]
+    fn seeds_reach_an_existing_database() -> anyhow::Result<()> {
+        let temp_dir = temp_dir::TempDir::new()?;
+        let mut opts = heed::EnvOpenOptions::new();
+        opts.map_size(16 * 1024 * 1024).max_dbs(2);
+        let env = unsafe { sneed::Env::open(&opts, temp_dir.path()) }?;
+        let network = Network::Signet;
+        let known_peers = {
+            let mut rwtxn = env.write_txn()?;
+            let known_peers: DatabaseUnique<
+                SerdeBincode<std::net::SocketAddr>,
+                Unit,
+            > = DatabaseUnique::create(&env, &mut rwtxn, "known_peers")?;
+            add_seed_peers(&known_peers, &mut rwtxn, network)?;
+            add_seed_peers(&known_peers, &mut rwtxn, network)?;
+            rwtxn.commit()?;
+            known_peers
+        };
+        let rotxn = env.read_txn()?;
+        for seed_node_addr in seed_node_addrs(network) {
+            anyhow::ensure!(
+                known_peers.try_get(&rotxn, seed_node_addr)?.is_some(),
+                "the seed {seed_node_addr} never reached the database"
+            );
+        }
+        assert_eq!(
+            known_peers.len(&rotxn)?,
+            seed_node_addrs(network).len() as u64
+        );
+        Ok(())
     }
 }
