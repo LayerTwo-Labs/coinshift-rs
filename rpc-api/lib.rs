@@ -7,9 +7,11 @@ use std::net::SocketAddr;
 use coinshift::{
     net::Peer,
     types::{
-        Address, Block, BlockHash, BlockIndex, MempoolTx, MerkleRoot, OutPoint,
+        Address, Block, BlockHash, BlockIndex, BlockIndexDeposit,
+        BlockIndexSpend, BlockIndexTx, M6id, MempoolTx, MerkleRoot, OutPoint,
         Output, OutputContent, ParentChainType, PointedOutput, Swap, SwapId,
-        SwapState, Txid, WithdrawalBundle, schema as coinshift_schema,
+        SwapState, Transaction, TxData, Txid, WithdrawalBundle,
+        schema as coinshift_schema,
     },
     wallet::Balance,
 };
@@ -32,9 +34,11 @@ pub struct GetBlockTemplateResponse {
 }
 
 #[open_api(ref_schemas[
-    Address, MerkleRoot, OutPoint, Output, OutputContent, ParentChainType,
-    Swap, SwapId, SwapState, Txid, schema::BitcoinTxid,
+    Address, BlockIndexDeposit, BlockIndexSpend, BlockIndexTx, M6id,
+    MerkleRoot, OutPoint, Output, OutputContent, ParentChainType, Swap, SwapId,
+    SwapState, Transaction, TxData, Txid, schema::BitcoinTxid,
     coinshift_schema::BitcoinAddr, coinshift_schema::BitcoinOutPoint,
+    coinshift_schema::UtreexoProof,
 ])]
 #[rpc(client, server)]
 pub trait Rpc {
