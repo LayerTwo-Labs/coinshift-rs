@@ -914,13 +914,8 @@ impl Wallet {
 
     pub fn get_num_addresses(&self) -> Result<u32, Error> {
         let txn = self.env.read_txn().map_err(EnvError::from)?;
-        let (last_index, _) = self
-            .index_to_address
-            .last(&txn)
-            .map_err(DbError::from)?
-            .unwrap_or(([0; 4], [0; 20].into()));
-        let last_index = BigEndian::read_u32(&last_index);
-        Ok(last_index)
+        let num = self.index_to_address.len(&txn).map_err(DbError::from)?;
+        Ok(num as u32)
     }
 
     /// Maximum address index to scan when recovering an address from seed
@@ -1147,6 +1142,27 @@ mod tests {
         let dir = temp_dir::TempDir::new().unwrap();
         let wallet = Wallet::new(dir.path()).unwrap();
         (dir, wallet)
+    }
+
+    // A wallet that skips index 0 cannot see a deposit paid to it, and a lite
+    // wallet that derives from 0 then disagrees with the node.
+    #[test]
+    fn first_address_uses_index_zero() -> anyhow::Result<()> {
+        let (_dir, wallet) = test_wallet();
+        wallet.set_seed(&[1u8; 64])?;
+        assert_eq!(wallet.get_num_addresses()?, 0);
+
+        for index in 0..3u32 {
+            let address = wallet.get_new_address()?;
+            let txn = wallet.env.read_txn()?;
+            let expected = get_address(
+                &wallet.get_signing_key(&txn, index)?.verifying_key(),
+            );
+            drop(txn);
+            assert_eq!(address, expected);
+            assert_eq!(wallet.get_num_addresses()?, index + 1);
+        }
+        Ok(())
     }
 
     /// When the accumulated total exactly reaches the target, coin selection
