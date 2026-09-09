@@ -297,6 +297,25 @@ impl RpcServer for RpcServerImpl {
         Ok(height)
     }
 
+    async fn list_mempool(
+        &self,
+    ) -> RpcResult<Vec<coinshift::types::MempoolTx>> {
+        let txs = self.app.node.get_all_transactions().map_err(custom_err)?;
+        let res = txs
+            .into_iter()
+            .map(|authorized| {
+                let tx = authorized.transaction;
+                coinshift::types::MempoolTx {
+                    txid: tx.txid(),
+                    size: tx.canonical_size(),
+                    raw: hex::encode(tx.canonical_encoding()),
+                    tx,
+                }
+            })
+            .collect();
+        Ok(res)
+    }
+
     async fn list_peers(&self) -> RpcResult<Vec<Peer>> {
         let peers = self.app.node.get_active_peers();
         Ok(peers)

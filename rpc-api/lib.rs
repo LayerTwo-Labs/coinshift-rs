@@ -7,9 +7,9 @@ use std::net::SocketAddr;
 use coinshift::{
     net::Peer,
     types::{
-        Address, Block, BlockHash, BlockIndex, MerkleRoot, OutPoint, Output,
-        OutputContent, ParentChainType, PointedOutput, Swap, SwapId, SwapState,
-        Txid, WithdrawalBundle, schema as coinshift_schema,
+        Address, Block, BlockHash, BlockIndex, MempoolTx, MerkleRoot, OutPoint,
+        Output, OutputContent, ParentChainType, PointedOutput, Swap, SwapId,
+        SwapState, Txid, WithdrawalBundle, schema as coinshift_schema,
     },
     wallet::Balance,
 };
@@ -182,6 +182,10 @@ pub trait Rpc {
     async fn latest_failed_withdrawal_bundle_height(
         &self,
     ) -> RpcResult<Option<u32>>;
+
+    /// List the transactions the mempool holds, in no particular order.
+    #[method(name = "list_mempool")]
+    async fn list_mempool(&self) -> RpcResult<Vec<MempoolTx>>;
 
     /// List peers
     #[method(name = "list_peers")]
