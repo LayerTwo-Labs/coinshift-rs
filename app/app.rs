@@ -198,7 +198,6 @@ impl App {
         node: Arc<Node>,
         mainchain_reachable: Arc<AtomicBool>,
     ) -> Result<(), Error> {
-        use futures::FutureExt;
         use std::time::Duration;
         const SYNC_INTERVAL: Duration = Duration::from_secs(10);
 
@@ -213,16 +212,11 @@ impl App {
 
             // Get current L1 chain tip (mainchain must be up for mining and block sync)
             let l1_tip_hash = match node
-                .with_cusf_mainchain(|client| {
-                    client
-                        .get_chain_tip()
-                        .map(|res| {
-                            res.map(|tip| tip.block_hash)
-                                .map_err(Error::CusfMainchain)
-                        })
-                        .boxed()
-                })
+                .with_cusf_mainchain(|client| client.clone())
+                .get_chain_tip()
                 .await
+                .map(|tip| tip.block_hash)
+                .map_err(Error::CusfMainchain)
             {
                 Ok(hash) => {
                     mainchain_reachable.store(true, Ordering::SeqCst);
@@ -986,21 +980,14 @@ impl App {
         &self,
         fee: Option<bitcoin::Amount>,
     ) -> Result<BlockTemplate, Error> {
-        let Some(miner) = self.miner.as_ref() else {
-            return Err(Error::NoCusfMainchainWalletClient);
-        };
         // Mining requires the mainchain (parentchain) to be up so we can fetch blocks.
-        let prev_main_hash = {
-            let mut miner_write = miner.write().await;
-            let prev_main_hash = miner_write
-                .cusf_mainchain
-                .get_chain_tip()
-                .await
-                .map_err(|e| Error::MainchainUnreachable(Box::new(e)))?
-                .block_hash;
-            drop(miner_write);
-            prev_main_hash
-        };
+        let prev_main_hash = self
+            .node
+            .with_cusf_mainchain(|cusf_mainchain| cusf_mainchain.clone())
+            .get_chain_tip()
+            .await
+            .map_err(|e| Error::MainchainUnreachable(Box::new(e)))?
+            .block_hash;
         let tip_hash = self.node.try_get_best_hash()?;
         // If `prev_side_hash` is not the best tip to mine on, then mine an
         // empty block.

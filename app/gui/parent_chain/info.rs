@@ -1,6 +1,5 @@
 use coinshift::types::proto::mainchain;
 use eframe::egui::{self, Button};
-use futures::FutureExt;
 
 use crate::{app::App, gui::util::UiExt};
 
@@ -14,10 +13,11 @@ pub(super) struct Info(Option<anyhow::Result<Inner>>);
 
 impl Info {
     fn get_parent_chain_info(app: &App) -> anyhow::Result<Inner> {
-        let mainchain_tip_info =
-            app.runtime.block_on(app.node.with_cusf_mainchain(
-                |cusf_mainchain| cusf_mainchain.get_chain_tip().boxed(),
-            ))?;
+        let mainchain_tip_info = app.runtime.block_on(
+            app.node
+                .with_cusf_mainchain(|cusf_mainchain| cusf_mainchain.clone())
+                .get_chain_tip(),
+        )?;
         let sidechain_wealth = app.node.get_sidechain_wealth()?;
         Ok(Inner {
             mainchain_tip_info,
