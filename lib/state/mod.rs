@@ -291,17 +291,27 @@ impl State {
     pub fn get_latest_failed_withdrawal_bundle(
         &self,
         rotxn: &RoTxn,
-    ) -> Result<Option<(u32, M6id)>, db_error::TryGet> {
-        let Some(latest_failed_m6id) =
-            self.latest_failed_withdrawal_bundle.try_get(rotxn, &())?
+    ) -> Result<Option<(u32, M6id)>, Error> {
+        let Some(latest_failed_m6id) = self
+            .latest_failed_withdrawal_bundle
+            .try_get(rotxn, &())
+            .map_err(DbError::from)?
         else {
             return Ok(None);
         };
         let latest_failed_m6id = latest_failed_m6id.latest().value;
-        let (_bundle, bundle_status) = self.withdrawal_bundles.try_get(rotxn, &latest_failed_m6id)?
-            .expect("Inconsistent DBs: latest failed m6id should exist in withdrawal_bundles");
+        let inconsistent = || Error::InconsistentLatestFailedWithdrawalBundle {
+            m6id: latest_failed_m6id,
+        };
+        let (_bundle, bundle_status) = self
+            .withdrawal_bundles
+            .try_get(rotxn, &latest_failed_m6id)
+            .map_err(DbError::from)?
+            .ok_or_else(inconsistent)?;
         let bundle_status = bundle_status.latest();
-        assert_eq!(bundle_status.value, WithdrawalBundleStatus::Failed);
+        if bundle_status.value != WithdrawalBundleStatus::Failed {
+            return Err(inconsistent());
+        }
         Ok(Some((bundle_status.height, latest_failed_m6id)))
     }
 

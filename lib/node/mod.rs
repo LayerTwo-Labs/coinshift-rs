@@ -429,8 +429,7 @@ where
         let rotxn = self.env.read_txn().map_err(EnvError::from)?;
         let res = self
             .state
-            .get_latest_failed_withdrawal_bundle(&rotxn)
-            .map_err(DbError::from)?
+            .get_latest_failed_withdrawal_bundle(&rotxn)?
             .map(|(height, _)| height);
         Ok(res)
     }

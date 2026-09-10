@@ -105,6 +105,35 @@ fn collect_withdrawal_bundle(
     Ok(Some(bundle))
 }
 
+/// The bundle's latest recorded status is not the one this event expects.
+fn unexpected_status(
+    m6id: M6id,
+    bundle_status: &RollBack<WithdrawalBundleStatus>,
+    block_height: u32,
+) -> Error {
+    let latest = bundle_status.latest();
+    Error::UnexpectedWithdrawalBundleStatus {
+        m6id,
+        status: latest.value,
+        status_height: latest.height,
+        block_height,
+    }
+}
+
+/// A status could not be pushed because the event is older than the latest
+/// recorded status.
+fn out_of_order(
+    m6id: M6id,
+    bundle_status: &RollBack<WithdrawalBundleStatus>,
+    block_height: u32,
+) -> Error {
+    Error::WithdrawalBundleEventOutOfOrder {
+        m6id,
+        block_height,
+        latest_height: bundle_status.latest().height,
+    }
+}
+
 fn connect_withdrawal_bundle_submitted(
     state: &State,
     rwtxn: &mut RwTxn,
@@ -119,7 +148,20 @@ fn connect_withdrawal_bundle_submitted(
         .map_err(DbError::from)?
         && bundle.compute_m6id() == m6id
     {
-        assert_eq!(bundle_block_height, block_height - 1);
+        // The m6id commits to the bundle's contents, which is what ties the
+        // event to the pending bundle. The bundle is usually submitted in the
+        // parent-chain block right after it was collected, but a slow
+        // enforcer, a delayed L1 block or a restart in between can push the
+        // Submitted event out by one or more sidechain blocks. That is
+        // ordinary timing, not corruption.
+        if bundle_block_height + 1 != block_height {
+            tracing::debug!(
+                %block_height,
+                %bundle_block_height,
+                %m6id,
+                "Withdrawal bundle submitted later than the block after it was collected"
+            );
+        }
 
         // Calculate total withdrawal amount from bundle outputs
         let total_withdrawal_value: bitcoin::Amount = bundle
@@ -199,10 +241,15 @@ fn connect_withdrawal_bundle_submitted(
         // Already applied: the m6id is already recorded, so this submission is
         // a no-op. `disconnect_withdrawal_bundle_submitted` mirrors this by
         // leaving the stored bundle untouched.
-        assert_eq!(
-            bundle_status.earliest().value,
-            WithdrawalBundleStatus::Submitted
-        );
+        let earliest = bundle_status.earliest();
+        if earliest.value != WithdrawalBundleStatus::Submitted {
+            return Err(Error::UnexpectedWithdrawalBundleStatus {
+                m6id,
+                status: earliest.value,
+                status_height: earliest.height,
+                block_height,
+            });
+        }
     } else {
         tracing::warn!(
             %event_block_hash,
@@ -244,10 +291,9 @@ fn connect_withdrawal_bundle_confirmed(
         // Already applied
         return Ok(());
     }
-    assert_eq!(
-        bundle_status.latest().value,
-        WithdrawalBundleStatus::Submitted
-    );
+    if bundle_status.latest().value != WithdrawalBundleStatus::Submitted {
+        return Err(unexpected_status(m6id, &bundle_status, block_height));
+    }
 
     // Log withdrawal bundle confirmation
     match &bundle {
@@ -328,7 +374,7 @@ fn connect_withdrawal_bundle_confirmed(
     }
     bundle_status
         .push(WithdrawalBundleStatus::Confirmed, block_height)
-        .expect("Push confirmed status should be valid");
+        .map_err(|_| out_of_order(m6id, &bundle_status, block_height))?;
     state
         .withdrawal_bundles
         .put(rwtxn, &m6id, &(bundle, bundle_status))
@@ -352,10 +398,9 @@ fn connect_withdrawal_bundle_failed(
         // Already applied
         return Ok(());
     }
-    assert_eq!(
-        bundle_status.latest().value,
-        WithdrawalBundleStatus::Submitted
-    );
+    if bundle_status.latest().value != WithdrawalBundleStatus::Submitted {
+        return Err(unexpected_status(m6id, &bundle_status, block_height));
+    }
 
     // Log withdrawal bundle failure
     match &bundle {
@@ -395,7 +440,7 @@ fn connect_withdrawal_bundle_failed(
         "Handling failed withdrawal bundle");
     bundle_status
         .push(WithdrawalBundleStatus::Failed, block_height)
-        .expect("Push failed status should be valid");
+        .map_err(|_| out_of_order(m6id, &bundle_status, block_height))?;
     match &bundle {
         WithdrawalBundleInfo::Unknown
         | WithdrawalBundleInfo::UnknownConfirmed { .. } => (),
@@ -418,9 +463,14 @@ fn connect_withdrawal_bundle_failed(
                 .try_get(rwtxn, &())
                 .map_err(DbError::from)?
             {
-                latest_failed_m6id
-                    .push(m6id, block_height)
-                    .expect("Push latest failed m6id should be valid");
+                let latest_height = latest_failed_m6id.latest().height;
+                latest_failed_m6id.push(m6id, block_height).map_err(|_| {
+                    Error::WithdrawalBundleEventOutOfOrder {
+                        m6id,
+                        block_height,
+                        latest_height,
+                    }
+                })?;
                 latest_failed_m6id
             } else {
                 RollBack::new(m6id, block_height)
@@ -968,8 +1018,7 @@ pub fn connect(
             .map_err(DbError::from)?;
     }
     let last_withdrawal_bundle_failure_height = state
-        .get_latest_failed_withdrawal_bundle(rwtxn)
-        .map_err(DbError::from)?
+        .get_latest_failed_withdrawal_bundle(rwtxn)?
         .map(|(height, _bundle)| height)
         .unwrap_or_default();
     if block_height - last_withdrawal_bundle_failure_height
@@ -1108,17 +1157,33 @@ fn disconnect_withdrawal_bundle_confirmed(
         // Already applied
         return Ok(());
     }
-    assert_eq!(
-        latest_bundle_status.value,
-        WithdrawalBundleStatus::Confirmed
-    );
-    assert_eq!(latest_bundle_status.height, block_height);
-    let prev_bundle_status = prev_bundle_status
-        .expect("Pop confirmed bundle status should be valid");
-    assert_eq!(
-        prev_bundle_status.latest().value,
-        WithdrawalBundleStatus::Submitted
-    );
+    if latest_bundle_status.value != WithdrawalBundleStatus::Confirmed
+        || latest_bundle_status.height != block_height
+    {
+        return Err(Error::UnexpectedWithdrawalBundleStatus {
+            m6id,
+            status: latest_bundle_status.value,
+            status_height: latest_bundle_status.height,
+            block_height,
+        });
+    }
+    // A Confirmed status is only ever pushed on top of a Submitted one, so
+    // there must be a previous status and it must be Submitted.
+    let prev_bundle_status = match prev_bundle_status {
+        Some(prev)
+            if prev.latest().value == WithdrawalBundleStatus::Submitted =>
+        {
+            prev
+        }
+        _ => {
+            return Err(Error::UnexpectedWithdrawalBundleStatus {
+                m6id,
+                status: latest_bundle_status.value,
+                status_height: latest_bundle_status.height,
+                block_height,
+            });
+        }
+    };
     match bundle {
         WithdrawalBundleInfo::Known(_) | WithdrawalBundleInfo::Unknown => (),
         WithdrawalBundleInfo::UnknownConfirmed { spend_utxos } => {
@@ -1163,16 +1228,33 @@ fn disconnect_withdrawal_bundle_failed(
     if latest_bundle_status.value == WithdrawalBundleStatus::Submitted {
         // Already applied
         return Ok(());
-    } else {
-        assert_eq!(latest_bundle_status.value, WithdrawalBundleStatus::Failed);
     }
-    assert_eq!(latest_bundle_status.height, block_height);
-    let prev_bundle_status =
-        prev_bundle_status.expect("Pop failed bundle status should be valid");
-    assert_eq!(
-        prev_bundle_status.latest().value,
-        WithdrawalBundleStatus::Submitted
-    );
+    if latest_bundle_status.value != WithdrawalBundleStatus::Failed
+        || latest_bundle_status.height != block_height
+    {
+        return Err(Error::UnexpectedWithdrawalBundleStatus {
+            m6id,
+            status: latest_bundle_status.value,
+            status_height: latest_bundle_status.height,
+            block_height,
+        });
+    }
+    // A Failed status is only ever pushed on top of a Submitted one.
+    let prev_bundle_status = match prev_bundle_status {
+        Some(prev)
+            if prev.latest().value == WithdrawalBundleStatus::Submitted =>
+        {
+            prev
+        }
+        _ => {
+            return Err(Error::UnexpectedWithdrawalBundleStatus {
+                m6id,
+                status: latest_bundle_status.value,
+                status_height: latest_bundle_status.height,
+                block_height,
+            });
+        }
+    };
     match &bundle {
         WithdrawalBundleInfo::Unknown
         | WithdrawalBundleInfo::UnknownConfirmed { .. } => (),
@@ -1205,10 +1287,20 @@ fn disconnect_withdrawal_bundle_failed(
                 .latest_failed_withdrawal_bundle
                 .try_get(rwtxn, &())
                 .map_err(DbError::from)?
-                .expect("latest failed withdrawal bundle should exist")
+                .ok_or(Error::InconsistentLatestFailedWithdrawalBundle {
+                    m6id,
+                })?
                 .pop();
-            assert_eq!(latest_failed_m6id.value, m6id);
-            assert_eq!(latest_failed_m6id.height, block_height);
+            if latest_failed_m6id.value != m6id
+                || latest_failed_m6id.height != block_height
+            {
+                return Err(Error::LatestFailedWithdrawalBundleMismatch {
+                    expected: m6id,
+                    block_height,
+                    found: latest_failed_m6id.value,
+                    found_height: latest_failed_m6id.height,
+                });
+            }
             if let Some(prev_latest_failed_m6id) = prev_latest_failed_m6id {
                 state
                     .latest_failed_withdrawal_bundle
@@ -1310,9 +1402,7 @@ pub fn disconnect(
     rwtxn: &mut RwTxn,
     two_way_peg_data: &TwoWayPegData,
 ) -> Result<(), Error> {
-    let block_height = state
-        .try_get_height(rwtxn)?
-        .expect("Height should not be None");
+    let block_height = state.try_get_height(rwtxn)?.ok_or(Error::NoTip)?;
     let mut accumulator = state
         .utreexo_accumulator
         .try_get(rwtxn, &())
@@ -1378,14 +1468,21 @@ pub fn disconnect(
             .last(rwtxn)
             .map_err(DbError::from)?
             .ok_or(Error::NoWithdrawalBundleEventBlock)?;
-        assert_eq!(
-            latest_withdrawal_bundle_event_block_hash,
-            last_withdrawal_bundle_event_block_hash
-        );
         // `connect` records the height of the sidechain tip at the time the
         // event block was applied, and `disconnect` runs before `disconnect_tip`
         // lowers the height, so the two must match exactly.
-        assert_eq!(block_height, last_withdrawal_bundle_event_block_height);
+        if latest_withdrawal_bundle_event_block_hash
+            != last_withdrawal_bundle_event_block_hash
+            || block_height != last_withdrawal_bundle_event_block_height
+        {
+            return Err(Error::EventBlockMismatch {
+                table: "withdrawal_bundle_event_blocks",
+                block_height,
+                expected_hash: latest_withdrawal_bundle_event_block_hash,
+                found_hash: last_withdrawal_bundle_event_block_hash,
+                found_height: last_withdrawal_bundle_event_block_height,
+            });
+        }
         if !state
             .withdrawal_bundle_event_blocks
             .delete(rwtxn, &last_withdrawal_bundle_event_block_seq_idx)
@@ -1395,8 +1492,7 @@ pub fn disconnect(
         };
     }
     let last_withdrawal_bundle_failure_height = state
-        .get_latest_failed_withdrawal_bundle(rwtxn)
-        .map_err(DbError::from)?
+        .get_latest_failed_withdrawal_bundle(rwtxn)?
         .map(|(height, _bundle)| height)
         .unwrap_or_default();
     if block_height - last_withdrawal_bundle_failure_height
@@ -1422,8 +1518,17 @@ pub fn disconnect(
             .last(rwtxn)
             .map_err(DbError::from)?
             .ok_or(Error::NoDepositBlock)?;
-        assert_eq!(latest_deposit_block_hash, last_deposit_block_hash);
-        assert_eq!(block_height, last_deposit_block_height);
+        if latest_deposit_block_hash != last_deposit_block_hash
+            || block_height != last_deposit_block_height
+        {
+            return Err(Error::EventBlockMismatch {
+                table: "deposit_blocks",
+                block_height,
+                expected_hash: latest_deposit_block_hash,
+                found_hash: last_deposit_block_hash,
+                found_height: last_deposit_block_height,
+            });
+        }
         if !state
             .deposit_blocks
             .delete(rwtxn, &last_deposit_block_seq_idx)
@@ -1567,6 +1672,119 @@ mod withdrawal_bundle_reversal_tests {
         status: WithdrawalBundleStatus,
     ) -> WithdrawalBundleEvent {
         WithdrawalBundleEvent { m6id, status }
+    }
+
+    /// A bundle collected at height N is normally reported as Submitted by
+    /// the 2WPD of block N+1, but a slow enforcer, a delayed L1 block or a
+    /// restart in between can push the event to a later block. The m6id
+    /// identifies the bundle; the height gap is timing, not corruption, and
+    /// must not kill the net task.
+    #[test]
+    fn connect_accepts_delayed_bundle_submission() {
+        let (_dir, env, state) = test_state();
+        let outpoint = OutPoint::Regular {
+            txid: Txid([9u8; 32]),
+            vout: 0,
+        };
+        let key = OutPointKey::from(&outpoint);
+        let output = Output {
+            address: Address([1u8; 20]),
+            content: OutputContent::Value(sat(30_000)),
+        };
+        let bundle = WithdrawalBundle::new(
+            9,
+            sat(1_000),
+            BTreeMap::from([(outpoint, output.clone())]),
+            vec![bitcoin::TxOut {
+                value: sat(29_000),
+                script_pubkey: bitcoin::ScriptBuf::new(),
+            }],
+        )
+        .unwrap();
+        let m6id = bundle.compute_m6id();
+
+        let mut rwtxn = env.write_txn().unwrap();
+        state.utxos.put(&mut rwtxn, &key, &output).unwrap();
+        state
+            .pending_withdrawal_bundle
+            .put(&mut rwtxn, &(), &(bundle, 9))
+            .unwrap();
+        let mut accumulator_diff = AccumulatorDiff::default();
+
+        // Collected at 9, submitted at 12 rather than 10.
+        connect_withdrawal_bundle_event(
+            &state,
+            &mut rwtxn,
+            12,
+            &mut accumulator_diff,
+            &bitcoin::BlockHash::all_zeros(),
+            &bundle_event(m6id, WithdrawalBundleStatus::Submitted),
+        )
+        .expect("a late Submitted event must be applied, not panic");
+        let (_bundle, bundle_status) = state
+            .withdrawal_bundles
+            .try_get(&rwtxn, &m6id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            bundle_status.latest().value,
+            WithdrawalBundleStatus::Submitted
+        );
+        assert_eq!(bundle_status.latest().height, 12);
+        assert!(
+            state.utxos.try_get(&rwtxn, &key).unwrap().is_none(),
+            "the bundle's input must be spent"
+        );
+        assert!(
+            state
+                .pending_withdrawal_bundle
+                .try_get(&rwtxn, &())
+                .unwrap()
+                .is_none(),
+            "the pending bundle must be consumed"
+        );
+    }
+
+    /// A Confirmed event for a bundle whose latest status is not Submitted is
+    /// a malformed event sequence. It must surface as an error the caller can
+    /// handle, not a panic that takes the net task down.
+    #[test]
+    fn connect_confirmed_without_submitted_is_an_error() {
+        let (_dir, env, state) = test_state();
+        let m6id = M6id(bitcoin::Txid::all_zeros());
+        let mut rwtxn = env.write_txn().unwrap();
+        state
+            .withdrawal_bundles
+            .put(
+                &mut rwtxn,
+                &m6id,
+                &(
+                    WithdrawalBundleInfo::Unknown,
+                    RollBack::new(WithdrawalBundleStatus::Failed, 5),
+                ),
+            )
+            .unwrap();
+        let mut accumulator_diff = AccumulatorDiff::default();
+        let result = connect_withdrawal_bundle_event(
+            &state,
+            &mut rwtxn,
+            6,
+            &mut accumulator_diff,
+            &bitcoin::BlockHash::all_zeros(),
+            &bundle_event(m6id, WithdrawalBundleStatus::Confirmed),
+        );
+        assert!(
+            matches!(
+                result,
+                Err(Error::UnexpectedWithdrawalBundleStatus {
+                    status: WithdrawalBundleStatus::Failed,
+                    status_height: 5,
+                    block_height: 6,
+                    ..
+                })
+            ),
+            "expected UnexpectedWithdrawalBundleStatus, got {result:?}"
+        );
     }
 
     /// The parent chain only refuses a bundle proposal while its m6id is still

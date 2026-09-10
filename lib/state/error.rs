@@ -87,6 +87,42 @@ pub enum Error {
     SpendWithdrawalOutput,
     #[error("Withdrawal bundle event block doesn't exist")]
     NoWithdrawalBundleEventBlock,
+    #[error(
+        "{table} bookkeeping mismatch while disconnecting block at height \
+         {block_height}: expected ({expected_hash}, {block_height}), found \
+         ({found_hash}, {found_height})"
+    )]
+    EventBlockMismatch {
+        table: &'static str,
+        block_height: u32,
+        expected_hash: bitcoin::BlockHash,
+        found_hash: bitcoin::BlockHash,
+        found_height: u32,
+    },
+    #[error(
+        "Withdrawal bundle {m6id} event at height {block_height} is older \
+         than its latest recorded status at height {latest_height}"
+    )]
+    WithdrawalBundleEventOutOfOrder {
+        m6id: M6id,
+        block_height: u32,
+        latest_height: u32,
+    },
+    #[error(
+        "Inconsistent DBs: latest failed withdrawal bundle {m6id} is missing \
+         or not recorded as failed"
+    )]
+    InconsistentLatestFailedWithdrawalBundle { m6id: M6id },
+    #[error(
+        "Latest failed withdrawal bundle does not match: expected {expected} \
+         at height {block_height}, found {found} at height {found_height}"
+    )]
+    LatestFailedWithdrawalBundleMismatch {
+        expected: M6id,
+        block_height: u32,
+        found: M6id,
+        found_height: u32,
+    },
     #[error(transparent)]
     Utreexo(#[from] UtreexoError),
     #[error("Utreexo proof verification failed for tx {txid}")]

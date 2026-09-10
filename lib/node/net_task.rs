@@ -67,6 +67,14 @@ pub enum Error {
     PeerInfoRxClosed,
     #[error("Receive mainchain task response cancelled")]
     ReceiveMainchainTaskResponse,
+    #[error(
+        "Reorg did not reach the common ancestor: tip is {tip:?}, expected \
+         {common_ancestor:?}"
+    )]
+    ReorgMissedCommonAncestor {
+        tip: Option<crate::types::BlockHash>,
+        common_ancestor: Option<crate::types::BlockHash>,
+    },
     #[error("Receive reorg result cancelled (oneshot)")]
     ReceiveReorgResultOneshot(#[source] oneshot::Canceled),
     #[error("Send mainchain task request failed")]
@@ -375,7 +383,12 @@ fn reorg_to_tip(
     }
     {
         let tip_hash = state.try_get_tip(&rwtxn)?;
-        assert_eq!(tip_hash, common_ancestor);
+        if tip_hash != common_ancestor {
+            return Err(Error::ReorgMissedCommonAncestor {
+                tip: tip_hash,
+                common_ancestor,
+            });
+        }
     }
     let mut two_way_peg_data_batch: Vec<_> = {
         let common_ancestor_header =
