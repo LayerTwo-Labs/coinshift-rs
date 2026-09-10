@@ -23,10 +23,10 @@ jobs:
         with:
           submodules: recursive
       
-      - name: Install latest nightly toolchain
+      - name: Install pinned nightly toolchain (keep in sync with rust-toolchain.toml)
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: nightly
+          toolchain: nightly-2026-08-28
           components: rustfmt, clippy
 
       - name: Rust Cache
@@ -51,10 +51,17 @@ jobs:
     runs-on: ubuntu-latest
     needs: [check-lint]
     steps:
-      - name: Download latest bitcoin-patched
+      - name: Download bitcoin-patched
+        # The archive is a moving "latest" URL; verify it against a known
+        # checksum so a swapped binary cannot run in CI unnoticed. When
+        # upstream publishes a new build, update the hash deliberately:
+        #   curl -sSL <url> | sha256sum
+        env:
+          BITCOIN_PATCHED_SHA256: 5f419cb449129bb39e410463ad997235a53d7aec5895b3fb7f3a3cd13d64cd52
         run: |
           pushd ..
           wget https://releases.drivechain.info/L1-bitcoin-patched-latest-x86_64-unknown-linux-gnu.zip
+          echo "${BITCOIN_PATCHED_SHA256}  L1-bitcoin-patched-latest-x86_64-unknown-linux-gnu.zip" | sha256sum --check
           unzip L1-bitcoin-patched-latest-x86_64-unknown-linux-gnu.zip
           rm L1-bitcoin-patched-latest-x86_64-unknown-linux-gnu.zip
           mv L1-bitcoin-patched-latest-x86_64-unknown-linux-gnu bitcoin-patched-bins
@@ -68,10 +75,10 @@ jobs:
           git clone https://github.com/mempool/electrs.git
           popd
 
-      - name: Install latest nightly toolchain
+      - name: Install pinned nightly toolchain (keep in sync with rust-toolchain.toml)
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: nightly
+          toolchain: nightly-2026-08-28
 
       - name: Rust Cache (electrs)
         uses: Swatinem/rust-cache@v2
@@ -175,10 +182,10 @@ jobs:
         with:
           submodules: recursive
       
-      - name: Install latest nightly toolchain
+      - name: Install pinned nightly toolchain (keep in sync with rust-toolchain.toml)
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: nightly
+          toolchain: nightly-2026-08-28
           target: ${{ matrix.name }}
 
       - name: Rust Cache

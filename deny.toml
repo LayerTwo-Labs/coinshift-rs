@@ -63,6 +63,9 @@ feature-depth = 1
 # More documentation for the advisories section can be found here:
 # https://embarkstudios.github.io/cargo-deny/checks/advisories/cfg.html
 [advisories]
+# A yanked crate version in the lockfile blocks routine upgrades and signals
+# drift; fail the check rather than warn.
+yanked = "deny"
 # The path where the advisory databases are cloned/fetched into
 #db-path = "$CARGO_HOME/advisory-dbs"
 # The url(s) of the advisory databases to use
