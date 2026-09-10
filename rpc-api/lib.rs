@@ -280,10 +280,11 @@ pub trait Rpc {
 
     /// Reserve an open swap for a claimer, before paying on L1.
     ///
-    /// This is what entitles an address to the escrow: the reservation is
-    /// recorded on-chain, so every node agrees who may claim. Reserve *first*,
-    /// then pay on L1 — a reservation taken after the L1 payment can be
-    /// front-run by anyone watching.
+    /// The reservation is coordination: it is recorded on-chain so other
+    /// takers see the swap is spoken for and do not also pay on L1.
+    /// Entitlement to the escrow comes from the L1 payment itself, which must
+    /// commit to the claimer (see `l1_payment_commitment`), so a reservation
+    /// cannot be front-run.
     ///
     /// `l2_claimer_address` defaults to an address of this wallet. The
     /// reservation lapses after the parent chain's acceptance window if the
@@ -296,13 +297,29 @@ pub trait Rpc {
         fee_sats: Option<u64>,
     ) -> RpcResult<Txid>;
 
-    /// Claim a swap (after L1 transaction has required confirmations)
-    /// For open swaps, l2_claimer_address is required (the claimer's L2 address)
+    /// The `OP_RETURN` payload an L1 payment must carry to fill a swap for
+    /// `l2_claimer_address`: it binds the payment to the swap and names the
+    /// L2 address that receives the escrow. Returned as hex, for use as a
+    /// `"data"` output in `createrawtransaction` / `send`.
+    #[method(name = "l1_payment_commitment")]
+    async fn l1_payment_commitment(
+        &self,
+        swap_id: SwapId,
+        l2_claimer_address: Address,
+    ) -> RpcResult<String>;
+
+    /// Claim a swap. The claim must prove the L1 payment: `l1_proof` is the
+    /// hex of a borsh-encoded `L1PaymentProof` (merkle block from
+    /// `gettxoutproof` plus the raw transaction). When omitted, the node
+    /// builds it from its configured parent-chain RPC using the swap's
+    /// recorded L1 txid. The escrow is paid to the L2 address the payment
+    /// committed to; `l2_claimer_address`, if given, must match it.
     #[method(name = "claim_swap")]
     async fn claim_swap(
         &self,
         swap_id: SwapId,
-        l2_claimer_address: Option<Address>, // Required for open swaps
+        l2_claimer_address: Option<Address>,
+        l1_proof: Option<String>,
     ) -> RpcResult<Txid>;
 
     /// List all swaps

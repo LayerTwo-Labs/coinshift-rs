@@ -64,7 +64,7 @@ async fn l1_txid_uniqueness_task(
     )
     .await?;
 
-    let l1_recipient = "bcrt1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh";
+    let l1_recipient = "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080";
 
     // Create first swap (pre-specified)
     let (swap_id_a, txid_a) = sidechain

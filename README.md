@@ -120,10 +120,11 @@ The CLI talks to the Coinshift RPC server (default `http://localhost:6255`). Use
 
 | Command | Description |
 |---------|-------------|
-| `create-swap` | Create L2->L1 swap (`--parent-chain`, `--l1-recipient-address`, amounts, etc.) |
-| `accept-swap` | Reserve an open swap for your L2 address, **before** paying on L1 (`--swap-id`) |
-| `update-swap-l1-txid` | Set L1 txid and confirmations for a swap |
-| `claim-swap` | Claim swap after L1 confirmations |
+| `create-swap` | Create L2->L1 swap (`--parent-chain signet\|regtest`, `--l1-recipient-address`, amounts, etc.). Only the chain this sidechain is anchored to can be swapped against |
+| `accept-swap` | Reserve an open swap for your L2 address (`--swap-id`). Coordination only: it tells other takers the swap is spoken for |
+| `l1-payment-commitment` | The `OP_RETURN` payload (hex) your L1 payment must carry: it binds the payment to the swap and names the L2 address that gets the escrow (`--swap-id`, `--l2-claimer-address`) |
+| `update-swap-l1-txid` | Record the L1 txid on this node (advisory; lets the node build the claim proof from its parent-chain RPC) |
+| `claim-swap` | Claim a swap with a proof of the L1 payment. Built from the parent-chain RPC, or pass `--l1-proof <hex>` (borsh `L1PaymentProof`: `gettxoutproof` merkle block + raw tx) |
 | `list-swaps` | List all swaps |
 | `list-swaps-by-recipient` | List swaps for one recipient |
 | `get-swap-status` | Status for one swap (`--swap-id`) |

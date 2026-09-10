@@ -5,8 +5,8 @@ use coinshift::{
     net::Peer,
     state,
     types::{
-        Address, ParentChainType, PointedOutput, Swap, SwapId, SwapState,
-        SwapTxId, Txid, WithdrawalBundle,
+        Address, ParentChainType, PointedOutput, Swap, SwapId, SwapTxId, Txid,
+        WithdrawalBundle,
     },
     wallet::Balance,
 };
@@ -542,136 +542,33 @@ impl RpcServer for RpcServerImpl {
         Ok(txid)
     }
 
+    async fn l1_payment_commitment(
+        &self,
+        swap_id: SwapId,
+        l2_claimer_address: Address,
+    ) -> RpcResult<String> {
+        Ok(hex::encode(coinshift::state::l1_proof::payment_commitment(
+            &swap_id,
+            &l2_claimer_address,
+        )))
+    }
+
     async fn claim_swap(
         &self,
         swap_id: SwapId,
         l2_claimer_address: Option<Address>,
+        l1_proof: Option<String>,
     ) -> RpcResult<Txid> {
-        // Get swap to verify it's ready and get recipient
-        let rotxn = self.app.node.env().read_txn().map_err(custom_err)?;
-        let swap = self
-            .app
-            .node
-            .state()
-            .get_swap(&rotxn, &swap_id)
-            .map_err(custom_err)?
-            .ok_or_else(|| custom_err_msg("Swap not found"))?;
-
-        if !matches!(swap.state, SwapState::ReadyToClaim) {
-            return Err(custom_err_msg(format!(
-                "Swap is not ready to claim (state: {:?})",
-                swap.state
-            )));
-        }
-
-        // Get locked outputs for this swap
-        // Note: We must query the node directly, not the wallet, because the wallet
-        // filters out SwapPending outputs. Locked outputs are identified by checking
-        // if the output content is SwapPending with the matching swap_id.
-        let all_utxos = self.app.node.get_all_utxos().map_err(custom_err)?;
-
-        // Find locked outputs for this swap (same pattern as verify_swap_locks_utxos in integration tests)
-        let mut locked_outputs = Vec::new();
-        for (outpoint, output) in all_utxos {
-            match &output.content {
-                coinshift::types::OutputContent::SwapPending {
-                    swap_id: locked_swap_id,
-                    ..
-                } => {
-                    if *locked_swap_id == swap_id.0 {
-                        tracing::info!(
-                            "Found locked output for swap {}: {:?}",
-                            swap_id,
-                            outpoint
-                        );
-                        locked_outputs.push((outpoint, output));
-                    } else {
-                        tracing::debug!(
-                            "Output {:?} is SwapPending for different swap_id: {:?}",
-                            outpoint,
-                            locked_swap_id
-                        );
-                    }
-                }
-                other => {
-                    tracing::trace!(
-                        "Output {:?} is not SwapPending (content: {:?})",
-                        outpoint,
-                        other
-                    );
-                }
-            }
-        }
-
-        if locked_outputs.is_empty() {
-            return Err(custom_err_msg(format!(
-                "No locked outputs found for swap {}",
-                swap_id
-            )));
-        }
-
-        // Determine recipient. For open swaps this is the on-chain reservation
-        // recorded by `SwapAccept` — the only value consensus will accept, so
-        // any address the caller passes is ignored rather than silently
-        // producing a claim every node rejects.
-        let height = self
-            .app
-            .node
-            .state()
-            .try_get_height(&rotxn)
-            .map_err(custom_err)?
-            .map_or(0, |height| height + 1);
-        let recipient = self
-            .app
-            .node
-            .state()
-            .entitled_claimer_at(&rotxn, &swap, height)
-            .map_err(custom_err)?
-            .ok_or_else(|| {
-                custom_err_msg(
-                    "Open swap has no live reservation; call accept_swap to \
-                     reserve it (before paying on L1) and claim within the \
-                     acceptance window",
-                )
-            })?;
-        if let Some(requested) = l2_claimer_address
-            && requested != recipient
-        {
-            return Err(custom_err_msg(format!(
-                "Swap is reserved for {recipient}, not {requested}"
-            )));
-        }
-
-        // Add locked outputs to wallet temporarily so they can be used for signing
-        // SwapPending outputs are normally filtered out, but we need them in the wallet
-        // for the authorize() call to find the address and signing key
-        use std::collections::HashMap;
-        let locked_utxos: HashMap<_, _> =
-            locked_outputs.iter().cloned().collect();
-        self.app
-            .wallet
-            .put_utxos(&locked_utxos)
-            .map_err(custom_err)?;
-        tracing::debug!(
-            swap_id = %swap_id,
-            num_locked_outputs = locked_outputs.len(),
-            "Added locked outputs to wallet for signing"
-        );
-
-        let accumulator =
-            self.app.node.get_tip_accumulator().map_err(custom_err)?;
-        let l2_claimer_for_tx =
-            swap.l2_recipient.is_none().then_some(recipient);
+        let l1_proof = l1_proof
+            .map(|hex_str| {
+                hex::decode(hex_str.trim()).map_err(|err| {
+                    custom_err_msg(format!("l1_proof is not valid hex: {err}"))
+                })
+            })
+            .transpose()?;
         let tx = self
             .app
-            .wallet
-            .create_swap_claim_tx(
-                &accumulator,
-                swap_id,
-                recipient,
-                locked_outputs,
-                l2_claimer_for_tx,
-            )
+            .build_swap_claim(swap_id, l2_claimer_address, l1_proof)
             .map_err(custom_err)?;
         let txid = tx.txid();
         self.app.sign_and_send(tx).map_err(custom_err)?;

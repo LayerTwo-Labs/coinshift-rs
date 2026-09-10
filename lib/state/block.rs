@@ -100,6 +100,7 @@ pub fn prevalidate(
             rotxn,
             transaction,
             &filled_tx,
+            header.prev_main_hash,
         )?;
         total_fees = total_fees
             .checked_add(state.validate_filled_transaction(&filled_tx)?)
@@ -394,7 +395,7 @@ pub fn connect_prevalidated(
             }
             TxData::SwapClaim {
                 swap_id,
-                l2_claimer_address,
+                proof_data,
                 ..
             } => {
                 let swap_id = SwapId(*swap_id);
@@ -404,29 +405,22 @@ pub fn connect_prevalidated(
                     .get_swap(rwtxn, &swap_id)?
                     .ok_or_else(|| Error::SwapNotFound { swap_id })?;
 
-                // If this node hasn't yet observed the L1 fill (swap
-                // state set by local, non-deterministic L1 monitoring),
-                // trust the block and advance the swap to ReadyToClaim.
-                // The miner who produced the block already validated the
-                // L1 side before including this SwapClaim.
-                if !matches!(swap.state, SwapState::ReadyToClaim) {
-                    tracing::warn!(
-                        %swap_id,
-                        state = ?swap.state,
-                        "SwapClaim in block but local swap not ReadyToClaim; \
-                         advancing state to match block"
-                    );
-                    swap.state = SwapState::ReadyToClaim;
-                    state.save_swap(rwtxn, &swap)?;
-                }
-
-                // For open swaps, verify claimer address is provided
-                if swap.l2_recipient.is_none() && l2_claimer_address.is_none() {
-                    return Err(Error::InvalidTransaction(
-                        "Open swap claim requires l2_claimer_address"
-                            .to_string(),
-                    ));
-                }
+                // Record the proven L1 payment on the swap. Prevalidation
+                // already verified the proof; re-deriving it here keeps the
+                // record a pure function of block data, so this node's
+                // parent-chain monitoring (which may never have seen the
+                // fill) plays no part in what gets stored.
+                let proof =
+                    proof_data.as_deref().ok_or(Error::MissingL1Proof)?;
+                let payment = state.verify_l1_payment_proof(
+                    rwtxn,
+                    proof,
+                    &swap,
+                    header.prev_main_hash,
+                )?;
+                swap.l1_txid =
+                    crate::types::SwapTxId::from_bitcoin_txid(&payment.txid);
+                swap.l2_claimer_address = Some(payment.claimer);
 
                 // Unlock outputs
                 for (outpoint, _) in &filled.transaction.inputs {
@@ -475,6 +469,7 @@ pub fn connect_prevalidated(
         .height
         .put(rwtxn, &(), &pre.next_height)
         .map_err(DbError::from)?;
+    state.put_main_anchor(rwtxn, pre.next_height, header.prev_main_hash)?;
 
     // Apply accumulator diff
     let mut accumulator = state
@@ -562,6 +557,7 @@ pub fn validate(
             rotxn,
             &filled_transaction.transaction,
             filled_transaction,
+            header.prev_main_hash,
         )?;
         // hashes of spent utxos, used to verify the utreexo proof
         let mut spent_utxo_hashes = Vec::<BitcoinNodeHash>::with_capacity(
@@ -740,6 +736,7 @@ pub fn connect(
     let height = state.try_get_height(rwtxn)?.map_or(0, |height| height + 1);
     state.tip.put(rwtxn, &(), &block_hash)?;
     state.height.put(rwtxn, &(), &height)?;
+    state.put_main_anchor(rwtxn, height, header.prev_main_hash)?;
     let () = accumulator.apply_diff(accumulator_diff)?;
     state.utreexo_accumulator.put(rwtxn, &(), &accumulator)?;
     Ok(merkle_root)
@@ -898,9 +895,8 @@ pub fn disconnect_tip(
                 Err(Error::NoUtxo { outpoint })
             }
         })?;
-    let height = state
-        .try_get_height(rwtxn)?
-        .expect("Height should not be None");
+    let height = state.try_get_height(rwtxn)?.ok_or(Error::NoTip)?;
+    state.delete_main_anchor(rwtxn, height)?;
     match (header.prev_side_hash, height) {
         (None, 0) => {
             state.tip.delete(rwtxn, &()).map_err(DbError::from)?;

@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use coinshift::parent_chain_rpc::{
     ParentChainRpcClient, btc_rpc_value_to_sats,
 };
@@ -17,6 +15,9 @@ pub struct SwapDetail {
     l1_txid_input: String,
     l2_recipient_input: String,
     claimer_address_input: String,
+    /// Hex of a borsh-encoded `L1PaymentProof`, for claiming without a
+    /// configured parent-chain RPC.
+    l1_proof_input: String,
     fetching_confirmations: bool,
     success_message: Option<String>,
     claim_error: Option<String>,
@@ -31,6 +32,7 @@ impl SwapDetail {
             self.l1_txid_input.clear();
             self.l2_recipient_input.clear();
             self.claimer_address_input.clear();
+            self.l1_proof_input.clear();
             self.success_message = None;
             self.claim_error = None;
         }
@@ -396,69 +398,57 @@ impl SwapDetail {
     ) {
         ui.group(|ui| {
             ui.heading("Claim Swap");
-
+            ui.label(
+                "The claim carries a proof of the L1 payment. The node builds \
+                 it from the configured parent-chain RPC using the swap's L1 \
+                 txid; without one, paste the proof (gettxoutproof + raw tx, \
+                 borsh, hex) below. The escrow goes to the L2 address the \
+                 payment committed to.",
+            );
             if swap.l2_recipient.is_none() {
-                // Open swap
-                if let Some(ref stored) = swap.l2_claimer_address {
-                    ui.horizontal(|ui| {
-                        ui.label("Claimer Address:");
-                        ui.label(stored.to_string());
-                    });
-                    if ui
-                        .add_enabled(app.is_some(), Button::new("Claim"))
-                        .clicked()
-                        && let Some(app) = app
-                    {
-                        self.claim_swap(app, &swap.id, None, list);
-                    }
-                } else {
-                    if self.claimer_address_input.is_empty()
-                        && !self.l2_recipient_input.is_empty()
-                    {
-                        self.claimer_address_input =
-                            self.l2_recipient_input.clone();
-                    }
-                    ui.horizontal(|ui| {
-                        ui.label("Claimer Address:");
-                        ui.text_edit_singleline(
-                            &mut self.claimer_address_input,
-                        );
-                        if ui
-                            .add_enabled(
-                                app.is_some()
-                                    && !self.claimer_address_input.is_empty(),
-                                Button::new("Claim"),
-                            )
-                            .clicked()
-                            && let Some(app) = app
-                        {
-                            let claimer_addr: Address =
-                                match self.claimer_address_input.parse() {
-                                    Ok(addr) => addr,
-                                    Err(err) => {
-                                        self.claim_error = Some(format!(
-                                            "Invalid address: {err}"
-                                        ));
-                                        return;
-                                    }
-                                };
-                            self.claim_swap(
-                                app,
-                                &swap.id,
-                                Some(claimer_addr),
-                                list,
-                            );
-                        }
-                    });
+                ui.horizontal(|ui| {
+                    ui.label("Claimer Address (optional check):");
+                    ui.text_edit_singleline(&mut self.claimer_address_input);
+                });
+                if let Some(stored) = swap.l2_claimer_address {
+                    ui.label(format!("Committed claimer: {stored}"));
                 }
-            } else {
-                if ui
-                    .add_enabled(app.is_some(), Button::new("Claim Swap"))
-                    .clicked()
-                    && let Some(app) = app
+            }
+            ui.horizontal(|ui| {
+                ui.label("L1 proof (hex, optional):");
+                ui.text_edit_singleline(&mut self.l1_proof_input);
+            });
+            if ui
+                .add_enabled(app.is_some(), Button::new("Claim"))
+                .clicked()
+                && let Some(app) = app
+            {
+                let requested = if self.claimer_address_input.trim().is_empty()
                 {
-                    self.claim_swap(app, &swap.id, None, list);
-                }
+                    None
+                } else {
+                    match self.claimer_address_input.trim().parse::<Address>() {
+                        Ok(addr) => Some(addr),
+                        Err(err) => {
+                            self.claim_error =
+                                Some(format!("Invalid address: {err}"));
+                            return;
+                        }
+                    }
+                };
+                let proof = if self.l1_proof_input.trim().is_empty() {
+                    None
+                } else {
+                    match hex::decode(self.l1_proof_input.trim()) {
+                        Ok(bytes) => Some(bytes),
+                        Err(err) => {
+                            self.claim_error =
+                                Some(format!("Invalid proof hex: {err}"));
+                            return;
+                        }
+                    }
+                };
+                self.claim_swap(app, &swap.id, requested, proof, list);
             }
         });
     }
@@ -526,118 +516,18 @@ impl SwapDetail {
         app: &App,
         swap_id: &SwapId,
         l2_claimer_address: Option<Address>,
+        l1_proof: Option<Vec<u8>>,
         list: &mut SwapList,
     ) {
-        let accumulator = match app.node.get_tip_accumulator() {
-            Ok(acc) => acc,
-            Err(err) => {
-                self.claim_error =
-                    Some(format!("Failed to get accumulator: {err:#}"));
-                return;
-            }
-        };
-
-        let rotxn = match app.node.env().read_txn() {
-            Ok(txn) => txn,
-            Err(err) => {
-                self.claim_error =
-                    Some(format!("Failed to get read transaction: {err:#}"));
-                return;
-            }
-        };
-
-        let swap = match app.node.state().get_swap(&rotxn, swap_id) {
-            Ok(Some(swap)) => swap,
-            Ok(None) => {
-                self.claim_error = Some("Swap not found".into());
-                return;
-            }
-            Err(err) => {
-                self.claim_error = Some(format!("Failed to get swap: {err:#}"));
-                return;
-            }
-        };
-
-        let all_utxos = match app.node.get_all_utxos() {
-            Ok(utxos) => utxos,
-            Err(err) => {
-                self.claim_error =
-                    Some(format!("Failed to get UTXOs: {err:#}"));
-                return;
-            }
-        };
-
-        let mut locked_outputs = Vec::new();
-        for (outpoint, output) in all_utxos {
-            if let coinshift::types::OutputContent::SwapPending {
-                swap_id: locked_swap_id,
-                ..
-            } = &output.content
-                && *locked_swap_id == swap_id.0
-            {
-                locked_outputs.push((outpoint, output));
-            }
-        }
-
-        if locked_outputs.is_empty() {
-            self.claim_error = Some("No locked outputs found for swap".into());
-            return;
-        }
-
-        let locked_utxos: HashMap<_, _> =
-            locked_outputs.iter().cloned().collect();
-        if let Err(err) = app.wallet.put_utxos(&locked_utxos) {
-            self.claim_error = Some(format!(
-                "Failed to add locked outputs to wallet: {err:#}"
-            ));
-            return;
-        }
-
-        let height = app
-            .node
-            .state()
-            .try_get_height(&rotxn)
-            .ok()
-            .flatten()
-            .map_or(0, |height| height + 1);
-        let recipient = app
-            .node
-            .state()
-            .entitled_claimer_at(&rotxn, &swap, height)
-            .ok()
-            .flatten();
-
-        let recipient = match recipient {
-            Some(addr) => addr,
-            None => {
-                self.claim_error = Some(
-                    "Open swap has no live reservation — accept it first (before paying on L1)"
-                        .into(),
-                );
-                return;
-            }
-        };
-        if let Some(requested) = l2_claimer_address
-            && requested != recipient
-        {
-            self.claim_error =
-                Some(format!("Swap is reserved for {recipient}"));
-            return;
-        }
-
-        let l2_claimer_for_tx =
-            swap.l2_recipient.is_none().then_some(recipient);
-        let tx = match app.wallet.create_swap_claim_tx(
-            &accumulator,
+        let tx = match app.build_swap_claim(
             *swap_id,
-            recipient,
-            locked_outputs,
-            l2_claimer_for_tx,
+            l2_claimer_address,
+            l1_proof,
         ) {
             Ok(tx) => tx,
             Err(err) => {
                 self.claim_error =
-                    Some(format!("Failed to create claim tx: {err:#}"));
+                    Some(format!("Failed to build claim: {err:#}"));
                 return;
             }
         };
@@ -650,6 +540,7 @@ impl SwapDetail {
         }
 
         self.claimer_address_input.clear();
+        self.l1_proof_input.clear();
         self.claim_error = None;
         self.success_message = Some(format!("Swap claimed! TxID: {}", txid));
         list.refresh_swaps(app);

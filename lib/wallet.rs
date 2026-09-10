@@ -452,6 +452,7 @@ impl Wallet {
         recipient: Address,
         locked_outputs: Vec<(OutPoint, Output)>,
         l2_claimer_address: Option<Address>, // Required for open swaps
+        proof_data: Vec<u8>,
     ) -> Result<Transaction, Error> {
         tracing::trace!(
             swap_id = %swap_id,
@@ -499,7 +500,7 @@ impl Wallet {
             data: TxData::SwapClaim {
                 swap_id: swap_id.0,
                 l2_claimer_address, // For open swaps
-                proof_data: None,
+                proof_data: Some(proof_data),
             },
         };
 

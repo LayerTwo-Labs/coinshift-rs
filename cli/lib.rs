@@ -219,12 +219,25 @@ pub enum Command {
         #[arg(long)]
         fee_sats: Option<u64>,
     },
-    /// Claim a swap (after L1 has required confirmations). For open swaps, pass l2_claimer_address.
+    /// Claim a swap. The claim proves the L1 payment; the node builds the
+    /// proof from its parent-chain RPC unless --l1-proof is given.
     ClaimSwap {
         #[arg(long, value_parser = parse_swap_id)]
         swap_id: SwapId,
+        /// Must match the L2 address the L1 payment committed to; defaults to it
         #[arg(long)]
         l2_claimer_address: Option<Address>,
+        /// Hex of a borsh-encoded L1PaymentProof (gettxoutproof + raw tx)
+        #[arg(long)]
+        l1_proof: Option<String>,
+    },
+    /// The OP_RETURN payload (hex) an L1 payment must carry to fill a swap
+    /// for the given L2 address; use it as a `data` output
+    L1PaymentCommitment {
+        #[arg(long, value_parser = parse_swap_id)]
+        swap_id: SwapId,
+        #[arg(long)]
+        l2_claimer_address: Address,
     },
     /// Get status of a swap by ID
     GetSwapStatus {
@@ -429,10 +442,20 @@ where
         Command::ClaimSwap {
             swap_id,
             l2_claimer_address,
+            l1_proof,
         } => {
-            let txid =
-                rpc_client.claim_swap(swap_id, l2_claimer_address).await?;
+            let txid = rpc_client
+                .claim_swap(swap_id, l2_claimer_address, l1_proof)
+                .await?;
             format!("Swap claimed: txid={}", txid)
+        }
+        Command::L1PaymentCommitment {
+            swap_id,
+            l2_claimer_address,
+        } => {
+            rpc_client
+                .l1_payment_commitment(swap_id, l2_claimer_address)
+                .await?
         }
         Command::CreateDeposit {
             address,

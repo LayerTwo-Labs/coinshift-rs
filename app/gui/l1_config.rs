@@ -284,7 +284,7 @@ impl L1Config {
             let supported = parent_chain_rpc::supported_l1_parent_chain_types();
             let label = match self.selected_parent_chain {
                 ParentChainType::Signet => "Bitcoin Signet (sBTC)",
-                ParentChainType::BCH => "Bitcoin Cash Testnet 4 (BCH)",
+                ParentChainType::Regtest => "Bitcoin Regtest (local)",
                 _ => "Select network",
             };
             ComboBox::from_id_salt("l1_config_parent_chain")
@@ -293,8 +293,8 @@ impl L1Config {
                     for chain in supported {
                         let option_label = match chain {
                             ParentChainType::Signet => "Bitcoin Signet (sBTC)",
-                            ParentChainType::BCH => {
-                                "Bitcoin Cash Testnet 4 (BCH)"
+                            ParentChainType::Regtest => {
+                                "Bitcoin Regtest (local)"
                             }
                             _ => continue,
                         };

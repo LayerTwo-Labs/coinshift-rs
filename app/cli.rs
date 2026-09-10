@@ -98,7 +98,7 @@ impl clap::Args for DatadirArg {
 /// Optional subcommand: init writes L1 config and exits.
 #[derive(Clone, Debug, Subcommand)]
 pub(super) enum AppSubcommand {
-    /// Write L1 RPC config (Bitcoin Signet and/or Bitcoin Cash Testnet4) and exit.
+    /// Write L1 RPC config (Bitcoin Signet and/or Regtest) and exit.
     /// Does not start the app. Use before first run or to update L1 config from CLI.
     Init {
         /// Add a default Bitcoin Signet entry (local node, 127.0.0.1:38332)
@@ -106,10 +106,10 @@ pub(super) enum AppSubcommand {
         /// `coinshift_app_cli set-l1-config`
         #[arg(long)]
         l1_signet: bool,
-        /// Add a default Bitcoin Cash Testnet4 entry (local node,
-        /// 127.0.0.1:28332) unless one exists
+        /// Add a default Bitcoin Regtest entry (local node, 127.0.0.1:18443)
+        /// unless one exists
         #[arg(long)]
-        l1_bch_testnet4: bool,
+        l1_regtest: bool,
     },
 }
 
@@ -181,10 +181,10 @@ pub(super) struct RunArgs {
     /// the L1 config before start, unless one exists
     #[arg(long)]
     pub(super) l1_signet: bool,
-    /// Add a default Bitcoin Cash Testnet4 entry (local node,
-    /// 127.0.0.1:28332) to the L1 config before start, unless one exists
+    /// Add a default Bitcoin Regtest entry (local node, 127.0.0.1:18443) to
+    /// the L1 config before start, unless one exists
     #[arg(long)]
-    pub(super) l1_bch_testnet4: bool,
+    pub(super) l1_regtest: bool,
 }
 
 #[derive(Clone, Debug)]

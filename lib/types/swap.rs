@@ -163,6 +163,17 @@ impl ParentChainType {
     /// Maximum L1 confirmation age (in L1 blocks) for an L1 transaction
     /// to be accepted as a swap fill.
     ///
+    /// Whether payments on this chain can be proven to sidechain consensus.
+    ///
+    /// A proof is checked against the mainchain headers the node validates
+    /// through the enforcer, so only the chain the sidechain is anchored to
+    /// qualifies: Bitcoin (mainnet, signet or regtest, whichever the L2 runs
+    /// on). Other chains would need their own header relay, which does not
+    /// exist; swaps against them cannot be created.
+    pub fn supports_payment_proofs(&self) -> bool {
+        matches!(self, Self::BTC | Self::Signet | Self::Regtest)
+    }
+
     /// Prevents using old, unrelated L1 transactions that happen to match
     /// the swap's address and amount.
     pub fn max_l1_tx_age_blocks(&self) -> u32 {

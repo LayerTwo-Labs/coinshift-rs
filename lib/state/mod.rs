@@ -29,6 +29,7 @@ use crate::{
 
 mod block;
 mod error;
+pub mod l1_proof;
 mod rollback;
 mod swap;
 mod two_way_peg_data;
@@ -155,11 +156,29 @@ pub struct State {
     /// open swaps.
     pub swap_reservations:
         DatabaseUnique<SerdeBincode<SwapId>, SerdeBincode<SwapReservation>>,
+    /// Mainchain block header infos, keyed by block hash.
+    ///
+    /// This is the same LMDB database the `Archive` writes through
+    /// `put_main_header_info` (same name, same codecs); `State` holds a
+    /// read-only handle so that L1 payment proofs can be checked against the
+    /// headers the node has already validated without threading the archive
+    /// through every validation call. `State` never writes to it.
+    pub(crate) main_header_infos: DatabaseUnique<
+        SerdeBincode<bitcoin::BlockHash>,
+        SerdeBincode<crate::types::proto::mainchain::BlockHeaderInfo>,
+    >,
+    /// For each connected sidechain height, the `prev_main_hash` of the block
+    /// at that height: the mainchain tip that block was built against.
+    /// Consensus state, written by block connect and removed by disconnect;
+    /// the tip's entry is the anchor mempool validation counts L1
+    /// confirmations from.
+    main_anchors:
+        DatabaseUnique<SerdeBincode<u32>, SerdeBincode<bitcoin::BlockHash>>,
     _version: DatabaseUnique<UnitKey, SerdeBincode<Version>>,
 }
 
 impl State {
-    pub const NUM_DBS: u32 = 17;
+    pub const NUM_DBS: u32 = 19;
 
     pub fn new(env: &sneed::Env) -> Result<Self, Error> {
         let mut rwtxn = env.write_txn().map_err(EnvError::from)?;
@@ -215,6 +234,12 @@ impl State {
         let expired_swaps =
             DatabaseUnique::create(env, &mut rwtxn, "expired_swaps")
                 .map_err(EnvError::from)?;
+        let main_header_infos =
+            DatabaseUnique::create(env, &mut rwtxn, "main_header_infos")
+                .map_err(EnvError::from)?;
+        let main_anchors =
+            DatabaseUnique::create(env, &mut rwtxn, "main_anchors")
+                .map_err(EnvError::from)?;
         let version = DatabaseUnique::create(env, &mut rwtxn, "state_version")
             .map_err(EnvError::from)?;
         if version
@@ -244,8 +269,67 @@ impl State {
             locked_swap_outputs,
             expired_swaps,
             swap_reservations,
+            main_header_infos,
+            main_anchors,
             _version: version,
         })
+    }
+
+    /// The mainchain block the sidechain tip was built against, if there is
+    /// a tip. Mempool validation of `SwapClaim` counts L1 confirmations from
+    /// it; block validation uses the header's own `prev_main_hash`, of which
+    /// this is the same value once the block connects.
+    pub fn tip_main_anchor(
+        &self,
+        rotxn: &RoTxn,
+    ) -> Result<Option<bitcoin::BlockHash>, Error> {
+        let Some(height) = self.try_get_height(rotxn)? else {
+            return Ok(None);
+        };
+        Ok(self.main_anchors.try_get(rotxn, &height)?)
+    }
+
+    pub(crate) fn put_main_anchor(
+        &self,
+        rwtxn: &mut RwTxn,
+        height: u32,
+        anchor: bitcoin::BlockHash,
+    ) -> Result<(), Error> {
+        self.main_anchors.put(rwtxn, &height, &anchor)?;
+        Ok(())
+    }
+
+    pub(crate) fn delete_main_anchor(
+        &self,
+        rwtxn: &mut RwTxn,
+        height: u32,
+    ) -> Result<(), Error> {
+        self.main_anchors.delete(rwtxn, &height)?;
+        Ok(())
+    }
+
+    /// Verify an L1 payment proof for `swap` against the headers this node
+    /// holds, counting confirmations from `anchor`.
+    pub fn verify_l1_payment_proof(
+        &self,
+        rotxn: &RoTxn,
+        proof: &[u8],
+        swap: &Swap,
+        anchor: bitcoin::BlockHash,
+    ) -> Result<l1_proof::VerifiedL1Payment, Error> {
+        struct View<'a>(&'a State, &'a RoTxn<'a>);
+        impl l1_proof::MainchainView for View<'_> {
+            fn main_header_info(
+                &self,
+                block_hash: &bitcoin::BlockHash,
+            ) -> Result<
+                Option<crate::types::proto::mainchain::BlockHeaderInfo>,
+                Error,
+            > {
+                Ok(self.0.main_header_infos.try_get(self.1, block_hash)?)
+            }
+        }
+        l1_proof::verify(proof, swap, anchor, &View(self, rotxn))
     }
 
     pub fn try_get_tip(
@@ -1985,13 +2069,31 @@ impl State {
                             );
                         }
                     }
-                    TxData::SwapClaim { swap_id, .. } => {
+                    TxData::SwapClaim {
+                        swap_id,
+                        proof_data,
+                        ..
+                    } => {
                         let swap_id = SwapId(*swap_id);
 
                         // Get swap and update its state
                         if let Some(mut swap) =
                             self.get_swap(rwtxn, &swap_id)?
                         {
+                            // Record the proven payment, as connect does.
+                            // The block was valid when it connected, so the
+                            // proof parses; the headers it needs may have
+                            // been pruned since, in which case only the
+                            // commitment (txid, claimer) is recoverable.
+                            if let Some(proof) = proof_data.as_deref()
+                                && let Ok((l1_txid, claimer)) =
+                                    l1_proof::payment_summary(proof)
+                            {
+                                swap.l1_txid =
+                                    SwapTxId::from_bitcoin_txid(&l1_txid);
+                                swap.l2_claimer_address = Some(claimer);
+                            }
+
                             // Unlock outputs
                             for (outpoint, _) in &filled.transaction.inputs {
                                 if self
@@ -2185,6 +2287,47 @@ mod tests {
             matches!(result, Err(Error::SpendWithdrawalOutput)),
             "spending a withdrawal output should be rejected, got {result:?}"
         );
+    }
+
+    /// `State` reads mainchain headers through a handle to the same LMDB
+    /// database the `Archive` writes. If the two ever pointed at different
+    /// tables, every L1 payment proof would fail with an unknown block, so
+    /// pin the aliasing here.
+    #[test]
+    fn state_sees_headers_written_by_archive() {
+        use bitcoin::hashes::Hash as _;
+
+        use crate::{
+            archive::Archive, types::proto::mainchain::BlockHeaderInfo,
+        };
+
+        let dir = temp_dir::TempDir::new().unwrap();
+        let mut opts = heed::EnvOpenOptions::new();
+        opts.map_size(10 * 1024 * 1024)
+            .max_dbs(State::NUM_DBS + Archive::NUM_DBS);
+        let env = unsafe { Env::open(&opts, dir.path()) }.unwrap();
+        // Same order as `Node::new`: state first, then archive.
+        let state = State::new(&env).unwrap();
+        let archive = Archive::new(&env).unwrap();
+
+        let info = BlockHeaderInfo {
+            block_hash: bitcoin::BlockHash::from_byte_array([1u8; 32]),
+            prev_block_hash: bitcoin::BlockHash::all_zeros(),
+            height: 1,
+            work: bitcoin::Work::from_be_bytes([0u8; 32]),
+        };
+        let mut rwtxn = env.write_txn().unwrap();
+        archive.put_main_header_info(&mut rwtxn, &info).unwrap();
+        rwtxn.commit().unwrap();
+
+        let rotxn = env.read_txn().unwrap();
+        let seen = state
+            .main_header_infos
+            .try_get(&rotxn, &info.block_hash)
+            .unwrap()
+            .expect("state must see the header the archive wrote");
+        assert_eq!(seen.height, 1);
+        assert_eq!(seen.prev_block_hash, info.prev_block_hash);
     }
 
     mod authorization_count {

@@ -56,7 +56,7 @@ impl CreateSwap {
             let supported = parent_chain_rpc::supported_l1_parent_chain_types();
             let label = match self.parent_chain {
                 ParentChainType::Signet => "Bitcoin Signet (sBTC)",
-                ParentChainType::BCH => "Bitcoin Cash Testnet 4 (BCH)",
+                ParentChainType::Regtest => "Bitcoin Regtest (local)",
                 _ => "Select network",
             };
             ComboBox::from_id_salt("parent_chain")
@@ -65,8 +65,8 @@ impl CreateSwap {
                     for chain in supported {
                         let option_label = match chain {
                             ParentChainType::Signet => "Bitcoin Signet (sBTC)",
-                            ParentChainType::BCH => {
-                                "Bitcoin Cash Testnet 4 (BCH)"
+                            ParentChainType::Regtest => {
+                                "Bitcoin Regtest (local)"
                             }
                             _ => continue,
                         };

@@ -209,15 +209,15 @@ fn l1_config_path() -> PathBuf {
 
 fn write_l1_config_from_flags(
     l1_signet: bool,
-    l1_bch_testnet4: bool,
+    l1_regtest: bool,
 ) -> anyhow::Result<()> {
     let path = l1_config_path();
     let mut chains = Vec::new();
     if l1_signet {
         chains.push(ParentChainType::Signet);
     }
-    if l1_bch_testnet4 {
-        chains.push(ParentChainType::BCH);
+    if l1_regtest {
+        chains.push(ParentChainType::Regtest);
     }
     parent_chain_rpc::write_l1_config_file(&path, &chains)?;
     Ok(())
@@ -236,7 +236,7 @@ fn main() -> anyhow::Result<()> {
     // Handle init subcommand: write L1 config and exit
     if let Some(cli::AppSubcommand::Init {
         l1_signet,
-        l1_bch_testnet4,
+        l1_regtest,
     }) = &cli.command
     {
         let path = l1_config_path();
@@ -244,8 +244,8 @@ fn main() -> anyhow::Result<()> {
         if *l1_signet {
             chains.push(ParentChainType::Signet);
         }
-        if *l1_bch_testnet4 {
-            chains.push(ParentChainType::BCH);
+        if *l1_regtest {
+            chains.push(ParentChainType::Regtest);
         }
         parent_chain_rpc::write_l1_config_file(&path, &chains)?;
         tracing_subscriber::fmt()
@@ -257,13 +257,13 @@ fn main() -> anyhow::Result<()> {
             "L1 config written to {} (Signet: {}, BCH Testnet4: {})",
             path.display(),
             l1_signet,
-            l1_bch_testnet4
+            l1_regtest
         );
         return Ok(());
     }
 
-    if cli.run.l1_signet || cli.run.l1_bch_testnet4 {
-        write_l1_config_from_flags(cli.run.l1_signet, cli.run.l1_bch_testnet4)?;
+    if cli.run.l1_signet || cli.run.l1_regtest {
+        write_l1_config_from_flags(cli.run.l1_signet, cli.run.l1_regtest)?;
     }
     let config = cli.run.get_config()?;
     let (line_buffer, _rolling_log_guard) = set_tracing_subscriber(

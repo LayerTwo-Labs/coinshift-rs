@@ -338,7 +338,7 @@ async fn multi_node_verification_task(
 
     // 2. Bob creates a swap
     tracing::info!("Bob creating a swap");
-    let l1_recipient_address = "bcrt1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh";
+    let l1_recipient_address = "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080";
     let bob_l2_recipient = nodes.bob.rpc_client.get_new_address().await?;
     let (swap_id_bob, swap_txid_bob) = nodes
         .bob

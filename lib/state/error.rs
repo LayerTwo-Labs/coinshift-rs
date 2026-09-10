@@ -157,6 +157,10 @@ pub enum Error {
     WithdrawalBundle(#[from] WithdrawalBundleError),
     #[error("Swap not found: {swap_id}")]
     SwapNotFound { swap_id: SwapId },
+    #[error("SwapClaim carries no L1 payment proof")]
+    MissingL1Proof,
+    #[error(transparent)]
+    L1Proof(#[from] super::l1_proof::Error),
     #[error(
         "Input {outpoint} is locked to swap {swap_id}, which does not exist \
          or cannot be read (orphaned lock)"

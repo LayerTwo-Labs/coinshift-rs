@@ -90,28 +90,36 @@ Coinshift is a trustless swap system for a BIP300-style sidechain that enables p
    - **Storage**: Swap saved via `save_swap()`; indexes updated (`swaps`, `swaps_by_l1_txid`, `swaps_by_state`, `swaps_by_recipient`).
    - Initial state: `SwapState::Pending`.
 
-### 2. L1 Transaction Monitoring (Bob)
+### 2. Paying on L1 (Bob)
 
-1. **Bob sends L1 transaction** to Alice’s `l1_recipient_address` for the exact `l1_amount`.
+1. **Bob sends the L1 payment** to Alice's `l1_recipient_address` for at least
+   `l1_amount`, **with an `OP_RETURN` output committing to the swap and to
+   Bob's L2 address**:
 
-2. **When L1 monitoring runs**  
-   During **2WPD (two-way peg data) processing**, when the sidechain’s mainchain tip changes, `connect_two_way_peg_data()` runs and calls `process_coinshift_transactions()`.
+   ```
+   OP_RETURN "CSFT" || swap_id (32 bytes) || l2_claimer_address (20 bytes)
+   ```
 
-3. **Matching**  
-   For each pending (or waiting-confirmations) swap, the system calls the RPC for the **swap target chain** (`swap.parent_chain`), not necessarily the sidechain’s mainchain:
-   - `find_transactions_by_address_and_amount(l1_recipient, l1_amount_sats)`  
-   Code: `lib/parent_chain_rpc.rs`.
+   `coinshift_app_cli l1-payment-commitment --swap-id <id> --l2-claimer-address <addr>`
+   prints the payload as hex, for a `"data"` output in `createrawtransaction`
+   or `send`. The commitment is what ties the payment to this swap and what
+   makes Bob the party entitled to the escrow: a proof of a payment committing
+   to Bob's address cannot be produced by anyone who did not make that payment.
+   For a pre-specified swap the committed address must be `l2_recipient`.
 
-4. **Update**  
-   `query_and_update_swap()` uses the first match: it sets `l1_txid`, `l1_txid_validated_at_block_hash` / `l1_txid_validated_at_height`, and state:
-   - `confirmations >= required_confirmations` → `ReadyToClaim`
-   - else → `WaitingConfirmations(current, required)`  
-   Then `state.save_swap(rwtxn, &swap)` is called.
+2. **Local monitoring (advisory).** Nodes that run a parent-chain RPC discover
+   the payment (`scantxoutset` plus `listunspent`) during 2WPD processing and
+   through the periodic confirmation task, and record `l1_txid`,
+   `l2_claimer_address` (from the commitment) and a `SwapState` for display.
+   None of that gates anything any more: it tells the taker when the payment is
+   deep enough to claim, and it lets the node build the proof without the
+   taker pasting it. A node with no RPC config validates every claim exactly
+   as one with it.
 
-### 3. Reserving an open swap (Bob)
+### 3. Reserving an open swap (Bob), optional
 
-An open swap has no recipient fixed at creation, so before Bob pays on L1 he
-reserves it on-chain:
+An open swap has no recipient fixed at creation, so Bob may reserve it
+on-chain before paying:
 
 ```
 coinshift_app_cli accept-swap --swap-id <id>
@@ -125,63 +133,69 @@ This broadcasts `TxData::SwapAccept { swap_id, l2_claimer_address }`. Validation
 - the transaction **spends an input owned by `l2_claimer_address`**, which
   proves the reserver controls the address they are reserving for
 
-`connect` writes the reservation to the `swap_reservations` database. Every rule
-above is decided from block data, so every node records the same reservation.
-
-**Reserve before paying on L1.** The ordering is the security property: it means
-there is nothing to front-run. A reservation taken *after* the L1 payment could
-be beaten by anyone watching the mempool, who would simply reserve the swap for
-their own address and claim the escrow Bob paid for. Bob should also check that
-a swap is unreserved before paying — if someone else holds it, his payment buys
-him nothing.
-
-Reservations lapse after `ParentChainType::accept_expiration_blocks()`, which is
-sized to outlast the confirmations the filler must wait for. A griefer can hold
-someone else's swap, but only for one window per L2 fee paid, and only from an
-address they own.
+`connect` writes the reservation to the `swap_reservations` database. The
+reservation is **coordination, not entitlement**: it tells other takers the
+swap is spoken for, so two of them do not both pay on L1 and one eat the loss.
+Whoever proves a payment committing to their address gets the escrow, reserved
+or not. Reservations lapse after `ParentChainType::accept_expiration_blocks()`.
 
 ### 4. Swap Claiming (Bob)
 
-1. **Bob creates SwapClaim** (e.g. via `claim_swap()`) with `swap_id` and fee.
+1. **Bob creates SwapClaim** (`claim_swap`), carrying an `L1PaymentProof` in
+   `proof_data`: the parent-chain block header and merkle branch from
+   `gettxoutproof [txid]`, plus the raw payment from `getrawtransaction`. The
+   node builds it from its configured parent-chain RPC, or the taker passes it
+   as hex (`--l1-proof`). See `lib/state/l1_proof.rs`.
 
-2. **Mempool validation** (`lib/state/swap.rs::validate_swap_claim()`):
-   - Swap exists, state is `ReadyToClaim`
-   - For open swaps: L1 tx was detected (non-zero `l1_txid`)
-   - then delegates to the consensus rules below
-
-3. **Consensus validation** (`validate_swap_claim_consensus()`), used by block
-   validation. It skips the two node-local checks above — they come from each
-   node's own parent-chain monitoring and would let a node that has not yet seen
-   the L1 fill reject a valid block. It requires:
+2. **Consensus validation** (`validate_swap_claim_consensus()`), identical on
+   the mempool path and in block validation, anchored at the mainchain block
+   the L2 block was built against (`Header::prev_main_hash`; the mempool uses
+   the tip's). It requires:
    - the claim spends an output locked to this swap, and nothing locked to another
-   - the full `l2_amount` reaches the **entitled claimer**: `l2_recipient` for a
-     pre-specified swap, or the holder of a live reservation for an open one
-   - if the claim carries the legacy `l2_claimer_address` field, it agrees with
-     the reservation rather than overriding it
+   - the swap record exists (fail closed)
+   - the proof's header hashes to a mainchain block the node has validated
+     through the enforcer, on the anchor's ancestry, at most
+     `max_l1_tx_age_blocks()` deep, and at least `required_confirmations` deep
+     counting from the anchor
+   - the payment is in that block (merkle branch recomputes the header's root)
+   - it pays at least `l1_amount` to the swap's `l1_recipient_address`
+   - it carries the `OP_RETURN` commitment to this `swap_id`; the committed
+     L2 address is the **entitled claimer** (and must equal `l2_recipient` for
+     a pre-specified swap)
+   - the full `l2_amount` reaches the entitled claimer; a legacy
+     `l2_claimer_address` on the claim, if present, must agree with it
 
-   Because entitlement now comes from block data, the mempool and consensus
-   paths enforce the same payout rule. They cannot drift apart the way they did
-   when open swaps were validated only locally.
+   Every input to these rules is block data or headers derived from block
+   data, so every node reaches the same verdict. A block producer cannot take
+   an escrow without paying: without a payment there is no proof to include.
 
-4. **Block processing — SwapClaim** (`lib/state/block.rs`): unlock inputs, mark
-   the swap `Completed`, save.
+3. **Block processing — SwapClaim** (`lib/state/block.rs`): record the proven
+   `l1_txid` and committed claimer on the swap, unlock inputs, mark the swap
+   `Completed`, save.
 
-5. Bob's L2 address receives the coins; swap is complete.
+4. Bob's L2 address receives the coins; swap is complete.
+
+### Which parent chains
+
+A proof is checked against the mainchain headers this sidechain validates, so
+swaps can only be created against that chain (`ParentChainType::Signet` or
+`Regtest`, depending on the network; `supports_payment_proofs()`).
+`SwapCreate` for any other chain is rejected by consensus, and the recipient
+address must parse for that chain. Bitcoin Cash and Litecoin would need a
+header relay that does not exist.
 
 ### Why the reservation is a separate database
 
 `Swap` is persisted as bincode, a non-self-describing format, and
 `State::get_swap` reports a decode failure as `Ok(None)` — a silently missing
-swap. Adding a consensus-critical field to the `Swap` record would therefore
-make every record written by an earlier version read as "no swap", and nodes
-would disagree about who may claim depending on when each upgraded. Keeping
-reservations in `swap_reservations` leaves the `Swap` record byte-identical.
+swap. Adding a field to the `Swap` record would make every record written by an
+earlier version read as "no swap". Keeping reservations in `swap_reservations`
+(and the per-height mainchain anchors in `main_anchors`) leaves the `Swap`
+record byte-identical.
 
-It also keeps the two kinds of state physically apart. `Swap::state`,
-`l1_txid` and `l2_claimer_address` are node-local — set by parent-chain
-monitoring or by RPC, different on every node, and never safe to validate
-blocks against. `swap_reservations` is derived from blocks alone. Blurring
-those two is what made open-swap claims unenforceable in the first place.
+`Swap::state` is node-local display state. `l1_txid` and `l2_claimer_address`
+are written by consensus when a claim connects (from the proof) and, before
+that, by local monitoring as a convenience; validation never reads them.
 
 ---
 
@@ -193,25 +207,16 @@ those two is what made open-swap claims unenforceable in the first place.
 |-------|--------|--------|
 | **Swap ID verification** | ✅ | `validate_swap_create()`: computed ID must match tx |
 | **Swap uniqueness** | ✅ | `validate_swap_create()`: swap must not already exist |
+| **Provable parent chain / valid L1 address** | ✅ | `validate_swap_create()`: `supports_payment_proofs()` and the recipient parses for that chain |
 | **Output locking** | ✅ | SwapCreate locks outputs; only SwapClaim can unlock |
 | **Locked-input checks** | ✅ | Non-SwapClaim txs cannot spend locked outputs; SwapClaim must spend only this swap’s locks |
-| **Recipient / amount matching** | ✅ | RPC matching by address + exact amount in `find_transactions_by_address_and_amount` |
-| **State machine** | ✅ | Pending → WaitingConfirmations → ReadyToClaim → Completed; claim only in ReadyToClaim |
-| **Block reference** | ✅ | `l1_txid_validated_at_block_hash` / `l1_txid_validated_at_height` stored when L1 tx is applied |
-| **Confirmations threshold** | ✅ | State moves to ReadyToClaim only when `confirmations >= required_confirmations` |
+| **L1 payment proof** | ✅ | `validate_swap_claim_consensus()` → `l1_proof::verify()`: known header on the anchor's ancestry, merkle inclusion, amount to recipient, commitment to swap |
+| **Confirmations threshold** | ✅ | Depth below the L2 header's `prev_main_hash` must be ≥ `required_confirmations` and ≤ `max_l1_tx_age_blocks()` |
+| **L1 payment uniqueness** | ✅ | The `OP_RETURN` commitment names one `swap_id`; a payment proves at most one swap |
+| **Claim payout binding** | ✅ | Full `l2_amount` must reach the address the payment committed to (`l2_recipient` for pre-specified swaps) |
 | **Expiration** | ✅ | Swaps can have `expires_at_height`; expired swaps are marked Cancelled |
-| **Claim payout binding** | ✅ | `validate_swap_claim{,_consensus}()`: full `l2_amount` must reach the entitled claimer |
-| **Open-swap entitlement** | ✅ | `SwapAccept` records the claimer on-chain; claims must pay the holder of a live reservation |
 | **Reservation is controlled by the reserver** | ✅ | `validate_swap_accept()` requires an input owned by `l2_claimer_address` |
-
-### Not implemented (doc vs code)
-
-| Check | Doc claim | Code reality |
-|-------|-----------|--------------|
-| **L1 transaction uniqueness** | “Check L1 tx not already used by another swap; `L1TransactionAlreadyUsed`” | ❌ **Not implemented.** `get_swap_by_l1_txid()` exists but is **never** called before accepting an L1 tx. Saving a swap with a new `l1_txid` does not check if that `(parent_chain, l1_txid)` is already used by a *different* swap. |
-| **Reject confirmations == 0** | “Only confirmed transactions accepted” | ❌ **Not implemented.** `query_and_update_swap()` does not reject when `confirmations == 0`. |
-| **Block inclusion** | “Transaction must have block height” | ❌ **Not implemented.** `TransactionInfo` has `blockheight: Option<u32>` but it is not passed into `query_and_update_swap()` and there is no “must have block height” check. |
-| **Error `L1TransactionAlreadyUsed`** | Listed in errors | ❌ **Does not exist** in `lib/state/error.rs`. |
+| **Local monitoring (advisory)** | ✅ | RPC discovery by address + amount, `confirmations > 0`, block inclusion; drives `SwapState` for display only |
 
 ---
 
@@ -249,23 +254,23 @@ For **deposits and withdrawals** (two-way peg), the sidechain confirms “paymen
 
 ### Swaps (L2 → L1)
 
-- For **Coinshift swaps**, “payment on parent chain” is confirmed by:
-  - RPC to the **swap target chain** (`parent_chain_rpc.rs`): match by address + amount, then use confirmation count from RPC.
-  - Transition to `ReadyToClaim` when `confirmations >= required_confirmations`.
-- There is no separate header chain, BMM reports, or merkle proof for swap L1 transactions in this repository.
+- A `SwapClaim` proves its L1 payment: header + merkle branch + raw
+  transaction (`L1PaymentProof`), authenticated against the mainchain header
+  chain above and anchored at the L2 header's `prev_main_hash` for the
+  confirmation count. See "Swap Claiming" above and `lib/state/l1_proof.rs`.
+- The parent-chain RPC is a convenience for discovering payments and building
+  proofs; it is not a source of truth for validation.
 
 ---
 
 ## Advanced Security (Planned / Not in This Repo)
 
-The following are **not** present in the current codebase. Treat as planned or from another implementation:
-
-| Feature | Doc often claims | Codebase |
-|---------|------------------|----------|
-| **BMM-based L1 transaction reports** | BMM participants include L1TransactionReport; N participants (min 2) consensus | No `lib/types/l1_report.rs`, no `lib/state/bmm_reports.rs`. BMM here is merge-mining only (mainchain commits to sidechain block hash). |
-| **Header chain per swap parent chain** | HeaderChain, sync, prev_hash, PoW for each parent chain | No `lib/types/header_chain.rs`, no `lib/state/header_chain.rs`. Mainchain header chain exists for 2WPD only. |
-| **Confirmation count from header chain** | Confirmations from header chain; BMM reports verified against it | No; confirmations for swaps come from RPC only. |
-| **Merkle proof of L1 tx in block** | MerkleProof, verify(), merkle_proof_verified on Swap | No `lib/types/merkle.rs`; no `merkle_proof_verified` field on `Swap`. |
+| Feature | Status |
+|---------|--------|
+| **Merkle proof of L1 tx in block** | Implemented: `L1PaymentProof` in `SwapClaim::proof_data`, verified by consensus (`lib/state/l1_proof.rs`). |
+| **Confirmation count from header chain** | Implemented: depth of the proof's block below the L2 header's `prev_main_hash`, using `main_header_infos`. |
+| **Header chain per foreign parent chain** | Not present. Only the sidechain's own mainchain is verifiable, so only it can be swapped against. |
+| **BMM-based L1 transaction reports** | Not present and not needed: the proof replaces reports. |
 
 ---
 
@@ -313,17 +318,30 @@ There is **no** `merkle_proof_verified` field in the current struct.
 ## Trust Model (Current)
 
 - **Trusted for swap L1 confirmation:**  
-  RPC to the swap target chain (and its confirmation count). No multi-source BMM consensus or header-chain verification for swaps in this codebase. The node behind that RPC is the user's own choice, configured in `l1_rpc_configs.json` (GUI "L1 Config" pane or `coinshift_app_cli set-l1-config`); the application ships local-node defaults with no credentials and no third-party endpoint. Plaintext `http://` to a remote host is accepted but warned about, since anyone on the network path could then forge the answers that mark a swap claimable; use `https://`, a cookie file, or a node on the same machine.
+  The parent-chain proof-of-work, as validated by the enforcer and recorded in
+  the mainchain header chain, plus the confirmation depth the swap creator
+  chose. The parent-chain RPC (`l1_rpc_configs.json`, GUI "L1 Config" pane or
+  `coinshift_app_cli set-l1-config`) is used to discover payments and to build
+  proofs; a wrong or hostile RPC can delay a claim or make the node build an
+  invalid proof, but cannot make any node accept a claim that was not paid
+  for. The application ships local-node defaults with no credentials and no
+  third-party endpoint, and warns about plaintext `http://` to remote hosts.
 
 - **Protected against:**  
+  - A block producer claiming an escrow without paying on L1 (no proof, no claim).  
+  - Front-running an open swap's fill (the payment commits to the claimer).  
+  - Reusing one L1 payment for two swaps (the commitment names the swap).  
   - Spending locked outputs (only SwapClaim can unlock).  
-  - Claiming before ReadyToClaim (validation in `validate_swap_claim`).  
-  - Wrong recipient/amount (RPC match by address + amount).  
-  - Invalid swap ID or duplicate swap at creation (validate_swap_create).
+  - Wrong recipient/amount, underpayment of the claimer, unknown or shallow
+    L1 blocks, blocks off the anchor's ancestry.  
+  - Invalid swap ID, duplicate swap, unprovable chain or unparseable L1
+    address at creation (`validate_swap_create`).
 
-- **Not yet enforced:**  
-  - One L1 transaction used for multiple swaps (no `get_swap_by_l1_txid` check before accept).  
-  - Rejecting unconfirmed or non-block-included L1 txs (no explicit confirmations == 0 or block height check).
+- **Still trusted:**  
+  - The enforcer, for the mainchain header chain itself (as for deposits and
+    withdrawals).  
+  - The swap creator's choice of `required_confirmations` against parent-chain
+    reorgs deeper than that.
 
 ---
 
@@ -341,17 +359,29 @@ There is **no** `merkle_proof_verified` field in the current struct.
 
 ## Current Limitations
 
-1. **L1 transaction uniqueness:** Enforced: `get_swap_by_l1_txid` is used before accepting an L1 tx in `query_and_update_swap` and in `update_swap_l1_txid`; the same L1 tx cannot be associated with more than one swap.
-2. **Confirmations and block inclusion:** Enforced: `query_and_update_swap` only accepts L1 matches with `confirmations > 0` and `blockheight.is_some()`; `update_swap_l1_txid` rejects `confirmations == 0`.
-3. **BMM reports / header chain / merkle proof:** Explicitly not used: swap L1 verification in this repo uses only the configured parent chain RPC (no BMM reports, no header chain for swaps, no merkle proof of L1 tx in block). Documented in code and tested (l1_verification_rpc_only).
-4. **RPC dependency:** Documented and tested: swap L1 presence and confirmation count rely on the configured RPC for the swap target chain (swap.parent_chain); without RPC config, process_coinshift skips L1 lookup and the swap stays Pending (see l1_rpc_dependency integration test).
+1. **One parent chain.** Only the chain this sidechain is anchored to can be
+   swapped against. Other chains need a header relay validated in consensus.
+2. **Proof size.** A claim carries an 80-byte header, a merkle branch and the
+   raw L1 transaction; a few hundred bytes to a few kilobytes.
+3. **Anchor lag.** Confirmations are counted from the mainchain block the L2
+   tip was built against, so a payment becomes claimable only once a sidechain
+   block has been produced on top of a mainchain block deep enough below it.
+4. **`update_swap_l1_txid` is advisory.** It records a txid for display and
+   for building the proof; it does not make a swap claimable.
 
 ---
 
 ## Summary
 
-- **Implemented:** Swap creation and claim flow, output locking, deterministic swap ID, state machine, RPC-based L1 matching and confirmation threshold, block reference tracking, expiration. Parent-chain 2WPD security: mainchain header chain, PoW, BMM merge-mining, 2WPD only from verified mainchain blocks.
-- **Implemented:** L1 tx uniqueness (get_swap_by_l1_txid before accept), reject confirmations == 0 / require block height, RPC-only L1 verification (no BMM/merkle in this repo), RPC dependency documented and tested.
-- **Not implemented (in this repo):** BMM-based L1 reports, per–parent-chain header chain for swaps, merkle proof of L1 tx in block, and `merkle_proof_verified` on Swap.
+- **Implemented:** Swap creation and claim flow, output locking, deterministic
+  swap ID, expiration, on-chain reservations (coordination), and
+  proof-carrying claims: the L1 payment's inclusion proof, its confirmation
+  depth against the L2 header's mainchain anchor, and its `OP_RETURN`
+  commitment to the swap and claimer, all enforced by consensus on every node.
+  Parent-chain 2WPD security: mainchain header chain, PoW, BMM merge-mining,
+  2WPD only from verified mainchain blocks.
+- **Advisory:** RPC-based payment discovery and confirmation tracking, for
+  display and for building proofs.
+- **Not implemented (in this repo):** header relay for foreign parent chains.
 
 This document is intended to match the current codebase and can be updated as features are added or removed.

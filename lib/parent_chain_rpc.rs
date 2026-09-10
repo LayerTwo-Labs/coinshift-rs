@@ -335,6 +335,33 @@ impl ParentChainRpcClient {
         result
     }
 
+    /// Raw consensus-encoded transaction bytes (`getrawtransaction txid`
+    /// with `verbose = false`).
+    pub fn get_raw_transaction(&self, txid: &str) -> Result<Vec<u8>, Error> {
+        let hex_str: String =
+            self.call("getrawtransaction", json!([txid, false]))?;
+        hex::decode(hex_str.trim()).map_err(|_| Error::InvalidResponse)
+    }
+
+    /// Consensus-encoded merkle block proving `txid`'s inclusion in the
+    /// block that contains it (`gettxoutproof [txid]`). Needs `-txindex` on
+    /// the node unless the output is still unspent.
+    pub fn get_txout_proof(&self, txid: &str) -> Result<Vec<u8>, Error> {
+        let hex_str: String = self.call("gettxoutproof", json!([[txid]]))?;
+        hex::decode(hex_str.trim()).map_err(|_| Error::InvalidResponse)
+    }
+
+    /// Build the `SwapClaim` payment proof for an L1 transaction: the merkle
+    /// block from `gettxoutproof` plus the raw transaction, borsh-encoded.
+    pub fn build_l1_payment_proof(&self, txid: &str) -> Result<Vec<u8>, Error> {
+        let merkle_block = self.get_txout_proof(txid)?;
+        let raw_tx = self.get_raw_transaction(txid)?;
+        Ok(
+            crate::state::l1_proof::L1PaymentProof::new(merkle_block, raw_tx)
+                .to_bytes(),
+        )
+    }
+
     /// Get confirmations for a transaction by ID
     pub fn get_transaction_confirmations(
         &self,
@@ -576,15 +603,21 @@ pub fn default_l1_configs() -> Vec<(ParentChainType, RpcConfig)> {
     vec![
         // Bitcoin Core `-signet`
         (ParentChainType::Signet, local(38332)),
-        // BCHN / Bitcoin ABC `-testnet4`
-        (ParentChainType::BCH, local(28332)),
+        // Bitcoin Core `-regtest`
+        (ParentChainType::Regtest, local(18443)),
     ]
 }
 
 /// Parent chain types that are allowed for L1 config (and swap creation).
+///
+/// Only chains whose payments consensus can verify are offered: a `SwapClaim`
+/// proves its L1 payment against the mainchain headers the node validates
+/// through the enforcer, so the parent chain has to be the one this sidechain
+/// is anchored to (see `ParentChainType::supports_payment_proofs`). Bitcoin
+/// Cash and Litecoin have no header relay and are not selectable.
 pub fn supported_l1_parent_chain_types() -> &'static [ParentChainType] {
-    use ParentChainType::{BCH, Signet};
-    &[Signet, BCH]
+    use ParentChainType::{Regtest, Signet};
+    &[Signet, Regtest]
 }
 
 /// Detect whether the node at the given config is Bitcoin Signet or Bitcoin Cash testnet4
@@ -597,6 +630,7 @@ pub fn detect_chain_type(
     let chain = client.get_blockchain_chain_name()?;
     let detected = match chain.as_str() {
         "signet" => ParentChainType::Signet,
+        "regtest" => ParentChainType::Regtest,
         "testnet4" | "test4" => ParentChainType::BCH,
         _ => {
             return Err(Error::ChainMismatch {
@@ -853,17 +887,17 @@ mod tests {
         std::fs::write(&path, configs.to_string()).unwrap();
         write_l1_config_file(
             &path,
-            &[ParentChainType::Signet, ParentChainType::BCH],
+            &[ParentChainType::Signet, ParentChainType::Regtest],
         )
         .unwrap();
         let signet =
             load_rpc_config_from_path(&path, ParentChainType::Signet).unwrap();
         assert_eq!(signet.url, "https://my-node.example:38332");
         assert_eq!(signet.user, "u");
-        let bch =
-            load_rpc_config_from_path(&path, ParentChainType::BCH).unwrap();
-        assert_eq!(bch.url, "http://127.0.0.1:28332");
-        assert!(bch.user.is_empty());
+        let regtest =
+            load_rpc_config_from_path(&path, ParentChainType::Regtest).unwrap();
+        assert_eq!(regtest.url, "http://127.0.0.1:18443");
+        assert!(regtest.user.is_empty());
     }
 
     /// A minimal JSON-RPC server for one connection at a time. `respond`
