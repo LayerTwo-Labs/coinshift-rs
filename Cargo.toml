@@ -40,12 +40,12 @@ uuid = "1.13.1"
 [workspace.dependencies.bip300301_enforcer_lib]
 default-features = false
 git = "https://github.com/LayerTwo-Labs/bip300301_enforcer"
-rev = "a9ca43d344e91d7e786723ee141c520203101387"
+rev = "7958ceffa997ffa905f046de71c8e3cf33437c2d"
 
 [workspace.dependencies.bip300301_enforcer_integration_tests]
 default-features = false
 git = "https://github.com/LayerTwo-Labs/bip300301_enforcer"
-rev = "a9ca43d344e91d7e786723ee141c520203101387"
+rev = "7958ceffa997ffa905f046de71c8e3cf33437c2d"
 
 [workspace.dependencies.l2l-openapi]
 git = "https://github.com/Ash-L2L/l2l-openapi"
