@@ -229,19 +229,32 @@ impl Net {
         &self,
         addr: SocketAddr,
         peer_connection_handle: PeerConnectionHandle,
+        info_rx: mpsc::UnboundedReceiver<PeerConnectionInfo>,
     ) -> Result<(), error::AlreadyConnected> {
         tracing::trace!(%addr, "add active peer: starting");
         let mut active_peers_write = self.active_peers.write();
         match active_peers_write.entry(addr) {
             hash_map::Entry::Occupied(_) => {
                 tracing::error!(%addr, "add active peer: already connected");
-                Err(error::AlreadyConnected(addr))
+                return Err(error::AlreadyConnected(addr));
             }
             hash_map::Entry::Vacant(active_peer_entry) => {
                 active_peer_entry.insert(peer_connection_handle);
-                Ok(())
             }
         }
+        drop(active_peers_write);
+        tokio::spawn({
+            let info_rx = StreamNotifyClose::new(info_rx)
+                .map(move |info| Ok((addr, info)));
+            let peer_info_tx = self.peer_info_tx.clone();
+            async move {
+                if let Err(_send_err) = info_rx.forward(peer_info_tx).await {
+                    // Channel closed, which is normal when the connection fails or is closed
+                    tracing::debug!(%addr, "Peer connection info channel closed (connection may have failed)");
+                }
+            }
+        });
+        Ok(())
     }
 
     pub fn remove_active_peer(&self, addr: SocketAddr) {
@@ -313,21 +326,7 @@ impl Net {
 
         let (connection_handle, info_rx) =
             peer::connect(connecting, connection_ctxt);
-        tracing::trace!("connect peer: spawning info rx");
-        tokio::spawn({
-            let info_rx = StreamNotifyClose::new(info_rx)
-                .map(move |info| Ok((addr, info)));
-            let peer_info_tx = self.peer_info_tx.clone();
-            async move {
-                if let Err(_send_err) = info_rx.forward(peer_info_tx).await {
-                    // Channel closed, which is normal when the connection fails or is closed
-                    tracing::debug!(%addr, "Peer connection info channel closed (connection may have failed)");
-                }
-            }
-        });
-
-        tracing::trace!("connect peer: adding to active peers");
-        self.add_active_peer(addr, connection_handle)?;
+        self.add_active_peer(addr, connection_handle, info_rx)?;
         Ok(())
     }
 
@@ -529,19 +528,7 @@ impl Net {
         };
         let (connection_handle, info_rx) =
             peer::handle(connection_ctxt, connection);
-        tokio::spawn({
-            let info_rx = StreamNotifyClose::new(info_rx)
-                .map(move |info| Ok((addr, info)));
-            let peer_info_tx = self.peer_info_tx.clone();
-            async move {
-                if let Err(_send_err) = info_rx.forward(peer_info_tx).await {
-                    // Channel closed, which is normal when the connection fails or is closed
-                    tracing::debug!(%addr, "Peer connection info channel closed (connection may have failed)");
-                }
-            }
-        });
-        // TODO: is this the right state?
-        self.add_active_peer(addr, connection_handle)?;
+        self.add_active_peer(addr, connection_handle, info_rx)?;
         Ok(Some(addr))
     }
 
@@ -674,6 +661,60 @@ mod seed_peer_tests {
             known_peers.len(&rotxn)?,
             seed_node_addrs(network).len() as u64
         );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod peer_handle_test {
+    use super::{Net, PeerConnectionCtxt, make_server_endpoint, peer};
+    use crate::{archive::Archive, state::State, types::Network};
+    use futures::StreamExt;
+    use std::{net::Ipv4Addr, time::Duration};
+
+    #[tokio::test]
+    async fn rejected_duplicate_has_no_peer_close_event() -> anyhow::Result<()>
+    {
+        let temp_dir = temp_dir::TempDir::new()?;
+        let mut opts = heed::EnvOpenOptions::new();
+        opts.map_size(16 * 1024 * 1024)
+            .max_dbs(Archive::NUM_DBS + State::NUM_DBS + Net::NUM_DBS);
+        let env = unsafe { sneed::Env::open(&opts, temp_dir.path()) }?;
+        let archive = Archive::new(&env)?;
+        let state = State::new(&env)?;
+        let (net, info_rx) = Net::new(
+            &env,
+            archive,
+            Network::Regtest,
+            state,
+            (Ipv4Addr::LOCALHOST, 0).into(),
+        )?;
+        let (remote, _) =
+            make_server_endpoint((Ipv4Addr::LOCALHOST, 0).into())?;
+        let addr = remote.local_addr()?;
+        net.connect_peer(env.clone(), addr)?;
+        let connection_ctxt = PeerConnectionCtxt {
+            env,
+            archive: net.archive.clone(),
+            network: net.network,
+            state: net.state.clone(),
+        };
+        let (duplicate, duplicate_info) = peer::connect(
+            net.server.connect(addr, "localhost")?,
+            connection_ctxt,
+        );
+        let error = net
+            .add_active_peer(addr, duplicate, duplicate_info)
+            .unwrap_err();
+        assert_eq!(error.0, addr);
+        assert_eq!(net.get_active_peers().len(), 1);
+        drop(net);
+        let events = tokio::time::timeout(
+            Duration::from_secs(5),
+            info_rx.collect::<Vec<_>>(),
+        )
+        .await?;
+        assert_eq!(events.iter().filter(|(_, info)| info.is_none()).count(), 1);
         Ok(())
     }
 }
