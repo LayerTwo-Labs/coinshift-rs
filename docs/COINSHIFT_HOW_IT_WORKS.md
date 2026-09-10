@@ -313,7 +313,7 @@ There is **no** `merkle_proof_verified` field in the current struct.
 ## Trust Model (Current)
 
 - **Trusted for swap L1 confirmation:**  
-  RPC to the swap target chain (and its confirmation count). No multi-source BMM consensus or header-chain verification for swaps in this codebase.
+  RPC to the swap target chain (and its confirmation count). No multi-source BMM consensus or header-chain verification for swaps in this codebase. The node behind that RPC is the user's own choice, configured in `l1_rpc_configs.json` (GUI "L1 Config" pane or `coinshift_app_cli set-l1-config`); the application ships local-node defaults with no credentials and no third-party endpoint. Plaintext `http://` to a remote host is accepted but warned about, since anyone on the network path could then forge the answers that mark a swap claimable; use `https://`, a cookie file, or a node on the same machine.
 
 - **Protected against:**  
   - Spending locked outputs (only SwapClaim can unlock).  

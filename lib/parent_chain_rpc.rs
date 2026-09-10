@@ -6,7 +6,10 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::{path::Path, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 use thiserror::Error;
 
 use crate::types::ParentChainType;
@@ -50,16 +53,78 @@ pub enum Error {
         expected: ParentChainType,
         chain: String,
     },
-    /// L1 config (url/user/password) is not one of the supported predefined configs
-    #[error("L1 config is not supported: only predefined networks are allowed")]
-    UnsupportedL1Config,
+    /// The RPC cookie file could not be read or parsed
+    #[error("Failed to read RPC cookie file {path}: {reason}")]
+    CookieFile { path: PathBuf, reason: String },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// How to reach a parent-chain node's JSON-RPC interface.
+///
+/// The node is the swap subsystem's only source of truth about L1 payments,
+/// so it must be one the user controls or trusts; see
+/// `docs/COINSHIFT_HOW_IT_WORKS.md`. Nothing here restricts the URL: a user
+/// may point at any node, over `http://` (loopback only, ideally) or
+/// `https://`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RpcConfig {
     pub url: String,
+    /// Basic-auth user. Ignored when `cookie_file` is set.
+    #[serde(default)]
     pub user: String,
+    /// Basic-auth password. Ignored when `cookie_file` is set.
+    #[serde(default)]
     pub password: String,
+    /// Path to a Bitcoin Core style `.cookie` file (`user:password` on one
+    /// line). Read on every call, so a node restart that rotates the cookie
+    /// needs no reconfiguration. Takes precedence over `user`/`password`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cookie_file: Option<PathBuf>,
+}
+
+impl RpcConfig {
+    /// Resolve the basic-auth credentials for a call, reading the cookie file
+    /// if one is configured.
+    pub fn credentials(&self) -> Result<Option<(String, String)>, Error> {
+        if let Some(path) = &self.cookie_file {
+            let contents = std::fs::read_to_string(path).map_err(|err| {
+                Error::CookieFile {
+                    path: path.clone(),
+                    reason: err.to_string(),
+                }
+            })?;
+            let (user, password) =
+                contents.trim().split_once(':').ok_or_else(|| {
+                    Error::CookieFile {
+                        path: path.clone(),
+                        reason: "expected `user:password`".to_string(),
+                    }
+                })?;
+            return Ok(Some((user.to_owned(), password.to_owned())));
+        }
+        if self.user.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some((self.user.clone(), self.password.clone())))
+    }
+
+    /// True when the URL sends credentials and receives payment evidence in
+    /// clear text over a network: plaintext `http://` to a host other than
+    /// loopback. Such a node can be impersonated by anyone on the path, and
+    /// what it says decides when a swap becomes claimable.
+    pub fn is_plaintext_remote(&self) -> bool {
+        let Ok(url) = url::Url::parse(&self.url) else {
+            return false;
+        };
+        if url.scheme() != "http" {
+            return false;
+        }
+        match url.host() {
+            Some(url::Host::Domain(host)) => host != "localhost",
+            Some(url::Host::Ipv4(ip)) => !ip.is_loopback(),
+            Some(url::Host::Ipv6(ip)) => !ip.is_loopback(),
+            None => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -144,9 +209,8 @@ impl ParentChainRpcClient {
         let mut request_builder =
             self.client.post(&self.config.url).json(&request);
 
-        if !self.config.user.is_empty() {
-            request_builder = request_builder
-                .basic_auth(&self.config.user, Some(&self.config.password));
+        if let Some((user, password)) = self.config.credentials()? {
+            request_builder = request_builder.basic_auth(user, Some(password));
         }
 
         let response = match request_builder.send() {
@@ -435,33 +499,20 @@ impl ParentChainRpcClient {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct LocalRpcConfigFile {
-    url: String,
-    user: String,
-    password: String,
-}
-
-/// Predefined L1 configs that Coinshift supports. Users may only use these;
-/// adding new nodes requires a new Coinshift release.
-pub fn supported_l1_configs() -> Vec<(ParentChainType, RpcConfig)> {
+/// Default L1 configs: a node on this machine, on the chain's default RPC
+/// port, with no credentials filled in. These are starting points for the
+/// user to edit, not endpoints anyone is expected to run for them. The
+/// application never ships a third-party endpoint or a credential.
+pub fn default_l1_configs() -> Vec<(ParentChainType, RpcConfig)> {
+    let local = |port: u16| RpcConfig {
+        url: format!("http://127.0.0.1:{port}"),
+        ..RpcConfig::default()
+    };
     vec![
-        (
-            ParentChainType::Signet,
-            RpcConfig {
-                url: "http://localhost:38332".to_string(),
-                user: "user".to_string(),
-                password: "password".to_string(),
-            },
-        ),
-        (
-            ParentChainType::BCH,
-            RpcConfig {
-                url: "http://173.230.135.236:28332".to_string(),
-                user: "user".to_string(),
-                password: "password".to_string(),
-            },
-        ),
+        // Bitcoin Core `-signet`
+        (ParentChainType::Signet, local(38332)),
+        // BCHN / Bitcoin ABC `-testnet4`
+        (ParentChainType::BCH, local(28332)),
     ]
 }
 
@@ -492,89 +543,62 @@ pub fn detect_chain_type(
     Ok((detected, chain))
 }
 
-/// Check that the given (parent_chain, config) is one of the supported predefined configs
-/// (exact match on url, user, password).
-pub fn is_supported_l1_config(
-    parent_chain: ParentChainType,
-    config: &RpcConfig,
-) -> bool {
-    supported_l1_configs().into_iter().any(|(c, rpc)| {
-        c == parent_chain
-            && rpc.url == config.url
-            && rpc.user == config.user
-            && rpc.password == config.password
-    })
-}
-
-/// Write or merge L1 config file with predefined configs for the given chains.
-/// Creates the parent directory if needed. Merges with existing file: keeps
-/// existing supported configs for chains not in `chains_to_enable`, and
-/// adds/overwrites with predefined config for each chain in `chains_to_enable`.
-pub fn write_l1_config_file(
+/// Read the whole L1 config file. A missing or unparseable file reads as
+/// empty.
+pub fn read_l1_config_file(
     path: &Path,
-    chains_to_enable: &[ParentChainType],
-) -> std::io::Result<()> {
-    let supported = supported_l1_configs();
-    let mut configs: std::collections::HashMap<
-        ParentChainType,
-        LocalRpcConfigFile,
-    > = std::fs::read_to_string(path)
+) -> std::collections::HashMap<ParentChainType, RpcConfig> {
+    std::fs::read_to_string(path)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default();
-    // Keep only existing entries that are supported (drop unsupported/custom)
-    configs.retain(|chain, local| {
-        let rpc = RpcConfig {
-            url: local.url.clone(),
-            user: local.user.clone(),
-            password: local.password.clone(),
-        };
-        is_supported_l1_config(*chain, &rpc)
-    });
-    // Add or overwrite with predefined config for each requested chain
-    for chain in chains_to_enable {
-        if let Some((_, rpc)) = supported.iter().find(|(c, _)| c == chain) {
-            configs.insert(
-                *chain,
-                LocalRpcConfigFile {
-                    url: rpc.url.clone(),
-                    user: rpc.user.clone(),
-                    password: rpc.password.clone(),
-                },
-            );
-        }
-    }
+        .unwrap_or_default()
+}
+
+/// Write the whole L1 config file, creating the parent directory if needed.
+pub fn write_l1_config_file_contents(
+    path: &Path,
+    configs: &std::collections::HashMap<ParentChainType, RpcConfig>,
+) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let json = serde_json::to_string_pretty(&configs)
+    let json = serde_json::to_string_pretty(configs)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     std::fs::write(path, json)?;
     Ok(())
 }
 
-/// Validate the L1 config file: every entry must be one of the supported predefined configs,
-/// and each node must report the expected chain (Signet or testnet4). Call before app start.
+/// Add the default (local node) config for each chain in `chains_to_enable`
+/// that has no entry yet. Existing entries, default or user-edited, are left
+/// alone.
+pub fn write_l1_config_file(
+    path: &Path,
+    chains_to_enable: &[ParentChainType],
+) -> std::io::Result<()> {
+    let defaults = default_l1_configs();
+    let mut configs = read_l1_config_file(path);
+    for chain in chains_to_enable {
+        if let Some((_, rpc)) = defaults.iter().find(|(c, _)| c == chain) {
+            configs.entry(*chain).or_insert_with(|| rpc.clone());
+        }
+    }
+    write_l1_config_file_contents(path, &configs)
+}
+
+/// Validate the L1 config file before start: each configured node must
+/// report the chain it is configured for. Plaintext HTTP to a non-loopback
+/// host is allowed but logged as a warning, since that node's answers decide
+/// when swaps become claimable and anyone on the path could forge them.
 pub fn validate_l1_config_file(path: &Path) -> Result<(), Error> {
-    let file_content = match std::fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(_) => return Ok(()), // no file or unreadable: no config to validate
-    };
-    let configs: std::collections::HashMap<
-        ParentChainType,
-        LocalRpcConfigFile,
-    > = match serde_json::from_str(&file_content) {
-        Ok(c) => c,
-        Err(_) => return Ok(()), // invalid JSON: will be overwritten when user saves
-    };
-    for (parent_chain, local) in configs {
-        let rpc = RpcConfig {
-            url: local.url,
-            user: local.user,
-            password: local.password,
-        };
-        if !is_supported_l1_config(parent_chain, &rpc) {
-            return Err(Error::UnsupportedL1Config);
+    for (parent_chain, rpc) in read_l1_config_file(path) {
+        if rpc.is_plaintext_remote() {
+            tracing::warn!(
+                chain = ?parent_chain,
+                url = %rpc.url,
+                "L1 RPC is plaintext HTTP to a remote host: credentials and \
+                 swap payment evidence can be read or forged on the network \
+                 path. Use https:// or a node on this machine."
+            );
         }
         let (detected, chain_name) = detect_chain_type(&rpc)?;
         if detected != parent_chain {
@@ -589,23 +613,14 @@ pub fn validate_l1_config_file(path: &Path) -> Result<(), Error> {
 
 /// Load RPC config for a parent chain from a JSON file.
 ///
-/// The file format is `{ "<ParentChainType>": { "url": "...", "user": "...", "password": "..." }, ... }`
-/// (e.g. the same format written by the GUI to `l1_rpc_configs.json`).
+/// The file format is `{ "<ParentChainType>": { "url": "...", "user": "...",
+/// "password": "...", "cookie_file": "..." }, ... }` (the format written by
+/// the GUI and CLI to `l1_rpc_configs.json`).
 pub fn load_rpc_config_from_path(
     path: &Path,
     parent_chain: ParentChainType,
 ) -> Option<RpcConfig> {
-    let file_content = std::fs::read_to_string(path).ok()?;
-    let configs: std::collections::HashMap<
-        ParentChainType,
-        LocalRpcConfigFile,
-    > = serde_json::from_str(&file_content).ok()?;
-    let local = configs.get(&parent_chain)?;
-    Some(RpcConfig {
-        url: local.url.clone(),
-        user: local.user.clone(),
-        password: local.password.clone(),
-    })
+    read_l1_config_file(path).remove(&parent_chain)
 }
 
 /// Get RPC config for a parent chain
@@ -703,53 +718,92 @@ mod tests {
         assert!(cfg.is_none());
     }
 
+    /// Defaults point at this machine and carry no credentials: the
+    /// application must never ship a third-party endpoint or a password.
     #[test]
-    fn supported_l1_configs_has_signet_and_bch() {
-        let configs = supported_l1_configs();
+    fn default_l1_configs_are_local_and_credential_free() {
+        let configs = default_l1_configs();
         assert_eq!(configs.len(), 2);
-        let (signet, bch): (Option<_>, Option<_>) = (
-            configs.iter().find(|(c, _)| *c == ParentChainType::Signet),
-            configs.iter().find(|(c, _)| *c == ParentChainType::BCH),
-        );
-        assert!(signet.is_some());
-        assert!(bch.is_some());
-        assert_eq!(signet.unwrap().1.url, "http://localhost:38332");
-        assert_eq!(signet.unwrap().1.user, "user");
-        assert_eq!(signet.unwrap().1.password, "password");
-        assert_eq!(bch.unwrap().1.url, "http://173.230.135.236:28332");
+        for (chain, rpc) in configs {
+            assert!(
+                !rpc.is_plaintext_remote(),
+                "{chain:?} default must be a loopback URL, got {}",
+                rpc.url
+            );
+            assert!(rpc.user.is_empty() && rpc.password.is_empty());
+            assert!(rpc.cookie_file.is_none());
+        }
     }
 
     #[test]
-    fn is_supported_l1_config_exact_match_only() {
-        let (_, signet_rpc) = supported_l1_configs()
-            .into_iter()
-            .find(|(c, _)| *c == ParentChainType::Signet)
-            .unwrap();
-        assert!(is_supported_l1_config(ParentChainType::Signet, &signet_rpc));
-        let wrong_url = RpcConfig {
-            url: "http://other:38332".to_string(),
-            user: signet_rpc.user.clone(),
-            password: signet_rpc.password.clone(),
+    fn plaintext_remote_detection() {
+        let cfg = |url: &str| RpcConfig {
+            url: url.to_owned(),
+            ..RpcConfig::default()
         };
-        assert!(!is_supported_l1_config(ParentChainType::Signet, &wrong_url));
+        assert!(!cfg("http://127.0.0.1:38332").is_plaintext_remote());
+        assert!(!cfg("http://localhost:38332").is_plaintext_remote());
+        assert!(!cfg("http://[::1]:38332").is_plaintext_remote());
+        assert!(!cfg("https://node.example:28332").is_plaintext_remote());
+        assert!(cfg("http://173.230.135.236:28332").is_plaintext_remote());
+        assert!(cfg("http://node.example:28332").is_plaintext_remote());
+    }
+
+    #[test]
+    fn cookie_file_takes_precedence_over_user_password() {
+        let dir = temp_dir::TempDir::new().unwrap();
+        let cookie = dir.path().join(".cookie");
+        std::fs::write(&cookie, "__cookie__:s3cret\n").unwrap();
+        let cfg = RpcConfig {
+            url: "http://127.0.0.1:38332".to_owned(),
+            user: "ignored".to_owned(),
+            password: "ignored".to_owned(),
+            cookie_file: Some(cookie),
+        };
+        assert_eq!(
+            cfg.credentials().unwrap(),
+            Some(("__cookie__".to_owned(), "s3cret".to_owned()))
+        );
+        let no_auth = RpcConfig {
+            url: "http://127.0.0.1:38332".to_owned(),
+            ..RpcConfig::default()
+        };
+        assert_eq!(no_auth.credentials().unwrap(), None);
+        let bad = RpcConfig {
+            cookie_file: Some(dir.path().join("missing")),
+            ..no_auth
+        };
+        assert!(matches!(bad.credentials(), Err(Error::CookieFile { .. })));
+    }
+
+    /// The config file format written before `cookie_file` existed must still
+    /// load, and user-edited entries must survive `write_l1_config_file`.
+    #[test]
+    fn write_l1_config_file_keeps_custom_entries() {
+        let dir = temp_dir::TempDir::new().unwrap();
+        let path = dir.path().join("l1_rpc_configs.json");
+        let configs = serde_json::json!({
+            "Signet": { "url": "https://my-node.example:38332", "user": "u", "password": "p" }
+        });
+        std::fs::write(&path, configs.to_string()).unwrap();
+        write_l1_config_file(
+            &path,
+            &[ParentChainType::Signet, ParentChainType::BCH],
+        )
+        .unwrap();
+        let signet =
+            load_rpc_config_from_path(&path, ParentChainType::Signet).unwrap();
+        assert_eq!(signet.url, "https://my-node.example:38332");
+        assert_eq!(signet.user, "u");
+        let bch =
+            load_rpc_config_from_path(&path, ParentChainType::BCH).unwrap();
+        assert_eq!(bch.url, "http://127.0.0.1:28332");
+        assert!(bch.user.is_empty());
     }
 
     #[test]
     fn validate_l1_config_file_empty_or_missing_ok() {
         let path = Path::new("/nonexistent/l1_rpc_configs.json");
         assert!(validate_l1_config_file(path).is_ok());
-    }
-
-    #[test]
-    fn validate_l1_config_file_unsupported_config_fails() {
-        let dir = std::env::temp_dir();
-        let path = dir.join("coinshift_l1_validate_unsupported.json");
-        let configs = serde_json::json!({
-            "Signet": { "url": "http://custom:38332", "user": "u", "password": "p" }
-        });
-        std::fs::write(&path, configs.to_string()).unwrap();
-        let result = validate_l1_config_file(&path);
-        drop(std::fs::remove_file(&path)); // best-effort cleanup
-        assert!(matches!(result, Err(Error::UnsupportedL1Config)));
     }
 }

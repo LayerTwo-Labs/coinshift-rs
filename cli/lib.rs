@@ -242,12 +242,19 @@ pub enum Command {
     SetL1Config {
         #[arg(long, value_parser = parse_parent_chain)]
         parent_chain: ParentChainType,
+        /// Node RPC URL. Prefer a node on this machine or https://; plaintext
+        /// http:// to a remote host exposes the credentials and lets anyone
+        /// on the path forge swap payment evidence.
         #[arg(long)]
         url: String,
         #[arg(long, default_value = "")]
         user: String,
         #[arg(long, default_value = "")]
         password: String,
+        /// Bitcoin Core style `.cookie` file to read credentials from on
+        /// each call; takes precedence over --user/--password
+        #[arg(long)]
+        cookie_file: Option<PathBuf>,
     },
     /// Get total sidechain wealth
     SidechainWealth,
@@ -546,37 +553,35 @@ where
             url,
             user,
             password,
+            cookie_file,
         } => {
-            let path = l1_config_path();
-            let mut configs: HashMap<ParentChainType, RpcConfig> = if path
-                .exists()
-            {
-                let s = std::fs::read_to_string(&path).map_err(|e| {
-                    anyhow::anyhow!("read config: {}: {}", path.display(), e)
-                })?;
-                serde_json::from_str(&s).unwrap_or_default()
-            } else {
-                HashMap::new()
+            use coinshift::parent_chain_rpc::{
+                read_l1_config_file, write_l1_config_file_contents,
             };
-            configs.insert(
-                parent_chain,
-                RpcConfig {
-                    url: url.clone(),
-                    user: user.clone(),
-                    password: password.clone(),
-                },
-            );
-            if let Some(parent) = path.parent() {
-                drop(std::fs::create_dir_all(parent));
-            }
-            std::fs::write(&path, serde_json::to_string_pretty(&configs)?)
-                .map_err(|e| {
-                    anyhow::anyhow!("write config: {}: {}", path.display(), e)
-                })?;
+            let path = l1_config_path();
+            let config = RpcConfig {
+                url: url.clone(),
+                user: user.clone(),
+                password: password.clone(),
+                cookie_file,
+            };
+            let warning = if config.is_plaintext_remote() {
+                "\nWARNING: plaintext http:// to a remote host; credentials \
+                 and swap payment evidence can be read or forged on the \
+                 network path. Prefer https:// or a local node."
+            } else {
+                ""
+            };
+            let mut configs = read_l1_config_file(&path);
+            configs.insert(parent_chain, config);
+            write_l1_config_file_contents(&path, &configs).map_err(|e| {
+                anyhow::anyhow!("write config: {}: {}", path.display(), e)
+            })?;
             format!(
-                "L1 RPC config saved for {} at {}",
+                "L1 RPC config saved for {} at {}{}",
                 parent_chain.coin_name(),
-                path.display()
+                path.display(),
+                warning
             )
         }
         Command::SidechainWealth => {

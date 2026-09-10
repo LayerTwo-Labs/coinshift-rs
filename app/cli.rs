@@ -101,10 +101,13 @@ pub(super) enum AppSubcommand {
     /// Write L1 RPC config (Bitcoin Signet and/or Bitcoin Cash Testnet4) and exit.
     /// Does not start the app. Use before first run or to update L1 config from CLI.
     Init {
-        /// Enable Bitcoin Signet (predefined: localhost:38332)
+        /// Add a default Bitcoin Signet entry (local node, 127.0.0.1:38332)
+        /// unless one exists; edit credentials in the GUI or with
+        /// `coinshift_app_cli set-l1-config`
         #[arg(long)]
         l1_signet: bool,
-        /// Enable Bitcoin Cash Testnet4 (predefined: 173.230.135.236:28332)
+        /// Add a default Bitcoin Cash Testnet4 entry (local node,
+        /// 127.0.0.1:28332) unless one exists
         #[arg(long)]
         l1_bch_testnet4: bool,
     },
@@ -160,10 +163,12 @@ pub(super) struct RunArgs {
     #[arg(default_value_t = DEFAULT_RPC_ADDR, long, short)]
     rpc_addr: SocketAddr,
 
-    /// Enable Bitcoin Signet in L1 config before start (predefined: localhost:38332)
+    /// Add a default Bitcoin Signet entry (local node, 127.0.0.1:38332) to
+    /// the L1 config before start, unless one exists
     #[arg(long)]
     pub(super) l1_signet: bool,
-    /// Enable Bitcoin Cash Testnet4 in L1 config before start (predefined: 173.230.135.236:28332)
+    /// Add a default Bitcoin Cash Testnet4 entry (local node,
+    /// 127.0.0.1:28332) to the L1 config before start, unless one exists
     #[arg(long)]
     pub(super) l1_bch_testnet4: bool,
 }

@@ -1387,6 +1387,7 @@ dependencies = [
  "tonic-prost-build",
  "tracing",
  "transitive",
+ "url",
  "utoipa",
  "zeroize",
 ]
