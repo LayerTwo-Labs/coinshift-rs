@@ -16,6 +16,7 @@ use sneed::{
     db::error::Error as DbError,
 };
 use tokio_stream::{StreamMap, wrappers::WatchStream};
+use zeroize::Zeroizing;
 
 pub use crate::{
     authorization::{Authorization, get_address},
@@ -93,7 +94,13 @@ pub struct Wallet {
     env: sneed::Env,
     // Seed is always [u8; 64], but due to serde not implementing serialize
     // for [T; 64], use heed's `Bytes`
-    // TODO: Don't store the seed in plaintext.
+    //
+    // The seed is stored unencrypted. It is the one secret in the data
+    // directory that cannot be rebuilt from the chain, so the environment it
+    // lives in is opened with full fsync durability (see `Wallet::new`) and
+    // the directory is owner-only. Encryption at rest with a user passphrase
+    // is still open: it needs an unlock flow across the GUI, RPC and headless
+    // modes.
     seed: DatabaseUnique<U8, Bytes>,
     /// Map each address to it's index
     address_to_index:
@@ -111,34 +118,36 @@ impl Wallet {
 
     pub fn new(path: &Path) -> Result<Self, Error> {
         std::fs::create_dir_all(path)?;
+        // The directory holds the plaintext seed: keep other users out.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(
+                path,
+                std::fs::Permissions::from_mode(0o700),
+            )?;
+        }
         let env = {
             use heed::EnvFlags;
             let mut env_open_options = heed::EnvOpenOptions::new();
             env_open_options
                 .map_size(10 * 1024 * 1024) // 10MB
                 .max_dbs(Self::NUM_DBS);
-            // Apply LMDB "fast" flags consistent with our benchmark setup:
-            // - WRITE_MAP lets us write directly into the memory map instead of
-            //   copying into LMDB's page buffer, reducing syscall overhead for
-            //   write-heavy workloads.
-            // - MAP_ASYNC hands dirty-page flushing to the kernel so commits do
-            //   not block waiting for msync, keeping latencies tight.
-            // - NO_SYNC and NO_META_SYNC skip fsync calls for data and
-            //   metadata; this trades durability for throughput, which is
-            //   acceptable here because the state can be reconstructed from the
-            //   canonical chain if a crash occurs.
+            // Unlike the node's chain-state environment, this one is opened
+            // with LMDB's default durability: every commit is fsynced. The
+            // node's "fast" flags (WRITE_MAP, MAP_ASYNC, NO_SYNC,
+            // NO_META_SYNC) are justified there because the chain state can
+            // be rebuilt from the canonical chain after a crash; the wallet
+            // seed cannot be rebuilt from anything, and LMDB documents that
+            // those flags can corrupt the database on system failure. The
+            // wallet is tiny and rarely written, so the cost is nil.
             // - NO_READ_AHEAD disables kernel readahead that would otherwise
             //   touch cold pages we immediately overwrite, improving random
             //   access behaviour on SSDs used in testing.
             // - NO_TLS stops LMDB from relying on thread-local storage for
             //   reader slots so transactions can be moved across Tokio tasks.
-            let fast_flags = EnvFlags::WRITE_MAP
-                | EnvFlags::MAP_ASYNC
-                | EnvFlags::NO_SYNC
-                | EnvFlags::NO_META_SYNC
-                | EnvFlags::NO_READ_AHEAD
-                | EnvFlags::NO_TLS;
-            unsafe { env_open_options.flags(fast_flags) };
+            let flags = EnvFlags::NO_READ_AHEAD | EnvFlags::NO_TLS;
+            unsafe { env_open_options.flags(flags) };
             unsafe { Env::open(&env_open_options, path) }
                 .map_err(EnvError::from)?
         };
@@ -230,7 +239,7 @@ impl Wallet {
     pub fn seed_from_mnemonic(
         mnemonic: &str,
         passphrase: &str,
-    ) -> Result<[u8; 64], Error> {
+    ) -> Result<Zeroizing<[u8; 64]>, Error> {
         let mnemonic =
             bip39::Mnemonic::from_phrase(mnemonic, bip39::Language::English)
                 .map_err(Error::ParseMnemonic)?;
@@ -239,7 +248,7 @@ impl Wallet {
             .as_bytes()
             .try_into()
             .expect("BIP39 seeds are always 64 bytes");
-        Ok(seed_bytes)
+        Ok(Zeroizing::new(seed_bytes))
     }
 
     /// Set the seed from a mnemonic seed phrase and passphrase,
@@ -982,13 +991,15 @@ impl Wallet {
                 return Ok(());
             }
         }
-        let seed: Vec<u8> = {
+        let seed: Zeroizing<Vec<u8>> = {
             let txn = self.env.read_txn().map_err(EnvError::from)?;
-            self.seed
-                .try_get(&txn, &0)
-                .map_err(DbError::from)?
-                .ok_or(Error::NoSeed)?
-                .to_vec()
+            Zeroizing::new(
+                self.seed
+                    .try_get(&txn, &0)
+                    .map_err(DbError::from)?
+                    .ok_or(Error::NoSeed)?
+                    .to_vec(),
+            )
         };
         let index = (0..Self::MAX_RECOVERY_INDEX)
             .find_map(|i| {
@@ -1022,10 +1033,10 @@ impl Wallet {
         if utxo_addresses.is_empty() {
             return Ok(0);
         }
-        let seed: Vec<u8> = {
+        let seed: Zeroizing<Vec<u8>> = {
             let txn = self.env.read_txn().map_err(EnvError::from)?;
             match self.seed.try_get(&txn, &0).map_err(DbError::from)? {
-                Some(s) => s.to_vec(),
+                Some(s) => Zeroizing::new(s.to_vec()),
                 None => return Ok(0),
             }
         };
@@ -1178,13 +1189,38 @@ mod tests {
     fn passphrase_changes_the_derived_seed() {
         let without = Wallet::seed_from_mnemonic(TEST_MNEMONIC, "").unwrap();
         let with = Wallet::seed_from_mnemonic(TEST_MNEMONIC, "TREZOR").unwrap();
-        assert_ne!(without, with);
+        assert_ne!(*without, *with);
         // BIP39 reference vector for this phrase with passphrase "TREZOR".
         assert_eq!(
-            hex::encode(with),
+            hex::encode(*with),
             "c55257c360c07c72029aebc1b53c05ed0362ada38ead3e3e9efa3708e5349553\
              1f09a6987599d18264c1e1c92f2cf141630c7a3c4ab7c81b2f001698e7463b04"
         );
+    }
+
+    /// The seed must survive closing and reopening the environment; with the
+    /// node's NO_SYNC/NO_META_SYNC flags a crash between commit and flush
+    /// could lose it, and there is no other copy.
+    #[test]
+    fn seed_persists_across_reopen() {
+        let dir = temp_dir::TempDir::new().unwrap();
+        let expected = {
+            let wallet = Wallet::new(dir.path()).unwrap();
+            wallet.set_seed_from_mnemonic(TEST_MNEMONIC, "").unwrap();
+            Wallet::seed_from_mnemonic(TEST_MNEMONIC, "").unwrap()
+        };
+        let wallet = Wallet::new(dir.path()).unwrap();
+        assert!(wallet.has_seed().unwrap());
+        // `set_seed` with the same bytes is a no-op; different bytes would
+        // report `SeedAlreadyExists`, so this doubles as an equality check.
+        wallet.set_seed(&expected).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode =
+                std::fs::metadata(dir.path()).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o700, "wallet dir must be owner-only");
+        }
     }
 
     /// The passphrase must be applied when the seed is stored, and only an

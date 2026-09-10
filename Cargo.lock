@@ -1388,6 +1388,7 @@ dependencies = [
  "tracing",
  "transitive",
  "utoipa",
+ "zeroize",
 ]
 
 [[package]]
