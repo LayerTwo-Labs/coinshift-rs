@@ -344,30 +344,95 @@ impl ParentChainRpcClient {
         Ok(tx.confirmations)
     }
 
-    /// Get transactions for an address
-    /// Returns list of transaction IDs
+    /// Find transactions that currently have an unspent output paying
+    /// `address`. Returns transaction IDs in RPC byte order.
+    ///
+    /// Discovery runs two sources and unions them:
+    ///
+    /// 1. `scantxoutset` with an `addr(...)` descriptor scans the node's whole
+    ///    UTXO set, so it finds a payment regardless of whether the node's
+    ///    wallet tracks the address. This is the source that works on a stock
+    ///    node; nothing in the swap flow imports the counterparty's address.
+    /// 2. `listunspent` for nodes without `scantxoutset`. It only returns
+    ///    outputs the node's *wallet* knows about, and returns an empty list
+    ///    rather than an error for any other address, so on its own it
+    ///    silently never fires for the default flow.
+    ///
+    /// When only the wallet source is available and it finds nothing, that is
+    /// logged as a warning so the operator knows detection may be blind and
+    /// the manual `update_swap_l1_txid` path is needed. Both sources see
+    /// unspent outputs only; once a txid is known callers should track it
+    /// with [`Self::get_transaction`], which works for spent outputs given
+    /// `-txindex`.
     pub fn list_transactions(
         &self,
         address: &str,
     ) -> Result<Vec<String>, Error> {
-        // Use listunspent to find transactions (works for most cases)
-        // For more comprehensive results, we'd need to use a block explorer API
-        // or maintain our own index
-        let unspent: Vec<serde_json::Value> =
-            self.call("listunspent", json!([0, 999999, [address]]))?;
-
         let mut txids = std::collections::HashSet::new();
-        for utxo in unspent {
-            if let Some(txid) = utxo.get("txid").and_then(|v| v.as_str()) {
-                txids.insert(txid.to_string());
-            }
-        }
 
-        // Also try to get transactions from getreceivedbyaddress (if available)
-        // This is a fallback, but not all nodes support it
-        // Note: We don't use the result, but calling it may help populate the node's internal index
-        let _result: Result<f64, _> =
-            self.call("getreceivedbyaddress", json!([address, 0]));
+        let scan: Result<serde_json::Value, Error> = self.call(
+            "scantxoutset",
+            json!(["start", [format!("addr({address})")]]),
+        );
+        let chain_scan_available = match scan {
+            Ok(result) => {
+                if let Some(unspents) =
+                    result.get("unspents").and_then(|v| v.as_array())
+                {
+                    for utxo in unspents {
+                        if let Some(txid) =
+                            utxo.get("txid").and_then(|v| v.as_str())
+                        {
+                            txids.insert(txid.to_string());
+                        }
+                    }
+                }
+                true
+            }
+            Err(err) => {
+                tracing::debug!(
+                    url = %self.config.url,
+                    address = %address,
+                    error = %err,
+                    "scantxoutset unavailable; falling back to wallet-only listunspent"
+                );
+                false
+            }
+        };
+
+        let wallet_scan: Result<Vec<serde_json::Value>, Error> =
+            self.call("listunspent", json!([0, 999_999_999, [address]]));
+        let wallet_found = match wallet_scan {
+            Ok(unspent) => {
+                let before = txids.len();
+                for utxo in unspent {
+                    if let Some(txid) =
+                        utxo.get("txid").and_then(|v| v.as_str())
+                    {
+                        txids.insert(txid.to_string());
+                    }
+                }
+                txids.len() > before
+            }
+            Err(err) => {
+                if !chain_scan_available {
+                    return Err(err);
+                }
+                false
+            }
+        };
+
+        if !chain_scan_available && !wallet_found {
+            tracing::warn!(
+                url = %self.config.url,
+                address = %address,
+                "L1 fill detection is wallet-only on this node (no scantxoutset) \
+                 and its wallet does not track this address: payments to it \
+                 will not be detected automatically. Import the address as \
+                 watch-only, use a node with scantxoutset, or record the fill \
+                 with update_swap_l1_txid."
+            );
+        }
 
         Ok(txids.into_iter().collect())
     }
@@ -799,6 +864,137 @@ mod tests {
             load_rpc_config_from_path(&path, ParentChainType::BCH).unwrap();
         assert_eq!(bch.url, "http://127.0.0.1:28332");
         assert!(bch.user.is_empty());
+    }
+
+    /// A minimal JSON-RPC server for one connection at a time. `respond`
+    /// maps a method name to the `result` (or a JSON-RPC error when `Err`).
+    fn fake_rpc<F>(respond: F) -> (String, std::thread::JoinHandle<Vec<String>>)
+    where
+        F: Fn(&str) -> Result<serde_json::Value, String> + Send + 'static,
+    {
+        use std::io::{BufRead as _, BufReader, Read as _, Write as _};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let handle = std::thread::spawn(move || {
+            let mut methods = Vec::new();
+            listener.set_nonblocking(false).unwrap();
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut content_length = 0usize;
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap() == 0 {
+                        return methods;
+                    }
+                    let line = line.trim_end();
+                    if line.is_empty() {
+                        break;
+                    }
+                    if let Some(value) = line
+                        .to_ascii_lowercase()
+                        .strip_prefix("content-length:")
+                    {
+                        content_length = value.trim().parse().unwrap();
+                    }
+                }
+                let mut body = vec![0u8; content_length];
+                reader.read_exact(&mut body).unwrap();
+                let request: serde_json::Value =
+                    serde_json::from_slice(&body).unwrap();
+                let method = request["method"].as_str().unwrap().to_owned();
+                let response = match respond(&method) {
+                    Ok(result) => {
+                        json!({"result": result, "error": null, "id": "coinshift"})
+                    }
+                    Err(message) => json!({
+                        "result": null,
+                        "error": {"code": -32601, "message": message},
+                        "id": "coinshift"
+                    }),
+                };
+                let stop = method == "stop";
+                methods.push(method);
+                let body = response.to_string();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .unwrap();
+                stream.flush().unwrap();
+                if stop {
+                    return methods;
+                }
+            }
+            methods
+        });
+        (url, handle)
+    }
+
+    fn client_for(url: &str) -> ParentChainRpcClient {
+        ParentChainRpcClient::new(RpcConfig {
+            url: url.to_owned(),
+            ..RpcConfig::default()
+        })
+    }
+
+    /// Discovery must not depend on the node's wallet: a payment visible to
+    /// `scantxoutset` is found even when `listunspent` (wallet-only) returns
+    /// nothing, which is what a stock node returns for any address the
+    /// wallet does not track.
+    #[test]
+    fn list_transactions_uses_utxo_set_scan_not_only_wallet() {
+        let (url, server) = fake_rpc(|method| match method {
+            "scantxoutset" => Ok(json!({
+                "success": true,
+                "unspents": [{"txid": "aa".repeat(32), "vout": 0}]
+            })),
+            "listunspent" => Ok(json!([])),
+            "stop" => Ok(json!(true)),
+            other => Err(format!("unexpected method {other}")),
+        });
+        let client = client_for(&url);
+        let txids = client.list_transactions("tb1qexample").unwrap();
+        assert_eq!(txids, vec!["aa".repeat(32)]);
+        drop(client.call::<serde_json::Value>("stop", json!([])).unwrap());
+        let methods = server.join().unwrap();
+        assert!(methods.contains(&"scantxoutset".to_owned()));
+        assert!(
+            !methods.contains(&"getreceivedbyaddress".to_owned()),
+            "the wallet-only getreceivedbyaddress probe is gone"
+        );
+    }
+
+    /// Without `scantxoutset` the wallet source still works, and a wallet
+    /// error is not swallowed.
+    #[test]
+    fn list_transactions_falls_back_to_wallet_when_scan_unavailable() {
+        let (url, server) = fake_rpc(|method| match method {
+            "scantxoutset" => Err("Method not found".to_owned()),
+            "listunspent" => Ok(json!([{"txid": "bb".repeat(32), "vout": 1}])),
+            "stop" => Ok(json!(true)),
+            other => Err(format!("unexpected method {other}")),
+        });
+        let client = client_for(&url);
+        let txids = client.list_transactions("tb1qexample").unwrap();
+        assert_eq!(txids, vec!["bb".repeat(32)]);
+        drop(client.call::<serde_json::Value>("stop", json!([])).unwrap());
+        server.join().unwrap();
+
+        let (url, server) = fake_rpc(|method| match method {
+            "stop" => Ok(json!(true)),
+            _ => Err("Method not found".to_owned()),
+        });
+        let client = client_for(&url);
+        assert!(
+            client.list_transactions("tb1qexample").is_err(),
+            "no discovery source at all must be an error, not an empty list"
+        );
+        drop(client.call::<serde_json::Value>("stop", json!([])).unwrap());
+        server.join().unwrap();
     }
 
     #[test]

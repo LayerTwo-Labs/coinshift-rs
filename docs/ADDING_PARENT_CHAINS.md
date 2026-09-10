@@ -59,14 +59,18 @@ To be supported as a parent chain, a blockchain must implement these Bitcoin Cor
 | Method | Purpose |
 |--------|---------|
 | `getblockchaininfo` | Get current block height and chain info |
-| `getrawtransaction` | Fetch transaction details by txid |
-| `listunspent` | List UTXOs for an address |
+| `getrawtransaction` | Fetch transaction details by txid (run the node with `-txindex=1`, otherwise only wallet transactions and unspent outputs resolve) |
+| `scantxoutset` | Discover payments to the swap's L1 address across the whole UTXO set, independent of the node's wallet |
 
 ### Optional Methods
 
 | Method | Purpose |
 |--------|---------|
-| `getreceivedbyaddress` | Alternative transaction discovery |
+| `listunspent` | Wallet-only fallback for discovery on nodes without `scantxoutset`. It only sees addresses the node's wallet tracks; the node logs a warning when it is the sole source and finds nothing. Import the swap address as watch-only, or record the fill manually with `update_swap_l1_txid`. |
+
+Discovery sees unspent outputs only. Once a fill's txid is known the node
+tracks confirmations with `getrawtransaction` directly, so spending the fill
+afterwards does not lose it.
 
 ### Response Format
 

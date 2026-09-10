@@ -619,11 +619,24 @@ fn query_and_update_swap(
     let client = ParentChainRpcClient::new(rpc_config.clone());
     let amount_sats = swap.l1_amount.to_sat();
 
-    // Find transactions matching address and amount
-    let matches = client.find_transactions_by_address_and_amount(
-        &swap.l1_recipient_address,
-        amount_sats,
-    )?;
+    // Check if this is an update or new detection
+    let zero_hash32 = [0u8; 32];
+    let is_new = matches!(swap.l1_txid, SwapTxId::Hash32(h) if h == zero_hash32)
+        || matches!(swap.l1_txid, SwapTxId::Hash(ref v) if v.is_empty() || v.iter().all(|&b| b == 0));
+
+    // Once the fill's txid is known, track it directly. Discovery only sees
+    // outputs that are still unspent, so a fill the creator has already
+    // spent would otherwise vanish from view before it reached the required
+    // confirmations and the swap would never become claimable.
+    let matches = if is_new {
+        client.find_transactions_by_address_and_amount(
+            &swap.l1_recipient_address,
+            amount_sats,
+        )?
+    } else {
+        let tx_info = client.get_transaction(&swap.l1_txid.to_hex_rpc())?;
+        vec![(String::new(), tx_info)]
+    };
 
     if matches.is_empty() {
         return Ok(false);
@@ -666,11 +679,6 @@ fn query_and_update_swap(
     // Convert txid string from parent chain RPC (RPC byte order) to SwapTxId (canonical storage)
     let l1_txid = SwapTxId::from_hex_rpc(&tx_info.txid)
         .map_err(|_| crate::parent_chain_rpc::Error::InvalidResponse)?;
-
-    // Check if this is an update or new detection
-    let zero_hash32 = [0u8; 32];
-    let is_new = matches!(swap.l1_txid, SwapTxId::Hash32(h) if h == zero_hash32)
-        || matches!(swap.l1_txid, SwapTxId::Hash(ref v) if v.is_empty() || v.iter().all(|&b| b == 0));
 
     if is_new {
         // L1 transaction uniqueness: do not accept an L1 tx already used by another swap
