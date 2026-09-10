@@ -944,6 +944,13 @@ impl State {
         rwtxn: &mut RwTxn,
         swap_id: &SwapId,
     ) -> Result<(), Error> {
+        // A swap record and the locks on its escrow go together: once the
+        // record is gone nothing can ever spend a still-locked output through
+        // the mempool, and a claim for an unknown swap is rejected by
+        // consensus, so the value would be stranded. Unlock first, whatever
+        // state the record is in. Callers that already unlocked (rollback)
+        // find nothing to do here.
+        self.unlock_all_outputs_for_swap(rwtxn, swap_id)?;
         if let Some(swap) = self.get_swap(rwtxn, swap_id)? {
             // Delete from swaps_by_l1_txid
             let l1_txid_key = (swap.parent_chain, swap.l1_txid.clone());
@@ -973,11 +980,8 @@ impl State {
             // Swap not found or corrupted - log warning but still try to delete
             tracing::warn!(
                 swap_id = %swap_id,
-                "Swap not found or corrupted when deleting, attempting to delete from database and unlock outputs"
+                "Swap not found or corrupted when deleting, attempting to delete from database"
             );
-
-            // Even if swap is corrupted, unlock all outputs locked to it
-            self.unlock_all_outputs_for_swap(rwtxn, swap_id)?;
         }
 
         // Delete from main swaps database (even if swap was corrupted/unreadable)

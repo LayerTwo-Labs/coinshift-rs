@@ -118,10 +118,10 @@ pub fn validate_swap_create(
                 }
                 Ok(None) => {
                     // Swap doesn't exist - orphaned lock
-                    return Err(Error::InvalidTransaction(format!(
-                        "Input {} is locked to non-existent swap {} (orphaned lock). Please run cleanup_orphaned_locks to fix this.",
-                        outpoint, locked_swap_id
-                    )));
+                    return Err(Error::OrphanedLock {
+                        outpoint: *outpoint,
+                        swap_id: locked_swap_id,
+                    });
                 }
                 Err(err) => {
                     // Check if it's a deserialization error (corrupted swap)
@@ -138,10 +138,10 @@ pub fn validate_swap_create(
 
                     if is_deserialization_error {
                         // Swap is corrupted - orphaned lock
-                        return Err(Error::InvalidTransaction(format!(
-                            "Input {} is locked to corrupted swap {} (orphaned lock). Please run cleanup_orphaned_locks to fix this.",
-                            outpoint, locked_swap_id
-                        )));
+                        return Err(Error::OrphanedLock {
+                            outpoint: *outpoint,
+                            swap_id: locked_swap_id,
+                        });
                     } else {
                         // Other database error - return original error
                         return Err(Error::InvalidTransaction(format!(
@@ -368,6 +368,15 @@ pub fn validate_no_locked_outputs(
         if let Some(locked_swap_id) =
             state.is_output_locked_to_swap(rotxn, outpoint)?
         {
+            // A lock whose swap record is missing or unreadable protects
+            // nothing; report it as such so `Node::submit_transaction` can
+            // clean it up and retry instead of leaving the output stranded.
+            if state.get_swap(rotxn, &locked_swap_id)?.is_none() {
+                return Err(Error::OrphanedLock {
+                    outpoint: *outpoint,
+                    swap_id: locked_swap_id,
+                });
+            }
             return Err(Error::InvalidTransaction(format!(
                 "Cannot spend locked output {} (locked to swap {})",
                 outpoint, locked_swap_id
@@ -553,7 +562,23 @@ mod tests {
             },
         };
 
+        let swap = Swap::new(
+            swap_id,
+            SwapDirection::L2ToL1,
+            ParentChainType::Regtest,
+            SwapTxId::Hash32([0u8; 32]),
+            None,
+            Some(Address([2u8; 20])),
+            sat(50_000),
+            "rbtc-recipient".to_string(),
+            sat(40_000),
+            0,
+            None,
+            Some(Address([1u8; 20])),
+        );
+
         let mut rwtxn = env.write_txn().unwrap();
+        state.save_swap(&mut rwtxn, &swap).unwrap();
         state
             .lock_output_to_swap(&mut rwtxn, &outpoint, &swap_id)
             .unwrap();
@@ -1385,6 +1410,83 @@ mod tests {
         assert!(
             state.get_swap(&rwtxn, &swap_id).unwrap().is_none(),
             "swap should be gone after rollback deletion"
+        );
+    }
+
+    /// Deleting a swap record must never leave its escrow locked: a locked
+    /// output whose swap is gone cannot be spent through the mempool and its
+    /// claim is rejected by consensus, so the value would be stranded.
+    #[test]
+    fn delete_swap_unchecked_unlocks_outputs_of_existing_swap() {
+        let (_dir, env, state, swap_id, outpoint, ..) = ready_swap_state();
+
+        let mut rwtxn = env.write_txn().unwrap();
+        assert_eq!(
+            state.is_output_locked_to_swap(&rwtxn, &outpoint).unwrap(),
+            Some(swap_id),
+            "precondition: escrow is locked"
+        );
+        state.delete_swap_unchecked(&mut rwtxn, &swap_id).unwrap();
+        assert_eq!(
+            state.is_output_locked_to_swap(&rwtxn, &outpoint).unwrap(),
+            None,
+            "deleting the swap must release its locks"
+        );
+    }
+
+    /// An output locked to a swap that does not exist is reported with the
+    /// typed `OrphanedLock` error, which `Node::submit_transaction` turns
+    /// into a cleanup-and-retry. A lock backed by a live swap is a plain
+    /// rejection.
+    #[test]
+    fn spending_orphaned_lock_is_reported_as_orphaned() {
+        let (_dir, env, state, swap_id, outpoint, ..) = ready_swap_state();
+        let orphan_outpoint = OutPoint::Regular {
+            txid: Txid([3u8; 32]),
+            vout: 0,
+        };
+        let missing_swap = SwapId([99u8; 32]);
+        let mut rwtxn = env.write_txn().unwrap();
+        state
+            .lock_output_to_swap(&mut rwtxn, &orphan_outpoint, &missing_swap)
+            .unwrap();
+        rwtxn.commit().unwrap();
+
+        let spend = |outpoint| Transaction {
+            inputs: vec![(outpoint, [0u8; 32])],
+            ..Default::default()
+        };
+        let rotxn = env.read_txn().unwrap();
+        let result =
+            validate_no_locked_outputs(&state, &rotxn, &spend(orphan_outpoint));
+        assert!(
+            matches!(
+                result,
+                Err(Error::OrphanedLock { outpoint, swap_id })
+                    if outpoint == orphan_outpoint && swap_id == missing_swap
+            ),
+            "expected OrphanedLock, got {result:?}"
+        );
+        let result =
+            validate_no_locked_outputs(&state, &rotxn, &spend(outpoint));
+        assert!(
+            matches!(result, Err(Error::InvalidTransaction(_))),
+            "a live lock is an ordinary rejection, got {result:?}"
+        );
+        let _ = swap_id;
+
+        // Cleanup removes exactly the orphaned lock.
+        let mut rwtxn = env.write_txn().unwrap();
+        assert_eq!(state.cleanup_orphaned_locks(&mut rwtxn).unwrap(), 1);
+        assert_eq!(
+            state
+                .is_output_locked_to_swap(&rwtxn, &orphan_outpoint)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            state.is_output_locked_to_swap(&rwtxn, &outpoint).unwrap(),
+            Some(swap_id)
         );
     }
 }

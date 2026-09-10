@@ -157,6 +157,11 @@ pub enum Error {
     WithdrawalBundle(#[from] WithdrawalBundleError),
     #[error("Swap not found: {swap_id}")]
     SwapNotFound { swap_id: SwapId },
+    #[error(
+        "Input {outpoint} is locked to swap {swap_id}, which does not exist \
+         or cannot be read (orphaned lock)"
+    )]
+    OrphanedLock { outpoint: OutPoint, swap_id: SwapId },
     #[error("Only the swap creator can cancel or delete this swap")]
     SwapNotCreator,
     #[error("Invalid transaction: {0}")]
