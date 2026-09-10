@@ -42,6 +42,14 @@ pub enum InvalidHeader {
 pub enum Error {
     #[error("failed to verify authorization")]
     Authorization,
+    #[error(
+        "wrong number of authorizations: {inputs} inputs need {inputs} \
+         authorizations, transaction carries {authorizations}"
+    )]
+    WrongAuthorizationCount {
+        inputs: usize,
+        authorizations: usize,
+    },
     #[error(transparent)]
     AmountOverflow(#[from] AmountOverflowError),
     #[error(transparent)]

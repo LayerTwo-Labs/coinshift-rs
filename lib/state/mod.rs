@@ -464,6 +464,18 @@ impl State {
             }
         }
 
+        // One authorization per input, checked before pairing them up: `zip`
+        // stops at the shorter side, so an under-signed transaction would
+        // otherwise have its extra inputs skip the address check and be
+        // accepted here while `verify_body` rejects any block containing it.
+        if transaction.authorizations.len()
+            != filled_transaction.spent_utxos.len()
+        {
+            return Err(Error::WrongAuthorizationCount {
+                inputs: filled_transaction.spent_utxos.len(),
+                authorizations: transaction.authorizations.len(),
+            });
+        }
         let is_swap_claim =
             matches!(transaction.transaction.data, TxData::SwapClaim { .. });
         for (authorization, spent_utxo) in transaction
@@ -2159,5 +2171,144 @@ mod tests {
             matches!(result, Err(Error::SpendWithdrawalOutput)),
             "spending a withdrawal output should be rejected, got {result:?}"
         );
+    }
+
+    mod authorization_count {
+        use bitcoin::Amount;
+
+        use super::*;
+        use crate::{
+            authorization::{Authorization, SigningKey, get_address, sign},
+            types::{
+                AccumulatorDiff, AuthorizedTransaction, OutPoint, OutPointKey,
+                PointedOutput, Txid, hash,
+            },
+        };
+
+        fn signing_key(seed: u8) -> SigningKey {
+            SigningKey::from_bytes(&[seed; 32])
+        }
+
+        /// Fund `address` with a fresh UTXO and return its outpoint and hash.
+        fn fund(
+            state: &State,
+            rwtxn: &mut sneed::RwTxn,
+            seed: u8,
+            address: Address,
+        ) -> (OutPoint, crate::types::Hash) {
+            let outpoint = OutPoint::Regular {
+                txid: Txid([seed; 32]),
+                vout: 0,
+            };
+            let output = Output {
+                address,
+                content: OutputContent::Value(Amount::from_sat(100_000)),
+            };
+            let utxo_hash = hash(&PointedOutput {
+                outpoint,
+                output: output.clone(),
+            });
+            state
+                .utxos
+                .put(rwtxn, &OutPointKey::from(outpoint), &output)
+                .unwrap();
+            let mut acc = state.get_accumulator(rwtxn).unwrap();
+            let mut diff = AccumulatorDiff::default();
+            diff.insert(utxo_hash.into());
+            acc.apply_diff(diff).unwrap();
+            state.utreexo_accumulator.put(rwtxn, &(), &acc).unwrap();
+            (outpoint, utxo_hash)
+        }
+
+        /// A transaction spending the attacker's UTXO and the victim's UTXO,
+        /// paying everything to the attacker, signed by the attacker only.
+        /// Block validation rejects it (`verify_body` counts authorizations
+        /// against inputs); the mempool path must too, otherwise it is
+        /// gossiped and lands in every miner's block template, where it costs
+        /// them the BMM bribe for a block that never connects.
+        #[test]
+        fn rejects_under_signed_transaction() {
+            let (_dir, env, state) = test_state();
+            let attacker = signing_key(1);
+            let attacker_addr = get_address(&attacker.verifying_key());
+            let victim_addr = get_address(&signing_key(2).verifying_key());
+
+            let mut rwtxn = env.write_txn().unwrap();
+            let attacker_utxo = fund(&state, &mut rwtxn, 11, attacker_addr);
+            let victim_utxo = fund(&state, &mut rwtxn, 12, victim_addr);
+            rwtxn.commit().unwrap();
+
+            let tx = Transaction {
+                inputs: vec![attacker_utxo, victim_utxo],
+                outputs: vec![Output {
+                    address: attacker_addr,
+                    content: OutputContent::Value(Amount::from_sat(199_000)),
+                }],
+                ..Default::default()
+            };
+            let authd_tx = AuthorizedTransaction {
+                authorizations: vec![Authorization {
+                    verifying_key: attacker.verifying_key(),
+                    signature: sign(&attacker, &tx).unwrap(),
+                }],
+                transaction: tx,
+            };
+
+            let rotxn = env.read_txn().unwrap();
+            let result = state.validate_transaction(&rotxn, &authd_tx);
+            assert!(
+                matches!(
+                    result,
+                    Err(Error::WrongAuthorizationCount {
+                        inputs: 2,
+                        authorizations: 1
+                    })
+                ),
+                "under-signed transaction must be rejected, got {result:?}"
+            );
+        }
+
+        /// The mirror case: more authorizations than inputs. `verify_body`
+        /// rejects such a block with `TooManyAuthorizations`.
+        #[test]
+        fn rejects_over_signed_transaction() {
+            let (_dir, env, state) = test_state();
+            let owner = signing_key(1);
+            let owner_addr = get_address(&owner.verifying_key());
+
+            let mut rwtxn = env.write_txn().unwrap();
+            let owner_utxo = fund(&state, &mut rwtxn, 11, owner_addr);
+            rwtxn.commit().unwrap();
+
+            let tx = Transaction {
+                inputs: vec![owner_utxo],
+                outputs: vec![Output {
+                    address: owner_addr,
+                    content: OutputContent::Value(Amount::from_sat(99_000)),
+                }],
+                ..Default::default()
+            };
+            let authorization = Authorization {
+                verifying_key: owner.verifying_key(),
+                signature: sign(&owner, &tx).unwrap(),
+            };
+            let authd_tx = AuthorizedTransaction {
+                authorizations: vec![authorization.clone(), authorization],
+                transaction: tx,
+            };
+
+            let rotxn = env.read_txn().unwrap();
+            let result = state.validate_transaction(&rotxn, &authd_tx);
+            assert!(
+                matches!(
+                    result,
+                    Err(Error::WrongAuthorizationCount {
+                        inputs: 1,
+                        authorizations: 2
+                    })
+                ),
+                "over-signed transaction must be rejected, got {result:?}"
+            );
+        }
     }
 }

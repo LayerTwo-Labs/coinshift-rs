@@ -105,6 +105,21 @@ pub fn get_address(verifying_key: &VerifyingKey) -> Address {
 pub fn verify_authorized_transaction(
     transaction: &AuthorizedTransaction,
 ) -> Result<(), Error> {
+    // Every input needs exactly one authorization. `verify_authorizations`
+    // enforces this for a whole block body; enforce it here too so that the
+    // mempool, RPC and P2P paths cannot accept a transaction that a block
+    // containing it would be rejected for.
+    match transaction
+        .authorizations
+        .len()
+        .cmp(&transaction.transaction.inputs.len())
+    {
+        std::cmp::Ordering::Less => return Err(Error::NotEnoughAuthorizations),
+        std::cmp::Ordering::Equal => (),
+        std::cmp::Ordering::Greater => {
+            return Err(Error::TooManyAuthorizations);
+        }
+    }
     let tx_bytes_canonical = borsh::to_vec(&transaction.transaction)?;
     let messages: Vec<_> = std::iter::repeat_n(
         tx_bytes_canonical.as_slice(),
