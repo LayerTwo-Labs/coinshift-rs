@@ -142,6 +142,7 @@ exceptions = [
     { allow = ["Zlib"], name = "slotmap", version = "1.1.1" },
     { allow = ["Zlib"], name = "typewit", version = "1.15.2" },
     { allow = ["Zlib"], name = "typewit_proc_macros", version = "1.8.1" },
+    { allow = ["Zlib"], name = "zlib-rs", version = "0.5.5" },
 ]
 
 
