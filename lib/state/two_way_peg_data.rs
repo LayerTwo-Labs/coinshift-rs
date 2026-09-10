@@ -1382,9 +1382,12 @@ pub fn disconnect(
             latest_withdrawal_bundle_event_block_hash,
             last_withdrawal_bundle_event_block_hash
         );
-        assert_eq!(block_height - 1, last_withdrawal_bundle_event_block_height);
+        // `connect` records the height of the sidechain tip at the time the
+        // event block was applied, and `disconnect` runs before `disconnect_tip`
+        // lowers the height, so the two must match exactly.
+        assert_eq!(block_height, last_withdrawal_bundle_event_block_height);
         if !state
-            .deposit_blocks
+            .withdrawal_bundle_event_blocks
             .delete(rwtxn, &last_withdrawal_bundle_event_block_seq_idx)
             .map_err(DbError::from)?
         {
@@ -1420,7 +1423,7 @@ pub fn disconnect(
             .map_err(DbError::from)?
             .ok_or(Error::NoDepositBlock)?;
         assert_eq!(latest_deposit_block_hash, last_deposit_block_hash);
-        assert_eq!(block_height - 1, last_deposit_block_height);
+        assert_eq!(block_height, last_deposit_block_height);
         if !state
             .deposit_blocks
             .delete(rwtxn, &last_deposit_block_seq_idx)
@@ -1677,6 +1680,173 @@ mod withdrawal_bundle_reversal_tests {
         assert!(
             state.stxos.try_get(&rwtxn, &key).unwrap().is_none(),
             "disconnect must not re-spend the UTXO restored by the expiry"
+        );
+    }
+}
+
+#[cfg(test)]
+mod event_block_bookkeeping_tests {
+    use bitcoin::hashes::Hash as _;
+    use sneed::Env;
+
+    use super::*;
+    use crate::types::{
+        Accumulator, Address, Txid,
+        proto::mainchain::{BlockInfo, Deposit},
+    };
+
+    fn sat(value: u64) -> bitcoin::Amount {
+        bitcoin::Amount::from_sat(value)
+    }
+
+    /// Build a `State` backed by a fresh temporary LMDB environment.
+    fn test_state() -> (temp_dir::TempDir, Env, State) {
+        let dir = temp_dir::TempDir::new().unwrap();
+        let mut opts = heed::EnvOpenOptions::new();
+        opts.map_size(10 * 1024 * 1024).max_dbs(State::NUM_DBS);
+        let env = unsafe { Env::open(&opts, dir.path()) }.unwrap();
+        let state = State::new(&env).unwrap();
+        (dir, env, state)
+    }
+
+    /// 2WPD carrying one deposit and one `Submitted` withdrawal-bundle event in
+    /// the same parent-chain block.
+    fn two_way_peg_data(
+        event_block_hash: bitcoin::BlockHash,
+        deposit: Deposit,
+        m6id: M6id,
+    ) -> TwoWayPegData {
+        let block_info = BlockInfo {
+            bmm_commitment: None,
+            events: vec![
+                BlockEvent::Deposit(deposit),
+                BlockEvent::WithdrawalBundle(WithdrawalBundleEvent {
+                    m6id,
+                    status: WithdrawalBundleStatus::Submitted,
+                }),
+            ],
+        };
+        let mut two_way_peg_data = TwoWayPegData::default();
+        two_way_peg_data
+            .block_info
+            .insert(event_block_hash, block_info);
+        two_way_peg_data
+    }
+
+    /// Connecting 2WPD records the event block in `deposit_blocks` and in
+    /// `withdrawal_bundle_event_blocks`; disconnecting the same 2WPD must
+    /// remove exactly those two rows, each from its own table. The withdrawal
+    /// branch used to delete from `deposit_blocks` by the withdrawal sequence
+    /// index, leaving the withdrawal row behind and removing a deposit row it
+    /// did not own, so reorg bookkeeping drifted after the first reorg over a
+    /// bundle event.
+    #[test]
+    fn disconnect_removes_rows_from_their_own_tables() {
+        let (_dir, env, state) = test_state();
+        let event_block_hash = bitcoin::BlockHash::from_byte_array([7u8; 32]);
+        let earlier_block_hash = bitcoin::BlockHash::from_byte_array([6u8; 32]);
+
+        // A withdrawal waiting to be bundled, collected at height 9.
+        let withdrawal_outpoint = OutPoint::Regular {
+            txid: Txid([9u8; 32]),
+            vout: 0,
+        };
+        let withdrawal_output = Output {
+            address: Address([1u8; 20]),
+            content: OutputContent::Value(sat(30_000)),
+        };
+        let bundle = WithdrawalBundle::new(
+            9,
+            sat(1_000),
+            BTreeMap::from([(withdrawal_outpoint, withdrawal_output.clone())]),
+            vec![bitcoin::TxOut {
+                value: sat(29_000),
+                script_pubkey: bitcoin::ScriptBuf::new(),
+            }],
+        )
+        .unwrap();
+        let m6id = bundle.compute_m6id();
+
+        let deposit = Deposit {
+            tx_index: 0,
+            outpoint: bitcoin::OutPoint {
+                txid: bitcoin::Txid::from_byte_array([8u8; 32]),
+                vout: 0,
+            },
+            output: Output {
+                address: Address([2u8; 20]),
+                content: OutputContent::Value(sat(10_000)),
+            },
+        };
+        let two_way_peg_data =
+            two_way_peg_data(event_block_hash, deposit, m6id);
+
+        let mut rwtxn = env.write_txn().unwrap();
+        // Sidechain block 10 is the tip; its 2WPD is being connected.
+        state.height.put(&mut rwtxn, &(), &10u32).unwrap();
+        state
+            .tip
+            .put(&mut rwtxn, &(), &BlockHash([10u8; 32]))
+            .unwrap();
+        state
+            .utxos
+            .put(
+                &mut rwtxn,
+                &OutPointKey::from(&withdrawal_outpoint),
+                &withdrawal_output,
+            )
+            .unwrap();
+        state
+            .pending_withdrawal_bundle
+            .put(&mut rwtxn, &(), &(bundle, 9))
+            .unwrap();
+        // The bundle's input must be in the accumulator for connect to spend it.
+        let mut accumulator = Accumulator::default();
+        let mut seed_diff = AccumulatorDiff::default();
+        seed_diff.insert(
+            hash(&PointedOutput {
+                outpoint: withdrawal_outpoint,
+                output: withdrawal_output.clone(),
+            })
+            .into(),
+        );
+        accumulator.apply_diff(seed_diff).unwrap();
+        state
+            .utreexo_accumulator
+            .put(&mut rwtxn, &(), &accumulator)
+            .unwrap();
+        // Rows recorded by an earlier block; they must survive the reorg.
+        state
+            .deposit_blocks
+            .put(&mut rwtxn, &0, &(earlier_block_hash, 3))
+            .unwrap();
+        state
+            .withdrawal_bundle_event_blocks
+            .put(&mut rwtxn, &0, &(earlier_block_hash, 3))
+            .unwrap();
+
+        connect(&state, &mut rwtxn, &two_way_peg_data, None, None).unwrap();
+        assert_eq!(
+            state.deposit_blocks.last(&rwtxn).unwrap(),
+            Some((1, (event_block_hash, 10))),
+            "connect must record the deposit block"
+        );
+        assert_eq!(
+            state.withdrawal_bundle_event_blocks.last(&rwtxn).unwrap(),
+            Some((1, (event_block_hash, 10))),
+            "connect must record the withdrawal bundle event block"
+        );
+
+        disconnect(&state, &mut rwtxn, &two_way_peg_data).unwrap();
+        assert_eq!(
+            state.deposit_blocks.last(&rwtxn).unwrap(),
+            Some((0, (earlier_block_hash, 3))),
+            "disconnect must remove only the disconnected deposit row"
+        );
+        assert_eq!(
+            state.withdrawal_bundle_event_blocks.last(&rwtxn).unwrap(),
+            Some((0, (earlier_block_hash, 3))),
+            "disconnect must remove the disconnected withdrawal event row"
         );
     }
 }
