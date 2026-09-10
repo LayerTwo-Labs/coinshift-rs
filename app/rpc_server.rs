@@ -785,7 +785,11 @@ pub async fn run_server(
         .into_inner();
 
     let http_middleware = tower::ServiceBuilder::new().layer(tracer);
-    let rpc_middleware = RpcServiceBuilder::new().rpc_logger(1024);
+    // Not jsonrpsee's `rpc_logger`: that one logs whole requests, and a
+    // `set_seed_from_mnemonic` request is the wallet mnemonic.
+    let rpc_middleware = RpcServiceBuilder::new().layer(
+        coinshift_app_rpc_api::logger::RedactingRpcLoggerLayer::new(1024),
+    );
 
     let server = Server::builder()
         .set_http_middleware(http_middleware)

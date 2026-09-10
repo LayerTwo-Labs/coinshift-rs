@@ -80,8 +80,8 @@ The CLI talks to the Coinshift RPC server (default `http://localhost:6255`). Use
 | `get-new-address` | Get a new address |
 | `get-wallet-addresses` | List wallet addresses (sorted by base58) |
 | `get-wallet-utxos` | List wallet UTXOs |
-| `recover-from-mnemonic` | Set seed from mnemonic and show addresses + balance |
-| `set-seed-from-mnemonic` | Set wallet seed from mnemonic (no extra output) |
+| `recover-from-mnemonic` | Set seed from mnemonic and show addresses + balance. Prompts for the phrase, or reads it with `--mnemonic-file <path>` (`-` for stdin); `--with-passphrase` prompts for a BIP39 passphrase |
+| `set-seed-from-mnemonic` | Set wallet seed from mnemonic (no extra output). Same input options as `recover-from-mnemonic` |
 | `sidechain-wealth` | Total sidechain wealth (sats) |
 
 ### Deposits / withdrawals / transfers

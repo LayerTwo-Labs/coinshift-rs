@@ -18,6 +18,7 @@ use l2l_openapi::open_api;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+pub mod logger;
 mod schema;
 
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]

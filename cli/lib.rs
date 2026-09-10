@@ -1,5 +1,9 @@
 use std::{
-    collections::HashMap, net::SocketAddr, path::PathBuf, time::Duration,
+    collections::HashMap,
+    io::Read as _,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    time::Duration,
 };
 
 use clap::{Parser, Subcommand};
@@ -16,6 +20,45 @@ fn l1_config_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
         .join("coinshift")
         .join("l1_rpc_configs.json")
+}
+
+/// Read a mnemonic phrase from `path`, from stdin when `path` is `-`, or
+/// from a no-echo terminal prompt when no path is given.
+///
+/// Secrets never come from `argv`: command-line arguments are recorded in
+/// shell history and visible to every process on the machine via `ps`.
+fn read_mnemonic(path: Option<&Path>) -> anyhow::Result<String> {
+    let phrase = match path {
+        Some(path) if path == Path::new("-") => {
+            let mut phrase = String::new();
+            std::io::stdin().read_to_string(&mut phrase)?;
+            phrase
+        }
+        Some(path) => std::fs::read_to_string(path).map_err(|err| {
+            anyhow::anyhow!("failed to read mnemonic file: {err}")
+        })?,
+        None => rpassword::prompt_password("Mnemonic phrase: ")?,
+    };
+    // Normalise whitespace: files often end with a newline, and users may
+    // separate words with several spaces.
+    let phrase = phrase.split_whitespace().collect::<Vec<_>>().join(" ");
+    if phrase.is_empty() {
+        anyhow::bail!("no mnemonic phrase given");
+    }
+    Ok(phrase)
+}
+
+/// Prompt for the BIP39 passphrase when `with_passphrase` is set.
+fn read_passphrase(with_passphrase: bool) -> anyhow::Result<Option<String>> {
+    if !with_passphrase {
+        return Ok(None);
+    }
+    let passphrase = rpassword::prompt_password("BIP39 passphrase: ")?;
+    let confirm = rpassword::prompt_password("Confirm passphrase: ")?;
+    if passphrase != confirm {
+        anyhow::bail!("passphrases do not match");
+    }
+    Ok(Some(passphrase))
 }
 
 fn parse_swap_id(s: &str) -> anyhow::Result<SwapId> {
@@ -148,12 +191,18 @@ pub enum Command {
     ListSwaps,
     /// List swaps for a specific recipient address
     ListSwapsByRecipient { recipient: Address },
-    /// Recover wallet from mnemonic phrase (sets seed, then shows addresses and balance)
+    /// Recover wallet from mnemonic phrase (sets seed, then shows addresses
+    /// and balance). The phrase is read from `--mnemonic-file` or prompted for
+    /// on the terminal, never taken from the command line, so it does not end
+    /// up in shell history or the process list.
     RecoverFromMnemonic {
-        mnemonic: String,
-        /// BIP39 passphrase, if the wallet was created with one
+        /// File containing the mnemonic phrase (or `-` for stdin). Prompts
+        /// on the terminal when omitted.
         #[arg(long)]
-        passphrase: Option<String>,
+        mnemonic_file: Option<PathBuf>,
+        /// Prompt for the BIP39 passphrase the wallet was created with
+        #[arg(long)]
+        with_passphrase: bool,
     },
     /// Reconstruct all swaps from the blockchain
     ReconstructSwaps,
@@ -175,13 +224,19 @@ pub enum Command {
     OpenApiSchema,
     /// Remove a tx from the mempool
     RemoveFromMempool { txid: Txid },
-    /// Set the wallet seed from a mnemonic seed phrase
+    /// Set the wallet seed from a mnemonic seed phrase. The phrase is read
+    /// from `--mnemonic-file` or prompted for on the terminal, never taken
+    /// from the command line, so it does not end up in shell history or the
+    /// process list.
     SetSeedFromMnemonic {
-        mnemonic: String,
-        /// BIP39 passphrase; changes the derived keys, so record it with the
-        /// mnemonic
+        /// File containing the mnemonic phrase (or `-` for stdin). Prompts
+        /// on the terminal when omitted.
         #[arg(long)]
-        passphrase: Option<String>,
+        mnemonic_file: Option<PathBuf>,
+        /// Prompt for a BIP39 passphrase; it changes the derived keys, so
+        /// record it with the mnemonic
+        #[arg(long)]
+        with_passphrase: bool,
     },
     /// Set L1 RPC config for a parent chain (url required; user/password optional)
     SetL1Config {
@@ -415,9 +470,11 @@ where
             serde_json::to_string_pretty(&swaps)?
         }
         Command::RecoverFromMnemonic {
-            mnemonic,
-            passphrase,
+            mnemonic_file,
+            with_passphrase,
         } => {
+            let mnemonic = read_mnemonic(mnemonic_file.as_deref())?;
+            let passphrase = read_passphrase(with_passphrase)?;
             rpc_client
                 .set_seed_from_mnemonic(mnemonic, passphrase)
                 .await?;
@@ -474,9 +531,11 @@ where
             String::default()
         }
         Command::SetSeedFromMnemonic {
-            mnemonic,
-            passphrase,
+            mnemonic_file,
+            with_passphrase,
         } => {
+            let mnemonic = read_mnemonic(mnemonic_file.as_deref())?;
+            let passphrase = read_passphrase(with_passphrase)?;
             let () = rpc_client
                 .set_seed_from_mnemonic(mnemonic, passphrase)
                 .await?;
@@ -585,8 +644,11 @@ impl Cli {
                 self.timeout.unwrap_or(DEFAULT_TIMEOUT),
             ))
             .set_rpc_middleware(
-                jsonrpsee::core::middleware::RpcServiceBuilder::new()
-                    .rpc_logger(1024),
+                jsonrpsee::core::middleware::RpcServiceBuilder::new().layer(
+                    coinshift_app_rpc_api::logger::RedactingRpcLoggerLayer::new(
+                        1024,
+                    ),
+                ),
             )
             .set_headers(HeaderMap::from_iter([(
                 http::header::HeaderName::from_static("x-request-id"),

@@ -14,6 +14,8 @@ coinshift = { path = "../lib" }
 serde_json = { workspace = true }
 utoipa = { workspace = true }
 serde.workspace = true
+tower = "0.5.2"
+tracing = { workspace = true }
 
 [lints]
 workspace = true
