@@ -193,10 +193,16 @@ pub trait Rpc {
     #[method(name = "remove_from_mempool")]
     async fn remove_from_mempool(&self, txid: Txid) -> RpcResult<()>;
 
-    /// Set the wallet seed from a mnemonic seed phrase
+    /// Set the wallet seed from a mnemonic seed phrase and optional BIP39
+    /// passphrase. The passphrase is part of the key material: the same
+    /// phrase with a different passphrase is a different wallet.
     #[open_api_method(output_schema(ToSchema))]
     #[method(name = "set_seed_from_mnemonic")]
-    async fn set_seed_from_mnemonic(&self, mnemonic: String) -> RpcResult<()>;
+    async fn set_seed_from_mnemonic(
+        &self,
+        mnemonic: String,
+        passphrase: Option<String>,
+    ) -> RpcResult<()>;
 
     /// Get total sidechain wealth
     #[method(name = "sidechain_wealth")]

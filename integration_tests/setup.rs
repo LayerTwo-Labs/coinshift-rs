@@ -200,7 +200,7 @@ impl Sidechain for PostSetup {
             }
         };
         tracing::debug!("Setting mnemonic seed phrase");
-        let () = rpc_client.set_seed_from_mnemonic(mnemonic).await?;
+        let () = rpc_client.set_seed_from_mnemonic(mnemonic, None).await?;
         tracing::debug!("Generating deposit address");
         let deposit_address = rpc_client.get_new_address().await?;
         Ok(Self {

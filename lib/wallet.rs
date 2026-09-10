@@ -221,14 +221,35 @@ impl Wallet {
         }
     }
 
-    /// Set the seed from a mnemonic seed phrase,
-    /// if the seed does not already exist
-    pub fn set_seed_from_mnemonic(&self, mnemonic: &str) -> Result<(), Error> {
+    /// Derive the 64-byte BIP39 seed from a mnemonic phrase and passphrase.
+    ///
+    /// The passphrase is part of the key material: the same phrase with a
+    /// different passphrase yields an unrelated key tree. An empty string is
+    /// the conventional "no passphrase". Normalisation (NFKD) is handled by
+    /// the bip39 crate.
+    pub fn seed_from_mnemonic(
+        mnemonic: &str,
+        passphrase: &str,
+    ) -> Result<[u8; 64], Error> {
         let mnemonic =
             bip39::Mnemonic::from_phrase(mnemonic, bip39::Language::English)
                 .map_err(Error::ParseMnemonic)?;
-        let seed = bip39::Seed::new(&mnemonic, "");
-        let seed_bytes: [u8; 64] = seed.as_bytes().try_into().unwrap();
+        let seed = bip39::Seed::new(&mnemonic, passphrase);
+        let seed_bytes: [u8; 64] = seed
+            .as_bytes()
+            .try_into()
+            .expect("BIP39 seeds are always 64 bytes");
+        Ok(seed_bytes)
+    }
+
+    /// Set the seed from a mnemonic seed phrase and passphrase,
+    /// if the seed does not already exist
+    pub fn set_seed_from_mnemonic(
+        &self,
+        mnemonic: &str,
+        passphrase: &str,
+    ) -> Result<(), Error> {
+        let seed_bytes = Self::seed_from_mnemonic(mnemonic, passphrase)?;
         self.set_seed(&seed_bytes)
     }
 
@@ -1145,6 +1166,45 @@ mod tests {
         let dir = temp_dir::TempDir::new().unwrap();
         let wallet = Wallet::new(dir.path()).unwrap();
         (dir, wallet)
+    }
+
+    const TEST_MNEMONIC: &str = "abandon abandon abandon abandon abandon \
+        abandon abandon abandon abandon abandon abandon about";
+
+    /// The passphrase must participate in seed derivation; a wallet that
+    /// accepted a passphrase and then ignored it would derive keys the user
+    /// cannot reproduce elsewhere with the mnemonic + passphrase they saved.
+    #[test]
+    fn passphrase_changes_the_derived_seed() {
+        let without = Wallet::seed_from_mnemonic(TEST_MNEMONIC, "").unwrap();
+        let with = Wallet::seed_from_mnemonic(TEST_MNEMONIC, "TREZOR").unwrap();
+        assert_ne!(without, with);
+        // BIP39 reference vector for this phrase with passphrase "TREZOR".
+        assert_eq!(
+            hex::encode(with),
+            "c55257c360c07c72029aebc1b53c05ed0362ada38ead3e3e9efa3708e5349553\
+             1f09a6987599d18264c1e1c92f2cf141630c7a3c4ab7c81b2f001698e7463b04"
+        );
+    }
+
+    /// The passphrase must be applied when the seed is stored, and only an
+    /// identical (mnemonic, passphrase) pair may be set again afterwards.
+    #[test]
+    fn set_seed_from_mnemonic_applies_passphrase() {
+        let (_dir, wallet) = test_wallet();
+        wallet
+            .set_seed_from_mnemonic(TEST_MNEMONIC, "TREZOR")
+            .unwrap();
+        assert!(
+            matches!(
+                wallet.set_seed_from_mnemonic(TEST_MNEMONIC, ""),
+                Err(Error::SeedAlreadyExists)
+            ),
+            "same mnemonic with a different passphrase is a different seed"
+        );
+        wallet
+            .set_seed_from_mnemonic(TEST_MNEMONIC, "TREZOR")
+            .expect("re-setting the identical seed is a no-op");
     }
 
     /// When the accumulated total exactly reaches the target, coin selection

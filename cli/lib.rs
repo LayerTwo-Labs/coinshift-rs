@@ -149,7 +149,12 @@ pub enum Command {
     /// List swaps for a specific recipient address
     ListSwapsByRecipient { recipient: Address },
     /// Recover wallet from mnemonic phrase (sets seed, then shows addresses and balance)
-    RecoverFromMnemonic { mnemonic: String },
+    RecoverFromMnemonic {
+        mnemonic: String,
+        /// BIP39 passphrase, if the wallet was created with one
+        #[arg(long)]
+        passphrase: Option<String>,
+    },
     /// Reconstruct all swaps from the blockchain
     ReconstructSwaps,
     /// Cancel a swap (only Pending swaps). Unlocks outputs and marks as cancelled.
@@ -171,7 +176,13 @@ pub enum Command {
     /// Remove a tx from the mempool
     RemoveFromMempool { txid: Txid },
     /// Set the wallet seed from a mnemonic seed phrase
-    SetSeedFromMnemonic { mnemonic: String },
+    SetSeedFromMnemonic {
+        mnemonic: String,
+        /// BIP39 passphrase; changes the derived keys, so record it with the
+        /// mnemonic
+        #[arg(long)]
+        passphrase: Option<String>,
+    },
     /// Set L1 RPC config for a parent chain (url required; user/password optional)
     SetL1Config {
         #[arg(long, value_parser = parse_parent_chain)]
@@ -403,8 +414,13 @@ where
             let swaps = rpc_client.list_swaps_by_recipient(recipient).await?;
             serde_json::to_string_pretty(&swaps)?
         }
-        Command::RecoverFromMnemonic { mnemonic } => {
-            rpc_client.set_seed_from_mnemonic(mnemonic).await?;
+        Command::RecoverFromMnemonic {
+            mnemonic,
+            passphrase,
+        } => {
+            rpc_client
+                .set_seed_from_mnemonic(mnemonic, passphrase)
+                .await?;
             let addresses = rpc_client.get_wallet_addresses().await?;
             let balance = rpc_client.balance().await?;
             let addrs_json = serde_json::to_string_pretty(&addresses)?;
@@ -457,8 +473,13 @@ where
             let () = rpc_client.remove_from_mempool(txid).await?;
             String::default()
         }
-        Command::SetSeedFromMnemonic { mnemonic } => {
-            let () = rpc_client.set_seed_from_mnemonic(mnemonic).await?;
+        Command::SetSeedFromMnemonic {
+            mnemonic,
+            passphrase,
+        } => {
+            let () = rpc_client
+                .set_seed_from_mnemonic(mnemonic, passphrase)
+                .await?;
             String::default()
         }
         Command::SetL1Config {

@@ -674,7 +674,7 @@ impl App {
         let wallet = Wallet::new(&config.datadir.join("wallet.mdb"))?;
         if let Some(seed_phrase_path) = &config.mnemonic_seed_phrase_path {
             let mnemonic = std::fs::read_to_string(seed_phrase_path)?;
-            let () = wallet.set_seed_from_mnemonic(mnemonic.as_str())?;
+            let () = wallet.set_seed_from_mnemonic(mnemonic.as_str(), "")?;
         }
 
         tracing::info!(

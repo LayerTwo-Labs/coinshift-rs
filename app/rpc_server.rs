@@ -294,15 +294,18 @@ impl RpcServer for RpcServerImpl {
         self.app.node.remove_from_mempool(txid).map_err(custom_err)
     }
 
-    async fn set_seed_from_mnemonic(&self, mnemonic: String) -> RpcResult<()> {
-        let mnemonic =
-            bip39::Mnemonic::from_phrase(&mnemonic, bip39::Language::English)
-                .map_err(custom_err)?;
-        let seed = bip39::Seed::new(&mnemonic, "");
-        let seed_bytes: [u8; 64] = seed.as_bytes().try_into().map_err(
-            |err: <[u8; 64] as TryFrom<&[u8]>>::Error| custom_err(err),
-        )?;
-        self.app.wallet.set_seed(&seed_bytes).map_err(custom_err)
+    async fn set_seed_from_mnemonic(
+        &self,
+        mnemonic: String,
+        passphrase: Option<String>,
+    ) -> RpcResult<()> {
+        self.app
+            .wallet
+            .set_seed_from_mnemonic(
+                &mnemonic,
+                passphrase.as_deref().unwrap_or_default(),
+            )
+            .map_err(custom_err)
     }
 
     async fn sidechain_wealth_sats(&self) -> RpcResult<u64> {
