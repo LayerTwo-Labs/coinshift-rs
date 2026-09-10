@@ -13,6 +13,7 @@ mod app;
 mod cli;
 mod gui;
 mod line_buffer;
+mod rpc_auth;
 mod rpc_server;
 mod util;
 
@@ -277,10 +278,16 @@ fn main() -> anyhow::Result<()> {
         // spawn rpc server
         app.runtime.spawn({
             let app = app.clone();
+            let rpc_cookie_file = config.rpc_cookie_file.clone();
             async move {
                 tracing::info!("starting RPC server at `{}`", config.rpc_addr);
-                if let Err(err) =
-                    rpc_server::run_server(app, config.rpc_addr).await
+                if let Err(err) = rpc_server::run_server(
+                    app,
+                    config.rpc_addr,
+                    config.rpc_allow_remote,
+                    rpc_cookie_file.as_deref(),
+                )
+                .await
                 {
                     app_tx.send(err).expect("failed to send error to app");
                 }

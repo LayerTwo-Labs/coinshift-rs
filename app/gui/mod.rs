@@ -259,7 +259,11 @@ impl EguiApp {
         cc.egui_ctx.set_fonts(FONT_DEFINITIONS.clone());
         let bottom_panel = BottomPanel::new(app.clone());
         let coins = Coins::new(app.as_ref());
-        let console_logs = ConsoleLogs::new(logs_capture, rpc_addr);
+        let console_logs = ConsoleLogs::new(
+            logs_capture,
+            rpc_addr,
+            config.rpc_cookie_file.clone(),
+        );
         let l1_config = L1Config::new(&cc.egui_ctx);
         let height = app
             .as_ref()
@@ -327,6 +331,10 @@ impl eframe::App for EguiApp {
                                 Ok(app) => {
                                     let app_for_rpc = app.clone();
                                     let rpc_addr = self.config.rpc_addr;
+                                    let rpc_allow_remote =
+                                        self.config.rpc_allow_remote;
+                                    let rpc_cookie_file =
+                                        self.config.rpc_cookie_file.clone();
                                     app.runtime.spawn(async move {
                                         tracing::info!(
                                             "starting RPC server at `{}`",
@@ -336,6 +344,8 @@ impl eframe::App for EguiApp {
                                             rpc_server::run_server(
                                                 app_for_rpc,
                                                 rpc_addr,
+                                                rpc_allow_remote,
+                                                rpc_cookie_file.as_deref(),
                                             )
                                             .await
                                         {

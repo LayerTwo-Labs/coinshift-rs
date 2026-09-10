@@ -162,6 +162,20 @@ pub(super) struct RunArgs {
     /// Socket address to host the RPC server
     #[arg(default_value_t = DEFAULT_RPC_ADDR, long, short)]
     rpc_addr: SocketAddr,
+    /// Allow --rpc-addr to be a non-loopback address. The RPC server controls
+    /// the wallet, so exposing it on a network interface needs an explicit
+    /// opt-in; keep cookie authentication on and put TLS in front of it.
+    #[arg(long)]
+    rpc_allow_remote: bool,
+    /// Where to write the RPC cookie file (`__cookie__:<secret>`, mode 0600).
+    /// Clients must send it as HTTP basic auth. Defaults to `rpc.cookie` in
+    /// the data directory.
+    #[arg(long)]
+    rpc_cookie_file: Option<PathBuf>,
+    /// Disable RPC authentication entirely. Any local process can then move
+    /// wallet funds, so only use it in throwaway test setups.
+    #[arg(long)]
+    rpc_no_auth: bool,
 
     /// Add a default Bitcoin Signet entry (local node, 127.0.0.1:38332) to
     /// the L1 config before start, unless one exists
@@ -186,6 +200,9 @@ pub struct Config {
     pub net_addr: SocketAddr,
     pub network: Network,
     pub rpc_addr: SocketAddr,
+    pub rpc_allow_remote: bool,
+    /// `None` disables RPC authentication.
+    pub rpc_cookie_file: Option<PathBuf>,
 }
 
 impl RunArgs {
@@ -211,6 +228,13 @@ impl RunArgs {
         } else {
             saturating_pred_level(self.log_level)
         };
+        let rpc_cookie_file = if self.rpc_no_auth {
+            None
+        } else {
+            Some(self.rpc_cookie_file.unwrap_or_else(|| {
+                crate::rpc_auth::default_cookie_path(&self.datadir.0)
+            }))
+        };
         Ok(Config {
             datadir: self.datadir.0,
             headless: self.headless,
@@ -222,6 +246,8 @@ impl RunArgs {
             net_addr: self.net_addr,
             network: self.network,
             rpc_addr: self.rpc_addr,
+            rpc_allow_remote: self.rpc_allow_remote,
+            rpc_cookie_file,
         })
     }
 }

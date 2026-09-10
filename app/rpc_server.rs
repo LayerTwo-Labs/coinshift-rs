@@ -743,8 +743,25 @@ impl MakeRequestId for RequestIdMaker {
 pub async fn run_server(
     app: App,
     rpc_addr: SocketAddr,
+    rpc_allow_remote: bool,
+    rpc_cookie_file: Option<&std::path::Path>,
 ) -> anyhow::Result<SocketAddr> {
     const REQUEST_ID_HEADER: &str = "x-request-id";
+
+    let () = crate::rpc_auth::check_bind_address(rpc_addr, rpc_allow_remote)?;
+    // Every method here can move funds or change the seed, so the check runs
+    // in the HTTP layer before any JSON-RPC parsing. `None` is the explicit
+    // `--rpc-no-auth` opt-out.
+    let auth = match rpc_cookie_file {
+        Some(path) => Some(crate::rpc_auth::RpcAuth::generate(path)?),
+        None => {
+            tracing::warn!(
+                "RPC authentication is DISABLED (--rpc-no-auth): any process \
+                 that can reach {rpc_addr} can spend the wallet"
+            );
+            None
+        }
+    };
 
     // Ordering here matters! Order here is from official docs on request IDs tracings
     // https://docs.rs/tower-http/latest/tower_http/request_id/index.html#using-trace
@@ -784,7 +801,13 @@ pub async fn run_server(
         )))
         .into_inner();
 
-    let http_middleware = tower::ServiceBuilder::new().layer(tracer);
+    let http_middleware = tower::ServiceBuilder::new()
+        .layer(tracer)
+        .option_layer(auth.map(|mut auth| {
+            tower_http::validate_request::ValidateRequestHeaderLayer::custom(
+                move |request: &mut http::Request<_>| auth.validate(request),
+            )
+        }));
     // Not jsonrpsee's `rpc_logger`: that one logs whole requests, and a
     // `set_seed_from_mnemonic` request is the wallet mnemonic.
     let rpc_middleware = RpcServiceBuilder::new().layer(

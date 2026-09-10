@@ -15,6 +15,56 @@ use coinshift::types::{Address, ParentChainType, SwapId, Txid};
 use coinshift_app_rpc_api::RpcClient;
 use tracing_subscriber::{filter::Targets, layer::SubscriberExt as _};
 
+/// Default location of the node's RPC cookie: the default data directory.
+pub fn default_rpc_cookie_path() -> Option<PathBuf> {
+    Some(
+        dirs::data_dir()?
+            .join("coinshift")
+            .join(coinshift_app_rpc_api::auth::COOKIE_FILE_NAME),
+    )
+}
+
+/// The `Authorization` header to send, from the given cookie file or the
+/// default one. An explicitly empty path means "no credentials". A missing
+/// default cookie is not an error, since the node may run with
+/// `--rpc-no-auth` or on another machine; an explicit path that cannot be
+/// read is.
+pub fn rpc_authorization_header(
+    cookie_file: Option<&Path>,
+) -> anyhow::Result<Option<http::HeaderValue>> {
+    use coinshift_app_rpc_api::auth::{basic_auth_header, read_cookie};
+    match cookie_file {
+        Some(path) if path.as_os_str().is_empty() => Ok(None),
+        Some(path) => {
+            let (user, secret) = read_cookie(path).map_err(|err| {
+                anyhow::anyhow!(
+                    "failed to read RPC cookie {}: {err}",
+                    path.display()
+                )
+            })?;
+            Ok(Some(basic_auth_header(&user, &secret)))
+        }
+        None => {
+            let Some(path) = default_rpc_cookie_path() else {
+                return Ok(None);
+            };
+            match read_cookie(&path) {
+                Ok((user, secret)) => {
+                    Ok(Some(basic_auth_header(&user, &secret)))
+                }
+                Err(err) => {
+                    tracing::debug!(
+                        path = %path.display(),
+                        error = %err,
+                        "no RPC cookie at the default location; sending no credentials"
+                    );
+                    Ok(None)
+                }
+            }
+        }
+    }
+}
+
 fn l1_config_path() -> PathBuf {
     dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -307,6 +357,13 @@ pub struct Cli {
     /// Log level
     #[arg(default_value_t = tracing::Level::INFO, long)]
     pub log_level: tracing::Level,
+
+    /// RPC cookie file written by the node (`rpc.cookie` in its data
+    /// directory); its contents are sent as HTTP basic auth. Defaults to the
+    /// default data directory's cookie. Pass an empty path to send no
+    /// credentials (node started with --rpc-no-auth).
+    #[arg(long)]
+    pub rpc_cookie_file: Option<PathBuf>,
 
     #[command(subcommand)]
     pub command: Command,
@@ -644,6 +701,16 @@ impl Cli {
 
         tracing::info!("request ID: {}", request_id);
 
+        let mut headers = HeaderMap::from_iter([(
+            http::header::HeaderName::from_static("x-request-id"),
+            http::header::HeaderValue::from_str(&request_id)?,
+        )]);
+        if let Some(authorization) =
+            rpc_authorization_header(self.rpc_cookie_file.as_deref())?
+        {
+            headers.insert(http::header::AUTHORIZATION, authorization);
+        }
+
         let builder = HttpClientBuilder::default()
             .request_timeout(Duration::from_secs(
                 self.timeout.unwrap_or(DEFAULT_TIMEOUT),
@@ -655,10 +722,7 @@ impl Cli {
                     ),
                 ),
             )
-            .set_headers(HeaderMap::from_iter([(
-                http::header::HeaderName::from_static("x-request-id"),
-                http::header::HeaderValue::from_str(&request_id)?,
-            )]));
+            .set_headers(headers);
 
         let client = builder.build(self.rpc_url)?;
         let result = handle_command(&client, self.command).await?;

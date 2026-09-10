@@ -30,15 +30,23 @@ pub struct ConsoleLogs {
     line_buffer: LineBuffer,
     command_input: String,
     rpc_addr: url::Url,
+    /// Cookie file of this node's own RPC server; `None` when it runs
+    /// without authentication.
+    rpc_cookie_file: Option<std::path::PathBuf>,
     running_command: Arc<AtomicBool>,
 }
 
 impl ConsoleLogs {
-    pub fn new(line_buffer: LineBuffer, rpc_addr: url::Url) -> Self {
+    pub fn new(
+        line_buffer: LineBuffer,
+        rpc_addr: url::Url,
+        rpc_cookie_file: Option<std::path::PathBuf>,
+    ) -> Self {
         Self {
             line_buffer,
             command_input: String::new(),
             rpc_addr,
+            rpc_cookie_file,
             running_command: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -73,6 +81,11 @@ impl ConsoleLogs {
             command,
             verbose: false,
             log_level: tracing::Level::INFO,
+            // An empty path means "send no credentials", matching a node
+            // started with --rpc-no-auth.
+            rpc_cookie_file: Some(
+                self.rpc_cookie_file.clone().unwrap_or_default(),
+            ),
         };
         app.runtime.spawn({
             let running_command = self.running_command.clone();

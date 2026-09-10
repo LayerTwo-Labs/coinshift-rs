@@ -15,11 +15,12 @@ dirs = "6.0.0"
 eframe = "0.31.0"
 fallible-iterator = { workspace = true }
 futures = { workspace = true }
+getrandom = "0.2.17"
 hex = "0.4"
 http = { workspace = true }
 human-size = "0.4.3"
 include_path = "0.1.1"
-jsonrpsee = { workspace = true, features = ["server"] }
+jsonrpsee = { workspace = true, features = ["server", "http-client"] }
 mimalloc = { version = "0.1.48", features = ["v3"] }
 parking_lot = { workspace = true }
 poll-promise = { version = "0.3.0", features = ["tokio"] }
@@ -38,7 +39,7 @@ tonic = { workspace = true }
 tonic-health = "0.14.6"
 # needs to line up with jsonrpsee tower version...
 tower = "0.5.2"
-tower-http = { version = "0.7.0", features = ["request-id", "trace"] }
+tower-http = { version = "0.7.0", features = ["request-id", "trace", "validate-request"] }
 tracing = { workspace = true }
 tracing-appender = "0.2.3"
 tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
@@ -47,6 +48,9 @@ utoipa = { workspace = true }
 uuid = { workspace = true }
 reqwest = { version = "0.12", features = ["blocking", "json"] }
 serde_json = { workspace = true }
+
+[dev-dependencies]
+temp-dir = "0.2"
 
 [lints]
 workspace = true

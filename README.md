@@ -51,6 +51,7 @@ Run two or more Coinshift instances on the same machine by giving each its own *
 | RPC        | `127.0.0.1:6255`        | `--rpc-addr 127.0.0.1:6256`        |
 | P2P        | `0.0.0.0:4255`          | `--net-addr 0.0.0.0:4256`          |
 | CLI target | `http://localhost:6255` | `--rpc-url http://localhost:6256`   |
+| RPC cookie | `<datadir>/rpc.cookie`  | `--rpc-cookie-file ~/coinshift-instance2/rpc.cookie` (CLI) |
 
 **Example (second instance):**
 
@@ -63,12 +64,32 @@ cargo run --bin coinshift_app -- --headless \
 
 ```bash
 # Talk to the second instance with the CLI
-cargo run --bin coinshift_app_cli -- --rpc-url http://localhost:6256 balance
+cargo run --bin coinshift_app_cli -- \
+  --rpc-url http://localhost:6256 \
+  --rpc-cookie-file ~/coinshift-instance2/rpc.cookie \
+  balance
 ```
+
+## RPC authentication
+
+The JSON-RPC server controls the wallet: it can transfer, withdraw, mine with
+the enforcer's L1 wallet and set the seed. Every request therefore needs the
+credentials from the node's **cookie file**, written on each start to
+`<datadir>/rpc.cookie` (mode 0600) as `__cookie__:<secret>`, in the style of
+Bitcoin Core. Send it as HTTP basic auth (or the secret alone as a bearer
+token). The CLI reads the default data directory's cookie automatically;
+point it elsewhere with `--rpc-cookie-file`.
+
+- `--rpc-addr` must be a loopback address unless you pass
+  `--rpc-allow-remote`; if you do, keep the cookie on and terminate TLS in
+  front of the node.
+- `--rpc-cookie-file <path>` changes where the node writes the cookie.
+- `--rpc-no-auth` disables authentication. Any local process can then spend
+  the wallet; use it only in throwaway test setups.
 
 ## CLI commands
 
-The CLI talks to the Coinshift RPC server (default `http://localhost:6255`). Use `--rpc-url` to override. Run `cargo run --bin coinshift_app_cli <command> --help` for per-command help.
+The CLI talks to the Coinshift RPC server (default `http://localhost:6255`). Use `--rpc-url` to override and `--rpc-cookie-file` if the node's data directory is not the default. Run `cargo run --bin coinshift_app_cli <command> --help` for per-command help.
 
 ### Wallet / seed
 
