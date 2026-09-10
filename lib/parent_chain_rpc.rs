@@ -159,6 +159,26 @@ pub struct Vout {
 pub struct ScriptPubKey {
     pub address: Option<String>,
     pub addresses: Option<Vec<String>>,
+    /// Raw script, hex. Needed to read the swap commitment out of an
+    /// `OP_RETURN` output.
+    #[serde(default)]
+    pub hex: Option<String>,
+}
+
+impl TransactionInfo {
+    /// The swap commitment carried by this transaction, if any output is an
+    /// `OP_RETURN` in the `CSFT || swap_id || claimer` format.
+    pub fn swap_commitment(
+        &self,
+    ) -> Option<(crate::types::SwapId, crate::types::Address)> {
+        self.vout.iter().find_map(|vout| {
+            let script_bytes =
+                hex::decode(vout.script_pub_key.hex.as_ref()?).ok()?;
+            crate::state::l1_proof::parse_commitment(
+                bitcoin::Script::from_bytes(&script_bytes),
+            )
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -186,7 +206,7 @@ impl ParentChainRpcClient {
         Self { config, client }
     }
 
-    fn call<T: for<'de> Deserialize<'de>>(
+    pub(crate) fn call<T: for<'de> Deserialize<'de>>(
         &self,
         method: &str,
         params: serde_json::Value,
@@ -731,7 +751,7 @@ pub fn get_rpc_config(_parent_chain: ParentChainType) -> Option<RpcConfig> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// Truncating `as u64` after `* 1e8` is the bug this helper replaces.
@@ -902,7 +922,9 @@ mod tests {
 
     /// A minimal JSON-RPC server for one connection at a time. `respond`
     /// maps a method name to the `result` (or a JSON-RPC error when `Err`).
-    fn fake_rpc<F>(respond: F) -> (String, std::thread::JoinHandle<Vec<String>>)
+    pub(crate) fn fake_rpc<F>(
+        respond: F,
+    ) -> (String, std::thread::JoinHandle<Vec<String>>)
     where
         F: Fn(&str) -> Result<serde_json::Value, String> + Send + 'static,
     {

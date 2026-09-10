@@ -261,8 +261,14 @@ pub trait Rpc {
     #[method(name = "reconstruct_swaps")]
     async fn reconstruct_swaps(&self) -> RpcResult<u32>;
 
-    /// Update swap L1 transaction ID (called when L1 transaction is detected).
-    /// For open swaps, pass l2_claimer_address so the claim is only valid for that address.
+    /// Record the L1 transaction that fills a swap on this node.
+    ///
+    /// Advisory: consensus decides a claim from the proof the claim carries,
+    /// not from this record. It drives the swap's displayed state and is the
+    /// txid the node builds a claim proof from. When a parent-chain RPC is
+    /// configured, the transaction is looked up and its confirmations and
+    /// committed claimer are taken from the chain; `confirmations` and
+    /// `l2_claimer_address` are then only checked for agreement.
     #[method(name = "update_swap_l1_txid")]
     async fn update_swap_l1_txid(
         &self,

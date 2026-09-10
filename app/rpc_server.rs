@@ -456,6 +456,72 @@ impl RpcServer for RpcServerImpl {
         let l1_txid =
             SwapTxId::from_hex(&l1_txid_hex).map_err(custom_err_msg)?;
 
+        // This record is advisory: consensus decides claims from the proof
+        // in the claim itself. But a wrong record misleads the UI and makes
+        // the node build a proof for the wrong transaction, so when a
+        // parent-chain RPC is configured the transaction is looked up and
+        // the confirmation count and committed claimer are taken from the
+        // chain rather than from the caller.
+        let (confirmations, l2_claimer_address) = {
+            let rotxn = self.app.node.env().read_txn().map_err(custom_err)?;
+            let swap = self
+                .app
+                .node
+                .state()
+                .get_swap(&rotxn, &swap_id)
+                .map_err(custom_err)?
+                .ok_or_else(|| custom_err_msg("Swap not found"))?;
+            match App::l1_rpc_config(swap.parent_chain) {
+                Some(config) => {
+                    let client =
+                        coinshift::parent_chain_rpc::ParentChainRpcClient::new(
+                            config,
+                        );
+                    let tx_info = client
+                        .get_transaction(&l1_txid.to_hex_rpc())
+                        .map_err(|err| {
+                            custom_err_msg(format!(
+                                "L1 transaction {} not found on the configured \
+                                 {:?} node: {err}",
+                                l1_txid.to_hex_rpc(),
+                                swap.parent_chain
+                            ))
+                        })?;
+                    let (committed_swap, claimer) =
+                        tx_info.swap_commitment().ok_or_else(|| {
+                            custom_err_msg(
+                                "L1 transaction carries no swap commitment \
+                                 (OP_RETURN); it cannot fill any swap",
+                            )
+                        })?;
+                    if committed_swap != swap_id {
+                        return Err(custom_err_msg(format!(
+                            "L1 transaction commits to swap {committed_swap}, \
+                             not {swap_id}"
+                        )));
+                    }
+                    if let Some(requested) = l2_claimer_address
+                        && requested != claimer
+                    {
+                        return Err(custom_err_msg(format!(
+                            "L1 transaction commits to claimer {claimer}, not \
+                             {requested}"
+                        )));
+                    }
+                    (tx_info.confirmations, Some(claimer))
+                }
+                None => {
+                    tracing::warn!(
+                        %swap_id,
+                        "update_swap_l1_txid: no parent-chain RPC configured; \
+                         recording caller-supplied txid and confirmations \
+                         unverified (display only; claims are proven separately)"
+                    );
+                    (confirmations, l2_claimer_address)
+                }
+            }
+        };
+
         let mut rwtxn = self.app.node.env().write_txn().map_err(custom_err)?;
 
         // Get current sidechain block hash and height for reference

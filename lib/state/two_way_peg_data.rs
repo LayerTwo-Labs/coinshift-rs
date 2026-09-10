@@ -638,6 +638,51 @@ fn query_and_update_swap(
         vec![(String::new(), tx_info)]
     };
 
+    // Only a payment that commits to this swap can ever be claimed: the
+    // claim's proof is checked for that commitment by consensus, and the
+    // committed L2 address is who gets paid. A payment to the right address
+    // for the right amount without it is not a fill of this swap, so do not
+    // record it; the claim built from it would be rejected by every node.
+    let matches: Vec<_> = matches
+        .into_iter()
+        .filter_map(|(sender, tx_info)| {
+            match tx_info.swap_commitment() {
+                Some((committed_swap, claimer)) if committed_swap == swap.id => {
+                    if let Some(recipient) = swap.l2_recipient
+                        && recipient != claimer
+                    {
+                        tracing::warn!(
+                            swap_id = %swap.id,
+                            l1_txid = %tx_info.txid,
+                            %claimer,
+                            %recipient,
+                            "L1 payment commits to a claimer other than the swap's fixed recipient; ignoring"
+                        );
+                        return None;
+                    }
+                    Some((sender, claimer, tx_info))
+                }
+                Some((other, _)) => {
+                    tracing::debug!(
+                        swap_id = %swap.id,
+                        l1_txid = %tx_info.txid,
+                        committed_swap = %other,
+                        "L1 payment commits to another swap; ignoring"
+                    );
+                    None
+                }
+                None => {
+                    tracing::warn!(
+                        swap_id = %swap.id,
+                        l1_txid = %tx_info.txid,
+                        "L1 payment to the swap's address carries no swap commitment (OP_RETURN); it cannot be claimed and is ignored"
+                    );
+                    None
+                }
+            }
+        })
+        .collect();
+
     if matches.is_empty() {
         return Ok(false);
     }
@@ -647,7 +692,7 @@ fn query_and_update_swap(
     let max_age = swap.parent_chain.max_l1_tx_age_blocks();
     let matches: Vec<_> = matches
         .into_iter()
-        .filter(|(_, tx_info)| {
+        .filter(|(_, _, tx_info)| {
             if tx_info.confirmations == 0 || tx_info.blockheight.is_none() {
                 return false;
             }
@@ -674,7 +719,7 @@ fn query_and_update_swap(
 
     // Use the first valid match (most recent transaction)
     // In a production system, you might want to handle multiple matches differently
-    let (sender_address, tx_info) = &matches[0];
+    let (sender_address, claimer, tx_info) = &matches[0];
 
     // Convert txid string from parent chain RPC (RPC byte order) to SwapTxId (canonical storage)
     let l1_txid = SwapTxId::from_hex_rpc(&tx_info.txid)
@@ -705,10 +750,12 @@ fn query_and_update_swap(
             "Detected new L1 transaction for swap"
         );
 
-        // Update swap with L1 transaction
-        // For open swaps, we don't store the sender address here - the claimer will provide
-        // their L2 address when claiming, and we'll verify they sent the L1 transaction
+        // Record the payment and the L2 address it committed to. The
+        // commitment is what consensus will pay when the claim connects, so
+        // recording it here is display and convenience; it is also what the
+        // claim builder pays.
         swap.update_l1_txid(l1_txid);
+        swap.set_l2_claimer_address(*claimer);
 
         // Save the sidechain block reference where this validation occurred
         swap.set_l1_txid_validation_block(block_hash, block_height);
@@ -2074,5 +2121,147 @@ mod event_block_bookkeeping_tests {
             Some((0, (earlier_block_hash, 3))),
             "disconnect must remove the disconnected withdrawal event row"
         );
+    }
+}
+
+#[cfg(test)]
+mod detection_tests {
+    use sneed::Env;
+
+    use super::*;
+    use crate::{
+        parent_chain_rpc::tests::fake_rpc,
+        state::l1_proof::{commitment_script_for, payment_commitment},
+        types::{Address, SwapDirection},
+    };
+
+    const L1_RECIPIENT: &str = "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080";
+
+    fn test_state() -> (temp_dir::TempDir, Env, State) {
+        let dir = temp_dir::TempDir::new().unwrap();
+        let mut opts = heed::EnvOpenOptions::new();
+        opts.map_size(10 * 1024 * 1024).max_dbs(State::NUM_DBS);
+        let env = unsafe { Env::open(&opts, dir.path()) }.unwrap();
+        let state = State::new(&env).unwrap();
+        (dir, env, state)
+    }
+
+    fn open_swap() -> Swap {
+        Swap::new(
+            SwapId([21u8; 32]),
+            SwapDirection::L2ToL1,
+            ParentChainType::Regtest,
+            SwapTxId::Hash32([0u8; 32]),
+            Some(1),
+            None,
+            bitcoin::Amount::from_sat(50_000),
+            L1_RECIPIENT.to_owned(),
+            bitcoin::Amount::from_sat(40_000),
+            0,
+            None,
+            Some(Address([5u8; 20])),
+        )
+    }
+
+    /// `getrawtransaction` (verbose) JSON for a payment of the swap amount
+    /// to the recipient, optionally carrying `commitment` as an OP_RETURN.
+    fn tx_json(
+        txid: &str,
+        commitment: Option<bitcoin::ScriptBuf>,
+    ) -> serde_json::Value {
+        let mut vout = vec![serde_json::json!({
+            "value": 0.0004,
+            "n": 0,
+            "scriptPubKey": {
+                "address": L1_RECIPIENT,
+                "hex": "0014751e76e8199196d454941c45d1b3a323f1433bd6"
+            }
+        })];
+        if let Some(script) = commitment {
+            vout.push(serde_json::json!({
+                "value": 0.0,
+                "n": 1,
+                "scriptPubKey": { "hex": hex::encode(script.as_bytes()) }
+            }));
+        }
+        serde_json::json!({
+            "txid": txid,
+            "confirmations": 3,
+            "blockheight": 120,
+            "vout": vout,
+            "vin": [],
+        })
+    }
+
+    fn run_detection(
+        swap: &mut Swap,
+        commitment: Option<bitcoin::ScriptBuf>,
+    ) -> bool {
+        let (_dir, env, state) = test_state();
+        let txid = "ab".repeat(32);
+        let txid_for_scan = txid.clone();
+        let (url, server) = fake_rpc(move |method| match method {
+            "scantxoutset" => Ok(serde_json::json!({
+                "success": true,
+                "unspents": [{"txid": txid_for_scan, "vout": 0}]
+            })),
+            "listunspent" => Ok(serde_json::json!([])),
+            "getblockchaininfo" => Ok(serde_json::json!({"blocks": 122})),
+            "getrawtransaction" => Ok(tx_json(&txid, commitment.clone())),
+            "stop" => Ok(serde_json::json!(true)),
+            other => Err(format!("unexpected method {other}")),
+        });
+        let config = RpcConfig {
+            url: url.clone(),
+            ..RpcConfig::default()
+        };
+        let mut rwtxn = env.write_txn().unwrap();
+        state.save_swap(&mut rwtxn, swap).unwrap();
+        let updated = query_and_update_swap(
+            &state,
+            &mut rwtxn,
+            &config,
+            swap,
+            BlockHash([0u8; 32]),
+            7,
+        )
+        .unwrap();
+        drop(
+            ParentChainRpcClient::new(config)
+                .call::<serde_json::Value>("stop", serde_json::json!([]))
+                .unwrap(),
+        );
+        server.join().unwrap();
+        updated
+    }
+
+    /// Automatic detection records the L2 address the payment committed to,
+    /// so the fill is bound to its payer on every node that sees it, and it
+    /// never records a payment that no claim could ever prove.
+    #[test]
+    fn detection_records_committed_claimer_and_ignores_uncommitted_payments() {
+        let claimer = Address([7u8; 20]);
+
+        let mut swap = open_swap();
+        let script = commitment_script_for(&swap.id, &claimer);
+        assert!(run_detection(&mut swap, Some(script)));
+        assert_eq!(swap.l2_claimer_address, Some(claimer));
+        assert_eq!(swap.l1_txid.to_hex_rpc(), "ab".repeat(32));
+        assert_eq!(swap.state, SwapState::ReadyToClaim);
+
+        let mut swap = open_swap();
+        assert!(!run_detection(&mut swap, None), "no commitment: not a fill");
+        assert_eq!(swap.state, SwapState::Pending);
+        assert_eq!(swap.l2_claimer_address, None);
+
+        let mut swap = open_swap();
+        let other = commitment_script_for(&SwapId([99u8; 32]), &claimer);
+        assert!(
+            !run_detection(&mut swap, Some(other)),
+            "other swap: not a fill"
+        );
+
+        // Sanity on the commitment helper the RPC exposes to fillers.
+        assert_eq!(payment_commitment(&swap.id, &claimer).len(), 56);
     }
 }
