@@ -322,7 +322,7 @@ impl Wallet {
                 .ok_or(AmountOverflowError)?,
             is_locked,
         )?;
-        let change = total - value - fee;
+        let change = total - value - fee - main_fee;
 
         let inputs: Vec<_> = coins
             .into_iter()
