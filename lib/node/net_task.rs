@@ -1699,6 +1699,7 @@ mod peer_retry_test {
                 bind_addr: (Ipv4Addr::LOCALHOST, 0).into(),
                 cusf_mainchain: ValidatorClient::new(channel),
                 cusf_mainchain_wallet: None,
+                magic_bytes_override: None,
                 network: Network::Regtest,
                 wallet: None,
                 l1_rpc_config_path: None,

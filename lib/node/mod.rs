@@ -108,6 +108,7 @@ pub struct NodeConfig<MainchainTransport = Channel> {
     pub cusf_mainchain: mainchain::ValidatorClient<MainchainTransport>,
     pub cusf_mainchain_wallet:
         Option<mainchain::WalletClient<MainchainTransport>>,
+    pub magic_bytes_override: Option<crate::net::peer_message::MagicBytes>,
     pub network: Network,
     pub wallet: Option<Arc<crate::wallet::Wallet>>,
     pub l1_rpc_config_path: Option<std::path::PathBuf>,
@@ -215,6 +216,7 @@ where
         let (net, peer_info_rx) = Net::new(
             &env,
             archive.clone(),
+            config.magic_bytes_override,
             config.network,
             state.clone(),
             config.bind_addr,
