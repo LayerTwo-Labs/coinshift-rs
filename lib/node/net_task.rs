@@ -1381,13 +1381,28 @@ impl NetTask {
                                     .ctxt
                                     .state
                                     .validate_transaction(&rwtxn, &new_tx)?;
-                                self.ctxt.mempool.put(&mut rwtxn, &new_tx)?;
-                                rwtxn.commit().map_err(RwTxnError::from)?;
-                                // broadcast
-                                let () = self.ctxt.net.push_tx(
-                                    HashSet::from_iter([addr]),
-                                    new_tx,
-                                );
+                                match self.ctxt.mempool.put(&mut rwtxn, &new_tx)
+                                {
+                                    Ok(()) => {
+                                        rwtxn
+                                            .commit()
+                                            .map_err(RwTxnError::from)?;
+                                        // broadcast
+                                        let () = self.ctxt.net.push_tx(
+                                            HashSet::from_iter([addr]),
+                                            new_tx,
+                                        );
+                                    }
+                                    Err(mempool::Error::UtxoDoubleSpent) => {
+                                        drop(rwtxn);
+                                        tracing::debug!(
+                                            %addr,
+                                            txid = %new_tx.transaction.txid(),
+                                            "Reject peer transaction: mempool input conflict"
+                                        );
+                                    }
+                                    Err(err) => return Err(err.into()),
+                                }
                                 Ok(())
                             })() {
                                 let err = anyhow::Error::from(err);
@@ -1610,15 +1625,24 @@ impl Drop for NetTaskHandle {
 
 #[cfg(test)]
 mod peer_retry_test {
-    use std::{net::Ipv4Addr, time::Duration};
+    use std::{collections::HashMap, net::Ipv4Addr, time::Duration};
 
     use anyhow::Context;
+    use futures::channel::mpsc;
 
     use crate::net::PeerConnectionStatus;
     use crate::{
-        net::make_server_endpoint,
-        node::Node,
-        types::{Network, proto::mainchain::ValidatorClient},
+        net::{PeerConnectionInfo, make_server_endpoint},
+        node::{
+            Node,
+            net_task::{Error, NetTask, NetTaskContext},
+        },
+        types::{
+            Accumulator, AccumulatorDiff, Network, OutPoint, OutPointKey,
+            Output, OutputContent, PointedOutput, Transaction, TxData, Txid,
+            hash, proto::mainchain::ValidatorClient,
+        },
+        wallet::Wallet,
     };
 
     fn temp_node(
@@ -1641,6 +1665,134 @@ mod peer_retry_test {
             runtime,
         )?;
         Ok((temp_dir, node))
+    }
+
+    #[test]
+    fn peer_transaction_conflicts_do_not_stop_net_task() -> anyhow::Result<()> {
+        let runtime = tokio::runtime::Runtime::new()?;
+        runtime.block_on(async {
+            let (temp_dir, node) = temp_node(&runtime)?;
+            node.net_task.task.abort();
+            while !node.net_task.task.is_finished() {
+                tokio::task::yield_now().await;
+            }
+            let wallet = Wallet::new(&temp_dir.path().join("wallet"))?;
+            wallet.set_seed(&[2; 64])?;
+            let address = wallet.get_new_address()?;
+            let mut inputs = Vec::new();
+            let mut utxos = HashMap::new();
+            let mut diff = AccumulatorDiff::default();
+            let mut rwtxn = node.env.write_txn()?;
+            for index in 0..2 {
+                let pointed = PointedOutput {
+                    outpoint: OutPoint::Regular {
+                        txid: Txid([index; 32]),
+                        vout: 0,
+                    },
+                    output: Output {
+                        address,
+                        content: OutputContent::Value(
+                            bitcoin::Amount::from_sat(1_000),
+                        ),
+                    },
+                };
+                node.state.utxos.put(
+                    &mut rwtxn,
+                    &OutPointKey::from(&pointed.outpoint),
+                    &pointed.output,
+                )?;
+                diff.insert(hash(&pointed).into());
+                inputs.push((pointed.outpoint, hash(&pointed)));
+                utxos.insert(pointed.outpoint, pointed.output);
+            }
+            wallet.put_utxos(&utxos)?;
+            let mut accumulator = Accumulator::default();
+            accumulator.apply_diff(diff)?;
+            node.state.utreexo_accumulator.put(
+                &mut rwtxn,
+                &(),
+                &accumulator,
+            )?;
+            let make_tx = |inputs, value| -> anyhow::Result<_> {
+                let mut tx = Transaction {
+                    inputs,
+                    proof: Default::default(),
+                    outputs: vec![Output {
+                        address,
+                        content: OutputContent::Value(
+                            bitcoin::Amount::from_sat(value),
+                        ),
+                    }],
+                    data: TxData::Regular,
+                };
+                node.state.regenerate_proof(&rwtxn, &mut tx)?;
+                let tx = wallet.authorize(tx)?;
+                node.state.validate_transaction(&rwtxn, &tx)?;
+                Ok(tx)
+            };
+            let first_tx = make_tx(vec![inputs[0]], 900)?;
+            let conflict_tx = make_tx(vec![inputs[1], inputs[0]], 1_800)?;
+            let next_tx = make_tx(vec![inputs[1]], 900)?;
+            node.mempool.put(&mut rwtxn, &first_tx)?;
+            rwtxn.commit()?;
+
+            let (
+                forward_mainchain_task_request_tx,
+                forward_mainchain_task_request_rx,
+            ) = mpsc::unbounded();
+            let (_mainchain_task_event_tx, mainchain_task_event_rx) =
+                mpsc::unbounded();
+            let (new_tip_ready_tx, new_tip_ready_rx) = mpsc::unbounded();
+            let (peer_info_tx, peer_info_rx) = mpsc::unbounded();
+            let task = NetTask {
+                ctxt: NetTaskContext {
+                    env: node.env.clone(),
+                    archive: node.archive.clone(),
+                    mainchain_task: node.mainchain_task.clone(),
+                    mempool: node.mempool.clone(),
+                    net: node.net.clone(),
+                    state: node.state.clone(),
+                    wallet: None,
+                    rpc_config_path: None,
+                },
+                forward_mainchain_task_request_tx,
+                forward_mainchain_task_request_rx,
+                mainchain_task_event_rx,
+                new_tip_ready_tx,
+                new_tip_ready_rx,
+                peer_info_rx,
+            };
+            for tx in [&first_tx, &conflict_tx, &next_tx] {
+                peer_info_tx.unbounded_send((
+                    (Ipv4Addr::LOCALHOST, 1).into(),
+                    Some(PeerConnectionInfo::NewTransaction(tx.clone())),
+                ))?;
+            }
+            drop(peer_info_tx);
+            let result =
+                tokio::time::timeout(Duration::from_secs(5), task.run())
+                    .await?;
+            assert!(
+                matches!(result, Err(Error::PeerInfoRxClosed)),
+                "the network task stopped before the mailbox closed: {result:?}"
+            );
+            let rotxn = node.env.read_txn()?;
+            for tx in [&first_tx, &next_tx] {
+                assert!(
+                    node.mempool
+                        .transactions
+                        .try_get(&rotxn, &tx.transaction.txid())?
+                        .is_some()
+                );
+            }
+            assert!(
+                node.mempool
+                    .transactions
+                    .try_get(&rotxn, &conflict_tx.transaction.txid())?
+                    .is_none()
+            );
+            Ok(())
+        })
     }
 
     #[test]
