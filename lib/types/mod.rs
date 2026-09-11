@@ -20,6 +20,7 @@ use crate::{
 
 mod address;
 pub mod hashes;
+pub mod net;
 pub mod proto;
 pub mod schema;
 mod swap;

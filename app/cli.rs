@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     ops::Deref,
     path::PathBuf,
@@ -6,7 +7,7 @@ use std::{
 };
 
 use clap::{Arg, Parser, Subcommand};
-use coinshift::types::{Network, THIS_SIDECHAIN};
+use coinshift::types::{Network, THIS_SIDECHAIN, net::SeedAddress};
 
 use crate::util::saturating_pred_level;
 
@@ -126,6 +127,11 @@ pub(super) struct Cli {
 
 #[derive(Clone, Debug, Parser)]
 pub(super) struct RunArgs {
+    /// Peer to dial at startup, as `host:port` or `host`. The host can be a
+    /// host name or an IP address. Use this option one time for each peer.
+    /// The node also dials the seed peers of the network.
+    #[arg(long = "add-peer")]
+    add_peers: Vec<SeedAddress>,
     /// Data directory for storing blockchain and wallet data
     #[command(flatten)]
     datadir: DatadirArg,
@@ -178,6 +184,7 @@ pub(super) struct RunArgs {
 
 #[derive(Clone, Debug)]
 pub struct Config {
+    pub add_peers: HashSet<SeedAddress>,
     pub datadir: PathBuf,
     pub headless: bool,
     /// If None, logging to file should be disabled.
@@ -217,6 +224,7 @@ impl RunArgs {
             saturating_pred_level(self.log_level)
         };
         Ok(Config {
+            add_peers: HashSet::from_iter(self.add_peers),
             datadir: self.datadir.0,
             headless: self.headless,
             log_dir,

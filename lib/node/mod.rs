@@ -15,7 +15,7 @@ use tonic::transport::Channel;
 use crate::{
     archive::{self, Archive},
     mempool::{self, MemPool},
-    net::{self, Net, Peer},
+    net::{self, DialSeedsHandle, Net, Peer},
     state::{self, State},
     types::{
         Accumulator, Address, AmountOverflowError, AmountUnderflowError,
@@ -23,6 +23,7 @@ use crate::{
         BmmResult, Body, FilledTransaction, GetValue, Header,
         MainchainSyncProgress, Network, OutPoint, OutPointKey, Output,
         SpentOutput, SwapId, Tip, Transaction, Txid, WithdrawalBundle,
+        net::SeedAddress,
         proto::{self, mainchain},
     },
     util::Watchable,
@@ -103,6 +104,7 @@ impl From<state::Error> for Error {
 /// Configuration for constructing a [`Node`].
 #[derive(Clone)]
 pub struct NodeConfig<MainchainTransport = Channel> {
+    pub add_peers: HashSet<SeedAddress>,
     pub datadir: std::path::PathBuf,
     pub bind_addr: SocketAddr,
     pub cusf_mainchain: mainchain::ValidatorClient<MainchainTransport>,
@@ -122,6 +124,7 @@ pub struct Node<MainchainTransport = Channel> {
         Option<Arc<Mutex<mainchain::WalletClient<MainchainTransport>>>>,
     /// Swap IDs we created that are still pending (mempool). Only creator can cancel those.
     created_pending_swap_ids: Arc<StdMutex<HashSet<SwapId>>>,
+    _dial_seeds: Arc<DialSeedsHandle>,
     env: sneed::Env<heed::WithoutTls>,
     mainchain_task: MainchainTaskHandle,
     mempool: MemPool,
@@ -213,13 +216,15 @@ where
             );
         tracing::info!("Node::new: MainchainTaskHandle created");
         tracing::info!(bind_addr = %config.bind_addr, "Node::new: Creating Net");
-        let (net, peer_info_rx) = Net::new(
+        let (net, peer_info_rx, dial_seeds) = Net::new(
+            runtime.handle(),
             &env,
             archive.clone(),
             config.magic_bytes_override,
             config.network,
             state.clone(),
             config.bind_addr,
+            config.add_peers,
         )?;
         tracing::info!("Node::new: Net created");
         tracing::info!("Node::new: Creating NetTaskHandle");
@@ -292,6 +297,7 @@ where
             cusf_mainchain: config.cusf_mainchain,
             cusf_mainchain_wallet,
             created_pending_swap_ids: Arc::new(StdMutex::new(HashSet::new())),
+            _dial_seeds: Arc::new(dial_seeds),
             env,
             mainchain_task,
             mempool,
@@ -740,7 +746,7 @@ where
 
     pub fn connect_peer(&self, addr: SocketAddr) -> Result<(), Error> {
         self.net
-            .connect_peer(self.env.clone(), addr)
+            .connect_peer(self.env.clone(), addr.into())
             .map_err(Error::from)
     }
 

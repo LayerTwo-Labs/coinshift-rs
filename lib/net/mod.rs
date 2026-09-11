@@ -1,12 +1,13 @@
 use std::{
     collections::{HashMap, HashSet, hash_map},
-    net::SocketAddr,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::Arc,
 };
 
 use fallible_iterator::FallibleIterator;
 use futures::{StreamExt, channel::mpsc};
 use heed::types::{SerdeBincode, Unit};
+use hickory_resolver::TokioResolver;
 use parking_lot::RwLock;
 use quinn::{ClientConfig, Endpoint, ServerConfig};
 use sneed::{
@@ -19,7 +20,11 @@ use tracing::instrument;
 use crate::{
     archive::Archive,
     state::State,
-    types::{AuthorizedTransaction, Network, THIS_SIDECHAIN, VERSION, Version},
+    types::{
+        AuthorizedTransaction, Network, THIS_SIDECHAIN, VERSION, Version,
+        net::{DEFAULT_PORT, ResolvedSeedAddress, SeedAddress},
+    },
+    util::ErrorChain,
 };
 
 pub mod error;
@@ -154,51 +159,104 @@ pub fn make_server_endpoint(
 pub type PeerInfoRx =
     mpsc::UnboundedReceiver<(SocketAddr, Option<PeerConnectionInfo>)>;
 
-const SIGNET_SEED_NODE_ADDRS: &[SocketAddr] = {
-    const SIGNET_MINING_SERVER: SocketAddr = SocketAddr::new(
-        std::net::IpAddr::V4(std::net::Ipv4Addr::new(172, 105, 148, 135)),
-        4000 + THIS_SIDECHAIN as u16,
-    );
+const SIGNET_SEED_NODE_ADDRS: &[SeedAddress<&str>] = {
+    const SIGNET_MINING_SERVER: SeedAddress<&str> = SeedAddress {
+        host: url::Host::Ipv4(Ipv4Addr::new(172, 105, 148, 135)),
+        port: DEFAULT_PORT,
+    };
     // thunder.bip300.xyz
-    const BIP300_XYZ: SocketAddr = SocketAddr::new(
-        std::net::IpAddr::V4(std::net::Ipv4Addr::new(95, 217, 243, 12)),
-        4000 + THIS_SIDECHAIN as u16,
-    );
+    const BIP300_XYZ: SeedAddress<&str> = SeedAddress {
+        host: url::Host::Ipv4(Ipv4Addr::new(95, 217, 243, 12)),
+        port: DEFAULT_PORT,
+    };
     &[SIGNET_MINING_SERVER, BIP300_XYZ]
 };
 
-const ALPHANET_SEED_NODE_ADDRS: &[SocketAddr] = {
+const ALPHANET_SEED_NODE_ADDRS: &[SeedAddress<&str>] = {
     // The alphanet server runs a node for this chain.
-    const ALPHANET_SERVER: SocketAddr = SocketAddr::new(
-        std::net::IpAddr::V4(std::net::Ipv4Addr::new(204, 168, 254, 113)),
-        4000 + THIS_SIDECHAIN as u16,
-    );
+    const ALPHANET_SERVER: SeedAddress<&str> = SeedAddress {
+        host: url::Host::Ipv4(Ipv4Addr::new(204, 168, 254, 113)),
+        port: DEFAULT_PORT,
+    };
     &[ALPHANET_SERVER]
 };
 
-/// Add every seed address the network names that the database does not hold.
-/// A datadir made before a seed existed would otherwise never learn it.
+/// Add every seed IP address the network names that the database does not
+/// hold. A datadir made before a seed existed would otherwise never learn it.
+/// A seed host name stays out of the database, and resolves at each start.
 fn add_seed_peers(
     known_peers: &DatabaseUnique<SerdeBincode<SocketAddr>, Unit>,
     rwtxn: &mut RwTxn,
     network: Network,
 ) -> Result<(), DbError> {
-    for seed_node_addr in seed_node_addrs(network) {
-        if known_peers.try_get(rwtxn, seed_node_addr)?.is_none() {
+    for seed_node_addr in seed_node_addrs(network)
+        .iter()
+        .filter_map(SeedAddress::socket_addr)
+    {
+        if known_peers.try_get(rwtxn, &seed_node_addr)?.is_none() {
             tracing::debug!(seed_node = %seed_node_addr, "adding seed node");
-            known_peers.put(rwtxn, seed_node_addr, &())?;
+            known_peers.put(rwtxn, &seed_node_addr, &())?;
         }
     }
     Ok(())
 }
 
-const fn seed_node_addrs(network: Network) -> &'static [SocketAddr] {
+const fn seed_node_addrs(
+    network: Network,
+) -> &'static [SeedAddress<&'static str>] {
     match network {
         Network::Alphanet => ALPHANET_SEED_NODE_ADDRS,
         Network::Signet => SIGNET_SEED_NODE_ADDRS,
         Network::Regtest => &[],
     }
 }
+
+pub async fn resolve_seed_address(
+    dns_resolver: &TokioResolver,
+    seed_addr: SeedAddress,
+) -> Result<ResolvedSeedAddress, error::ResolveSeedAddress> {
+    let domain = match seed_addr.host {
+        url::Host::Ipv4(ipv4) => {
+            return Ok(ResolvedSeedAddress::Static(SocketAddr::new(
+                IpAddr::V4(ipv4),
+                seed_addr.port,
+            )));
+        }
+        url::Host::Ipv6(ipv6) => {
+            return Ok(ResolvedSeedAddress::Static(SocketAddr::new(
+                IpAddr::V6(ipv6),
+                seed_addr.port,
+            )));
+        }
+        url::Host::Domain(domain) => domain,
+    };
+    let mut addrs: Vec<_> = dns_resolver
+        .lookup_ip(domain.as_str())
+        .await
+        .map_err(|err| error::ResolveSeedAddress::Net(Box::new(err)))?
+        .into_iter()
+        .filter(|addr| !addr.is_unspecified())
+        .collect();
+    let Some(last_addr) = addrs.pop() else {
+        tracing::warn!(%domain, "the seed host name resolved to no address");
+        return Err(error::ResolveSeedAddress::NoIpAddrs { domain });
+    };
+    addrs.reverse();
+    Ok(ResolvedSeedAddress::Domain {
+        domain,
+        port: seed_addr.port,
+        addrs: nonempty::NonEmpty {
+            head: last_addr,
+            tail: addrs,
+        },
+    })
+}
+
+/// Handle to the tasks that dial seed host names. Drop aborts the tasks.
+#[repr(transparent)]
+pub struct DialSeedsHandle(
+    tokio_util::task::JoinMap<SeedAddress, Result<(), error::DialSeed>>,
+);
 
 // Keep track of peer state
 // Exchange metadata
@@ -214,6 +272,7 @@ const fn seed_node_addrs(network: Network) -> &'static [SocketAddr] {
 pub struct Net {
     pub server: Endpoint,
     archive: Archive,
+    pub dns_resolver: Arc<TokioResolver>,
     magic_bytes: peer::message::MagicBytes,
     state: State,
     active_peers: Arc<RwLock<HashMap<SocketAddr, PeerConnectionHandle>>>,
@@ -299,12 +358,22 @@ impl Net {
     pub fn connect_peer(
         &self,
         env: sneed::Env<heed::WithoutTls>,
-        addr: SocketAddr,
+        resolved_addr: ResolvedSeedAddress,
     ) -> Result<(), Error> {
-        if self.active_peers.read().contains_key(&addr) {
-            tracing::error!("connect peer: already connected");
-            return Err(error::AlreadyConnected(addr).into());
+        {
+            let active_peers = self.active_peers.read();
+            for ip_addr in resolved_addr.ip_addrs() {
+                let addr = SocketAddr::new(ip_addr, resolved_addr.port());
+                if active_peers.contains_key(&addr) {
+                    tracing::error!("connect peer: already connected");
+                    return Err(error::AlreadyConnected(addr).into());
+                }
+            }
         }
+        let addr = SocketAddr::new(
+            resolved_addr.first_ip_addr(),
+            resolved_addr.port(),
+        );
 
         // This check happens within Quinn with a
         // generic "invalid remote address". We run the
@@ -314,15 +383,20 @@ impl Net {
             return Err(Error::UnspecfiedPeerIP(addr.ip()));
         }
         let connecting = self.server.connect(addr, "localhost")?;
-        let mut rwtxn = env.write_txn().map_err(EnvError::from)?;
-        self.known_peers
-            .put(&mut rwtxn, &addr, &())
-            .map_err(DbError::from)?;
-        rwtxn.commit().map_err(RwTxnError::from)?;
+        // A host name resolves again at each start, so only an IP address
+        // goes into the database.
+        if let ResolvedSeedAddress::Static(static_addr) = resolved_addr {
+            let mut rwtxn = env.write_txn().map_err(EnvError::from)?;
+            self.known_peers
+                .put(&mut rwtxn, &static_addr, &())
+                .map_err(DbError::from)?;
+            rwtxn.commit().map_err(RwTxnError::from)?;
+        }
         let connection_ctxt = PeerConnectionCtxt {
             env,
             archive: self.archive.clone(),
             magic_bytes: self.magic_bytes,
+            resolved_address: resolved_addr,
             state: self.state.clone(),
         };
 
@@ -358,14 +432,29 @@ impl Net {
         &[SIGNET_MINING_SERVER, BIP300_XYZ]
     };
 
+    async fn dial_seed(
+        &self,
+        env: sneed::Env<heed::WithoutTls>,
+        seed_addr: SeedAddress,
+    ) -> Result<(), error::DialSeed> {
+        tracing::trace!(%seed_addr, "dial seed host name");
+        let resolved_addr =
+            resolve_seed_address(&self.dns_resolver, seed_addr).await?;
+        self.connect_peer(env, resolved_addr)
+            .map_err(|err| error::DialSeed::Connect(Box::new(err)))
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
+        runtime: &tokio::runtime::Handle,
         env: &sneed::Env<heed::WithoutTls>,
         archive: Archive,
         magic_bytes_override: Option<peer::message::MagicBytes>,
         network: Network,
         state: State,
         bind_addr: SocketAddr,
-    ) -> Result<(Self, PeerInfoRx), Error> {
+        add_peers: HashSet<SeedAddress>,
+    ) -> Result<(Self, PeerInfoRx, DialSeedsHandle), Error> {
         tracing::debug!(bind_addr = %bind_addr, "Net::new: Starting initialization");
         tracing::debug!("Net::new: Creating server endpoint");
         let (server, _) = make_server_endpoint(bind_addr)?;
@@ -390,6 +479,9 @@ impl Net {
                 }
             };
         let () = add_seed_peers(&known_peers, &mut rwtxn, network)?;
+        for peer_addr in add_peers.iter().filter_map(SeedAddress::socket_addr) {
+            known_peers.put(&mut rwtxn, &peer_addr, &())?;
+        }
         tracing::debug!("Net::new: Creating net_version database");
         let version = DatabaseUnique::create(env, &mut rwtxn, "net_version")?;
         if version.try_get(&rwtxn, &())?.is_none() {
@@ -400,10 +492,17 @@ impl Net {
         tracing::debug!("Net::new: Creating peer info channel");
         let magic_bytes = magic_bytes_override
             .unwrap_or_else(|| peer::message::magic_bytes(network));
+        let dns_resolver = {
+            let builder = hickory_resolver::Resolver::builder_tokio()
+                .map_err(Error::BuildDnsResolver)?;
+            let resolver = builder.build().map_err(Error::BuildDnsResolver)?;
+            Arc::new(resolver)
+        };
         let (peer_info_tx, peer_info_rx) = mpsc::unbounded();
         let net = Net {
             server,
             archive,
+            dns_resolver,
             magic_bytes,
             state,
             active_peers,
@@ -434,7 +533,7 @@ impl Net {
                 peer_addr = %peer_addr,
                 "Net::new: Attempting to connect to known peer"
             );
-            match net.connect_peer(env.clone(), peer_addr) {
+            match net.connect_peer(env.clone(), peer_addr.into()) {
                 Ok(()) => {
                     tracing::debug!(peer_addr = %peer_addr, "Net::new: Successfully initiated connection to peer");
                 }
@@ -468,8 +567,28 @@ impl Net {
             elapsed_secs = connection_elapsed.as_secs_f64(),
             "Net::new: Finished connecting to known peers"
         );
+        let seed_names: HashSet<SeedAddress> = seed_node_addrs(network)
+            .iter()
+            .map(|seed_addr| seed_addr.to_owned())
+            .chain(add_peers)
+            .filter(|seed_addr| seed_addr.socket_addr().is_none())
+            .collect();
+        let mut dial_seeds = tokio_util::task::JoinMap::new();
+        for seed_addr in seed_names {
+            let env = env.clone();
+            let net = net.clone();
+            dial_seeds.spawn_on(
+                seed_addr.clone(),
+                async move {
+                    net.dial_seed(env, seed_addr).await.inspect_err(
+                        |err| tracing::error!(message = %ErrorChain::new(err)),
+                    )
+                },
+                runtime,
+            );
+        }
         tracing::info!("Net::new: Initialization complete");
-        Ok((net, peer_info_rx))
+        Ok((net, peer_info_rx, DialSeedsHandle(dial_seeds)))
     }
 
     /// Accept the next incoming connection. Returns Some(addr) if a connection was accepted
@@ -529,6 +648,7 @@ impl Net {
             env,
             archive: self.archive.clone(),
             magic_bytes: self.magic_bytes,
+            resolved_address: addr.into(),
             state: self.state.clone(),
         };
         let (connection_handle, info_rx) =
@@ -629,11 +749,13 @@ mod crypto_provider_tests {
 
 #[cfg(test)]
 mod seed_peer_tests {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+
     use heed::types::{SerdeBincode, Unit};
     use sneed::DatabaseUnique;
 
-    use super::{add_seed_peers, seed_node_addrs};
-    use crate::types::Network;
+    use super::{add_seed_peers, resolve_seed_address, seed_node_addrs};
+    use crate::types::{Network, net::SeedAddress};
 
     /// Every seed reaches a peer table that already exists, and a second call
     /// writes the same set.
@@ -646,25 +768,41 @@ mod seed_peer_tests {
         let network = Network::Signet;
         let known_peers = {
             let mut rwtxn = env.write_txn()?;
-            let known_peers: DatabaseUnique<
-                SerdeBincode<std::net::SocketAddr>,
-                Unit,
-            > = DatabaseUnique::create(&env, &mut rwtxn, "known_peers")?;
+            let known_peers: DatabaseUnique<SerdeBincode<SocketAddr>, Unit> =
+                DatabaseUnique::create(&env, &mut rwtxn, "known_peers")?;
             add_seed_peers(&known_peers, &mut rwtxn, network)?;
             add_seed_peers(&known_peers, &mut rwtxn, network)?;
             rwtxn.commit()?;
             known_peers
         };
         let rotxn = env.read_txn()?;
-        for seed_node_addr in seed_node_addrs(network) {
+        let seed_socket_addrs: Vec<SocketAddr> = seed_node_addrs(network)
+            .iter()
+            .filter_map(SeedAddress::socket_addr)
+            .collect();
+        for seed_node_addr in &seed_socket_addrs {
             anyhow::ensure!(
                 known_peers.try_get(&rotxn, seed_node_addr)?.is_some(),
                 "the seed {seed_node_addr} never reached the database"
             );
         }
-        assert_eq!(
-            known_peers.len(&rotxn)?,
-            seed_node_addrs(network).len() as u64
+        assert_eq!(known_peers.len(&rotxn)?, seed_socket_addrs.len() as u64);
+        Ok(())
+    }
+
+    /// A seed names a host and a port, and the resolver keeps both.
+    #[tokio::test]
+    async fn a_seed_name_resolves_with_its_port() -> anyhow::Result<()> {
+        let dns_resolver =
+            hickory_resolver::Resolver::builder_tokio()?.build()?;
+        let seed_addr: SeedAddress = "localhost:4004".parse()?;
+        let resolved = resolve_seed_address(&dns_resolver, seed_addr).await?;
+        assert_eq!(resolved.port(), 4004);
+        assert!(
+            resolved
+                .ip_addrs()
+                .any(|addr| addr == IpAddr::V4(Ipv4Addr::LOCALHOST)
+                    || addr == IpAddr::V6(Ipv6Addr::LOCALHOST))
         );
         Ok(())
     }
@@ -672,37 +810,90 @@ mod seed_peer_tests {
 
 #[cfg(test)]
 mod peer_handle_test {
-    use super::{Net, PeerConnectionCtxt, make_server_endpoint, peer};
+    use super::{
+        Net, PeerConnectionCtxt, PeerInfoRx, make_server_endpoint, peer,
+    };
     use crate::{archive::Archive, state::State, types::Network};
     use futures::StreamExt;
-    use std::{net::Ipv4Addr, time::Duration};
+    use std::{
+        collections::HashSet,
+        net::{Ipv4Addr, SocketAddr},
+        time::Duration,
+    };
 
-    #[tokio::test]
-    async fn rejected_duplicate_has_no_peer_close_event() -> anyhow::Result<()>
-    {
-        let temp_dir = temp_dir::TempDir::new()?;
+    fn temp_net(
+        test_name: &str,
+    ) -> anyhow::Result<(
+        temp_dir::TempDir,
+        sneed::Env<heed::WithoutTls>,
+        Net,
+        PeerInfoRx,
+    )> {
+        let temp_dir =
+            temp_dir::TempDir::with_prefix(format!("coinshift-{test_name}-"))?;
         let mut opts = heed::EnvOpenOptions::new().read_txn_without_tls();
         opts.map_size(16 * 1024 * 1024)
             .max_dbs(Archive::NUM_DBS + State::NUM_DBS + Net::NUM_DBS);
         let env = unsafe { sneed::Env::open(&opts, temp_dir.path()) }?;
         let archive = Archive::new(&env)?;
         let state = State::new(&env)?;
-        let (net, info_rx) = Net::new(
+        let (net, info_rx, _dial_seeds) = Net::new(
+            &tokio::runtime::Handle::current(),
             &env,
             archive,
             None,
             Network::Regtest,
             state,
             (Ipv4Addr::LOCALHOST, 0).into(),
+            HashSet::new(),
         )?;
+        Ok((temp_dir, env, net, info_rx))
+    }
+
+    #[tokio::test]
+    async fn connect_peer_keeps_a_static_ipv4_address() -> anyhow::Result<()> {
+        let (_temp_dir, env, net, _info_rx) = temp_net("peer-static")?;
         let (remote, _) =
             make_server_endpoint((Ipv4Addr::LOCALHOST, 0).into())?;
         let addr = remote.local_addr()?;
-        net.connect_peer(env.clone(), addr)?;
+
+        net.connect_peer(env, addr.into())?;
+
+        let peers = net.get_active_peers();
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].address, addr);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn connect_peer_returns_other_quinn_errors() -> anyhow::Result<()> {
+        let (_temp_dir, env, net, _info_rx) = temp_net("peer-closed")?;
+        net.server.close(0_u32.into(), b"test complete");
+        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 4004));
+
+        let error = net.connect_peer(env, addr.into()).unwrap_err();
+
+        assert!(matches!(
+            error,
+            super::Error::Connect(quinn::ConnectError::EndpointStopping)
+        ));
+        assert!(net.get_active_peers().is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rejected_duplicate_has_no_peer_close_event() -> anyhow::Result<()>
+    {
+        let (_temp_dir, env, net, info_rx) = temp_net("peer-duplicate")?;
+        let (remote, _) =
+            make_server_endpoint((Ipv4Addr::LOCALHOST, 0).into())?;
+        let addr = remote.local_addr()?;
+        net.connect_peer(env.clone(), addr.into())?;
         let connection_ctxt = PeerConnectionCtxt {
             env,
             archive: net.archive.clone(),
             magic_bytes: net.magic_bytes,
+            resolved_address: addr.into(),
             state: net.state.clone(),
         };
         let (duplicate, duplicate_info) = peer::connect(

@@ -37,6 +37,7 @@ use crate::{
     state::{self, State},
     types::{
         BmmResult, Body, Header, MerkleRoot, ParentChainType, Tip,
+        net::ResolvedSeedAddress,
         proto::{
             self,
             mainchain::{self, Event as MainchainBlockEvent},
@@ -1058,7 +1059,7 @@ impl NetTask {
             NewTipReady(Tip, Option<SocketAddr>, Option<oneshot::Sender<bool>>),
             PeerInfo(Option<(SocketAddr, Option<PeerConnectionInfo>)>),
             // Signal to reconnect to a peer
-            ReconnectPeer(SocketAddr),
+            ReconnectPeer(ResolvedSeedAddress),
         }
         let accept_connections = stream::try_unfold((), |()| {
             let env = self.ctxt.env.clone();
@@ -1296,11 +1297,13 @@ impl NetTask {
                     const RECONNECT_DELAY: Duration = Duration::from_secs(10);
                     tracing::trace!(%addr, ?peer_info, "mailbox item: received PeerInfo");
                     match peer_info {
-                        PeerConnectionInfo::Error(
-                            PeerConnectionError::Mailbox(
-                                PeerConnectionMailboxError::HeartbeatTimeout,
-                            ),
-                        ) => {
+                        PeerConnectionInfo::Error {
+                            err:
+                                PeerConnectionError::Mailbox(
+                                    PeerConnectionMailboxError::HeartbeatTimeout,
+                                ),
+                            resolved_addr,
+                        } => {
                             // Attempt to reconnect if a valid message was
                             // received successfully
                             let Some(received_msg_successfully) =
@@ -1314,15 +1317,21 @@ impl NetTask {
                                 continue;
                             };
                             let () = self.ctxt.net.remove_active_peer(addr);
-                            if !received_msg_successfully {
+                            let reconnect_addr = if received_msg_successfully {
+                                resolved_addr
+                            } else if let (_, Some(next_addr)) =
+                                resolved_addr.pop_first_ip_addr()
+                            {
+                                next_addr
+                            } else {
                                 continue;
-                            }
+                            };
                             reconnect_peer_spawner.spawn(async move {
                                 tokio::time::sleep(RECONNECT_DELAY).await;
-                                addr
+                                reconnect_addr
                             });
                         }
-                        PeerConnectionInfo::Error(err) => {
+                        PeerConnectionInfo::Error { err, resolved_addr } => {
                             let bad_magic = err.is_bad_magic();
                             let retry_connection = err
                                 .is_duplicate_connection()
@@ -1333,7 +1342,15 @@ impl NetTask {
                             if retry_connection {
                                 reconnect_peer_spawner.spawn(async move {
                                     tokio::time::sleep(RECONNECT_DELAY).await;
-                                    addr
+                                    resolved_addr
+                                });
+                            } else if !bad_magic
+                                && let (_, Some(next_addr)) =
+                                    resolved_addr.pop_first_ip_addr()
+                            {
+                                reconnect_peer_spawner.spawn(async move {
+                                    tokio::time::sleep(RECONNECT_DELAY).await;
+                                    next_addr
                                 });
                             }
                             // A peer on another network never becomes useful,
@@ -1477,11 +1494,13 @@ impl NetTask {
                         }
                     }
                 }
-                MailboxItem::ReconnectPeer(peer_address) => {
+                MailboxItem::ReconnectPeer(resolved_addr) => {
+                    let peer_address =
+                        resolved_addr.as_seed_address().to_owned();
                     match self
                         .ctxt
                         .net
-                        .connect_peer(self.ctxt.env.clone(), peer_address)
+                        .connect_peer(self.ctxt.env.clone(), resolved_addr)
                     {
                         Ok(()) => (),
                         Err(err) => {
@@ -1707,6 +1726,7 @@ mod peer_retry_test {
                 .connect_lazy();
         let node = Node::new(
             crate::node::NodeConfig {
+                add_peers: std::collections::HashSet::new(),
                 datadir: temp_dir.path().to_path_buf(),
                 bind_addr: (Ipv4Addr::LOCALHOST, 0).into(),
                 cusf_mainchain: ValidatorClient::new(channel),

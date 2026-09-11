@@ -738,6 +738,7 @@ impl App {
         tracing::info!("Instantiating node struct");
         let node_start = std::time::Instant::now();
         let node_config = node::NodeConfig {
+            add_peers: config.add_peers.clone(),
             datadir: config.datadir.clone(),
             bind_addr: config.net_addr,
             cusf_mainchain,
