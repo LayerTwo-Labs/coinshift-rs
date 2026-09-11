@@ -42,7 +42,7 @@ use crate::{
             mainchain::{self, Event as MainchainBlockEvent},
         },
     },
-    util::join_set,
+    util::{ErrorChain, join_set},
 };
 
 #[allow(clippy::duplicated_attributes)]
@@ -267,6 +267,11 @@ fn disconnect_tip_(
     let accumulator = state.get_accumulator(rwtxn)?;
     mempool.regenerate_proofs(rwtxn, &accumulator)?;
     Ok(())
+}
+
+// a state error means a peer sent an invalid block; it must not be fatal
+fn is_fatal_reorg_error(err: &Error) -> bool {
+    !matches!(err, Error::State(_))
 }
 
 /// Re-org to the specified tip, if it is better than the current tip.
@@ -1151,7 +1156,7 @@ impl NetTask {
                         event,
                     )?;
                 }
-                MailboxItem::NewTipReady(new_tip, _addr, resp_tx) => {
+                MailboxItem::NewTipReady(new_tip, addr, resp_tx) => {
                     // Use a guard to ensure we always send a response on the oneshot, even if there's a panic
                     // This prevents "Receive reorg result cancelled" errors
                     struct OneshotGuard {
@@ -1221,20 +1226,22 @@ impl NetTask {
                     });
                     let reorg_applied = match reorg_result {
                         Ok(applied) => applied,
+                        Err(err) if is_fatal_reorg_error(&err) => {
+                            return Err(err);
+                        }
+                        // an invalid block must not kill the net task; drop the
+                        // peer and keep running
                         Err(err) => {
-                            // Log the error but don't crash the net task
-                            // This allows the task to continue processing other messages
-                            let err = anyhow::Error::from(err);
-                            tracing::error!(
+                            tracing::warn!(
                                 ?new_tip,
-                                "Failed to reorg to tip: {err:#}"
+                                ?addr,
+                                err = format!("{:#}", ErrorChain::new(&err)),
+                                "rejecting invalid tip from peer"
                             );
-                            // Send false to indicate the reorg didn't happen
-                            if let Some(resp_tx) = guard.resp_tx.take() {
-                                let _ = resp_tx.send(false);
-                                guard.sent = true;
+                            if let Some(addr) = addr {
+                                let () = self.ctxt.net.remove_active_peer(addr);
                             }
-                            continue;
+                            false
                         }
                     };
                     // Send the result
@@ -1620,6 +1627,27 @@ impl Drop for NetTaskHandle {
             tracing::debug!("dropping net task handle, aborting task");
             task.abort()
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::{
+        node::net_task::{Error, is_fatal_reorg_error},
+        state,
+    };
+
+    // a peer's invalid block (value out > value in) must not be fatal
+    #[test]
+    fn invalid_peer_block_is_not_fatal() {
+        let err = Error::State(state::Error::NotEnoughValueIn);
+        assert!(!is_fatal_reorg_error(&err));
+    }
+
+    // local infrastructure errors stay fatal
+    #[test]
+    fn infrastructure_error_is_fatal() {
+        assert!(is_fatal_reorg_error(&Error::PeerInfoRxClosed));
     }
 }
 
