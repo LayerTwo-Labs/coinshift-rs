@@ -4,10 +4,10 @@ use coinshift::{
     net::Peer,
     types::{
         Address, Block, BlockIndex, BlockIndexDeposit, BlockIndexSpend,
-        BlockIndexTx, M6id, MempoolTx, MerkleRoot, OutPoint, Output,
-        OutputContent, ParentChainType, PointedOutput, Swap, SwapId, SwapState,
-        Transaction, TxData, Txid, WithdrawalBundle,
-        schema as coinshift_schema,
+        BlockIndexTx, M6id, MainchainSyncPhase, MainchainSyncProgress,
+        MempoolTx, MerkleRoot, OutPoint, Output, OutputContent,
+        ParentChainType, PointedOutput, Swap, SwapId, SwapState, Transaction,
+        TxData, Txid, WithdrawalBundle, schema as coinshift_schema,
     },
     wallet::Balance,
 };
@@ -18,6 +18,7 @@ use super::{GetBlockTemplateResponse, schema};
 
 #[open_api(ref_schemas[
     Address, BlockIndexDeposit, BlockIndexSpend, BlockIndexTx, M6id,
+    MainchainSyncPhase,
     MerkleRoot, OutPoint, Output, OutputContent, ParentChainType, Swap, SwapId,
     SwapState, Transaction, TxData, Txid, schema::BitcoinTxid,
     coinshift_schema::BitcoinAddr, coinshift_schema::BitcoinOutPoint,
@@ -181,6 +182,12 @@ pub trait Rpc {
     /// List all UTXOs
     #[method(name = "list_utxos")]
     async fn list_utxos(&self) -> RpcResult<Vec<PointedOutput>>;
+
+    /// Get the progress of the startup sync with the mainchain
+    #[open_api_method(output_schema(ToSchema))]
+    #[method(name = "mainchain_sync_progress")]
+    async fn mainchain_sync_progress(&self)
+    -> RpcResult<MainchainSyncProgress>;
 
     /// Attempt to mine a sidechain block
     #[open_api_method(output_schema(ToSchema))]

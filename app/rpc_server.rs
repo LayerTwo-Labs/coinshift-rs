@@ -5,8 +5,8 @@ use coinshift::{
     net::Peer,
     state,
     types::{
-        Address, ParentChainType, PointedOutput, Swap, SwapId, SwapState,
-        SwapTxId, Txid, WithdrawalBundle,
+        Address, MainchainSyncProgress, ParentChainType, PointedOutput, Swap,
+        SwapId, SwapState, SwapTxId, Txid, WithdrawalBundle,
     },
     wallet::Balance,
 };
@@ -328,6 +328,12 @@ impl RpcServer for RpcServerImpl {
             .map(|(outpoint, output)| PointedOutput { outpoint, output })
             .collect();
         Ok(res)
+    }
+
+    async fn mainchain_sync_progress(
+        &self,
+    ) -> RpcResult<MainchainSyncProgress> {
+        Ok(self.app.node.mainchain_sync_progress())
     }
 
     async fn mine(&self, fee: Option<u64>) -> RpcResult<()> {
