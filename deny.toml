@@ -91,6 +91,7 @@ ignore = [
     # BROWSER env var. Only reachable from the GUI's "open link" path.
     { id = "RUSTSEC-2026-0257", reason = "Temporary ignore until egui-winit updates webbrowser"},
     # bitmaps (via imbl -> cusf-enforcer-mempool) is unmaintained
+    { id = "RUSTSEC-2025-0167", reason = "Temporary ignore until imbl drops bitmaps"},
     { id = "RUSTSEC-2026-0247", reason = "Temporary ignore until imbl drops bitmaps"},
 ]
 # If this is true, then cargo deny will use the git executable to fetch advisory database.
