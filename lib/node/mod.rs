@@ -349,12 +349,15 @@ where
         Ok(self.state.try_get_tip(&rotxn)?)
     }
 
+    /// Regenerate proofs and submit transaction
     pub fn submit_transaction(
         &self,
-        transaction: AuthorizedTransaction,
+        mut transaction: AuthorizedTransaction,
     ) -> Result<(), Error> {
         {
             let mut rwtxn = self.env.write_txn().map_err(EnvError::from)?;
+            self.state
+                .regenerate_proof(&rwtxn, &mut transaction.transaction)?;
 
             // Try to validate the transaction
             match self.state.validate_transaction(&rwtxn, &transaction) {
