@@ -358,7 +358,7 @@ impl Net {
     pub fn connect_peer(
         &self,
         env: sneed::Env<heed::WithoutTls>,
-        resolved_addr: ResolvedSeedAddress,
+        mut resolved_addr: ResolvedSeedAddress,
     ) -> Result<(), Error> {
         {
             let active_peers = self.active_peers.read();
@@ -370,19 +370,31 @@ impl Net {
                 }
             }
         }
-        let addr = SocketAddr::new(
-            resolved_addr.first_ip_addr(),
-            resolved_addr.port(),
-        );
-
-        // This check happens within Quinn with a
-        // generic "invalid remote address". We run the
-        // same check, and provide a friendlier error
-        // message.
-        if addr.ip().is_unspecified() {
-            return Err(Error::UnspecfiedPeerIP(addr.ip()));
-        }
-        let connecting = self.server.connect(addr, "localhost")?;
+        let (addr, connecting) = loop {
+            let addr = SocketAddr::new(
+                resolved_addr.first_ip_addr(),
+                resolved_addr.port(),
+            );
+            // This check happens within Quinn with a
+            // generic "invalid remote address". We run the
+            // same check, and provide a friendlier error
+            // message.
+            if addr.ip().is_unspecified() {
+                return Err(Error::UnspecfiedPeerIP(addr.ip()));
+            }
+            match self.server.connect(addr, "localhost") {
+                Ok(connecting) => break (addr, connecting),
+                Err(err @ quinn::ConnectError::InvalidRemoteAddress(_)) => {
+                    let (_, Some(next_addr)) =
+                        resolved_addr.pop_first_ip_addr()
+                    else {
+                        return Err(err.into());
+                    };
+                    resolved_addr = next_addr;
+                }
+                Err(err) => return Err(err.into()),
+            }
+        };
         // A host name resolves again at each start, so only an IP address
         // goes into the database.
         if let ResolvedSeedAddress::Static(static_addr) = resolved_addr {
@@ -811,13 +823,22 @@ mod seed_peer_tests {
 #[cfg(test)]
 mod peer_handle_test {
     use super::{
-        Net, PeerConnectionCtxt, PeerInfoRx, make_server_endpoint, peer,
+        DialSeedsHandle, Net, PeerConnectionCtxt, PeerConnectionInfo,
+        PeerInfoRx, make_server_endpoint, peer,
     };
-    use crate::{archive::Archive, state::State, types::Network};
+    use crate::{
+        archive::Archive,
+        state::State,
+        types::{
+            Network,
+            net::{ResolvedSeedAddress, SeedAddress},
+        },
+    };
+    use anyhow::Context;
     use futures::StreamExt;
     use std::{
         collections::HashSet,
-        net::{Ipv4Addr, SocketAddr},
+        net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
         time::Duration,
     };
 
@@ -829,6 +850,21 @@ mod peer_handle_test {
         Net,
         PeerInfoRx,
     )> {
+        let (temp_dir, env, net, info_rx, _dial_seeds) =
+            temp_net_with_peers(test_name, HashSet::new())?;
+        Ok((temp_dir, env, net, info_rx))
+    }
+
+    fn temp_net_with_peers(
+        test_name: &str,
+        add_peers: HashSet<SeedAddress>,
+    ) -> anyhow::Result<(
+        temp_dir::TempDir,
+        sneed::Env<heed::WithoutTls>,
+        Net,
+        PeerInfoRx,
+        DialSeedsHandle,
+    )> {
         let temp_dir =
             temp_dir::TempDir::with_prefix(format!("coinshift-{test_name}-"))?;
         let mut opts = heed::EnvOpenOptions::new().read_txn_without_tls();
@@ -837,7 +873,7 @@ mod peer_handle_test {
         let env = unsafe { sneed::Env::open(&opts, temp_dir.path()) }?;
         let archive = Archive::new(&env)?;
         let state = State::new(&env)?;
-        let (net, info_rx, _dial_seeds) = Net::new(
+        let (net, info_rx, dial_seeds) = Net::new(
             &tokio::runtime::Handle::current(),
             &env,
             archive,
@@ -845,9 +881,105 @@ mod peer_handle_test {
             Network::Regtest,
             state,
             (Ipv4Addr::LOCALHOST, 0).into(),
-            HashSet::new(),
+            add_peers,
         )?;
-        Ok((temp_dir, env, net, info_rx))
+        Ok((temp_dir, env, net, info_rx, dial_seeds))
+    }
+
+    #[tokio::test]
+    async fn connect_peer_skips_ipv6_on_an_ipv4_endpoint() -> anyhow::Result<()>
+    {
+        let (_temp_dir, env, net, mut info_rx) = temp_net("peer-family")?;
+        let (remote, _) =
+            make_server_endpoint((Ipv4Addr::LOCALHOST, 0).into())?;
+        let addr = remote.local_addr()?;
+        let next_ip = Ipv4Addr::new(127, 0, 0, 2);
+        let resolved = ResolvedSeedAddress::Domain {
+            domain: "localhost".to_owned(),
+            port: addr.port(),
+            addrs: nonempty::NonEmpty {
+                head: next_ip.into(),
+                tail: vec![
+                    Ipv4Addr::LOCALHOST.into(),
+                    Ipv6Addr::LOCALHOST.into(),
+                ],
+            },
+        };
+
+        net.connect_peer(env, resolved)?;
+
+        let peers = net.get_active_peers();
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].address, addr);
+        assert!(net.server.local_addr()?.is_ipv4());
+        net.server.close(0_u32.into(), b"test complete");
+        let (reported_addr, info) =
+            tokio::time::timeout(Duration::from_secs(5), info_rx.next())
+                .await?
+                .context("the peer task returned no result")?;
+        let Some(PeerConnectionInfo::Error { resolved_addr, .. }) = info else {
+            anyhow::bail!("the peer task returned no connection error");
+        };
+        assert_eq!(reported_addr, addr);
+        assert_eq!(
+            resolved_addr.ip_addrs().collect::<Vec<_>>(),
+            vec![IpAddr::V4(Ipv4Addr::LOCALHOST), next_ip.into()]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn connect_peer_returns_the_last_invalid_address()
+    -> anyhow::Result<()> {
+        let (_temp_dir, env, net, _info_rx) = temp_net("peer-ipv6")?;
+        let addr = SocketAddr::from((Ipv6Addr::LOCALHOST, 4004));
+        let resolved = ResolvedSeedAddress::Domain {
+            domain: "localhost".to_owned(),
+            port: addr.port(),
+            addrs: nonempty::NonEmpty {
+                head: addr.ip(),
+                tail: vec!["::2".parse()?],
+            },
+        };
+
+        let error = net.connect_peer(env, resolved).unwrap_err();
+
+        assert!(matches!(
+            error,
+            super::Error::Connect(
+                quinn::ConnectError::InvalidRemoteAddress(failed)
+            ) if failed == addr
+        ));
+        assert!(net.get_active_peers().is_empty());
+        Ok(())
+    }
+
+    /// A seed host name resolves at startup, the node dials it, and the
+    /// database holds no resolved address for it.
+    #[tokio::test]
+    async fn a_seed_host_name_dials_at_startup() -> anyhow::Result<()> {
+        let (remote, _) =
+            make_server_endpoint((Ipv4Addr::LOCALHOST, 0).into())?;
+        let addr = remote.local_addr()?;
+        let seed_addr: SeedAddress =
+            format!("localhost:{}", addr.port()).parse()?;
+        let (_temp_dir, env, net, _info_rx, _dial_seeds) =
+            temp_net_with_peers("seed-name", HashSet::from([seed_addr]))?;
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while net.get_active_peers().is_empty() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .context("the node did not dial the seed host name")?;
+
+        let peers = net.get_active_peers();
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].address, addr);
+        let rotxn = env.read_txn()?;
+        assert_eq!(net.known_peers.len(&rotxn)?, 0);
+        Ok(())
     }
 
     #[tokio::test]
