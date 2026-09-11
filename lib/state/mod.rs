@@ -22,9 +22,9 @@ use crate::{
         Authorized, AuthorizedTransaction, BlockHash, BlockIndexEvents, Body,
         FilledTransaction, GetAddress, GetValue, Header, InPoint, M6id,
         MerkleRoot, OutPoint, OutPointKey, Output, ParentChainType,
-        PointedOutput, SpentOutput, Swap, SwapId, SwapReservation, SwapState,
-        SwapTxId, Transaction, TxData, VERSION, Verify, Version,
-        WithdrawalBundle, WithdrawalBundleStatus,
+        PointedOutput, PointedOutputRef, SpentOutput, Swap, SwapId,
+        SwapReservation, SwapState, SwapTxId, Transaction, TxData, VERSION,
+        Verify, Version, WithdrawalBundle, WithdrawalBundleStatus,
         proto::mainchain::TwoWayPegData,
     },
     util::Watchable,
@@ -416,10 +416,30 @@ impl State {
             .map_err(DbError::from)?)
     }
 
+    fn validate_utxo_hashes(
+        transaction: &FilledTransaction,
+    ) -> Result<(), Error> {
+        for (outpoint, utxo_hash, output) in transaction.inputs() {
+            let outpoint = *outpoint;
+            let utxo_hash = *utxo_hash;
+            let computed_utxo_hash =
+                crate::types::hash(&PointedOutputRef { outpoint, output });
+            if utxo_hash != computed_utxo_hash {
+                return Err(Error::UtxoHashMismatch {
+                    computed: computed_utxo_hash,
+                    outpoint,
+                    input_hash: utxo_hash,
+                });
+            }
+        }
+        Ok(())
+    }
+
     pub fn validate_filled_transaction(
         &self,
         transaction: &FilledTransaction,
     ) -> Result<bitcoin::Amount, Error> {
+        let () = Self::validate_utxo_hashes(transaction)?;
         let mut value_in = bitcoin::Amount::ZERO;
         let mut value_out = bitcoin::Amount::ZERO;
         for utxo in &transaction.spent_utxos {
@@ -2143,7 +2163,7 @@ mod tests {
     use super::*;
     use crate::types::{Address, Output, OutputContent, Transaction};
 
-    fn test_state() -> (temp_dir::TempDir, Env, State) {
+    pub(super) fn test_state() -> (temp_dir::TempDir, Env, State) {
         let dir = temp_dir::TempDir::new().unwrap();
         let mut opts = heed::EnvOpenOptions::new();
         opts.map_size(10 * 1024 * 1024).max_dbs(State::NUM_DBS);
