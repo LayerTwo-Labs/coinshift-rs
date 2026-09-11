@@ -261,6 +261,8 @@ pub enum MainchainSyncPhase {
     Idle,
     /// Fetch mainchain headers from the enforcer
     Headers,
+    /// Write the fetched mainchain headers to the archive
+    Writing,
     /// Connect mainchain blocks to the sidechain state
     State,
 }
