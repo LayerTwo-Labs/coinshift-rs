@@ -745,6 +745,7 @@ impl App {
             cusf_mainchain_wallet: cusf_mainchain_wallet.clone(),
             magic_bytes_override: config.network_magic_override,
             network: config.network,
+            server_names: config.server_names.clone(),
             wallet: Some(Arc::new(wallet.clone())),
             l1_rpc_config_path: Some(l1_rpc_config_path),
         };

@@ -119,9 +119,12 @@ fn configure_client() -> Result<ClientConfig, error::ConfigureClient> {
 }
 
 /// Returns default server configuration along with its certificate.
-fn configure_server() -> Result<(ServerConfig, Vec<u8>), Error> {
+fn configure_server(
+    mut server_names: HashSet<String>,
+) -> Result<(ServerConfig, Vec<u8>), Error> {
+    server_names.insert("localhost".to_owned());
     let cert_key =
-        rcgen::generate_simple_self_signed(vec!["localhost".into()])?;
+        rcgen::generate_simple_self_signed(Vec::from_iter(server_names))?;
     let keypair_der = cert_key.signing_key.serialize_der();
     let priv_key = rustls::pki_types::PrivateKeyDer::Pkcs8(keypair_der.into());
     let cert_der = cert_key.cert.der().to_vec();
@@ -144,8 +147,9 @@ fn configure_server() -> Result<(ServerConfig, Vec<u8>), Error> {
 /// - server certificate serialized into DER format
 pub fn make_server_endpoint(
     bind_addr: SocketAddr,
+    server_names: HashSet<String>,
 ) -> Result<(Endpoint, Vec<u8>), Error> {
-    let (server_config, server_cert) = configure_server()?;
+    let (server_config, server_cert) = configure_server(server_names)?;
 
     tracing::info!("creating server endpoint: binding to {bind_addr}",);
 
@@ -382,7 +386,11 @@ impl Net {
             if addr.ip().is_unspecified() {
                 return Err(Error::UnspecfiedPeerIP(addr.ip()));
             }
-            match self.server.connect(addr, "localhost") {
+            let server_name = match resolved_addr.host() {
+                url::Host::Domain(domain) => domain,
+                url::Host::Ipv4(_) | url::Host::Ipv6(_) => "localhost",
+            };
+            match self.server.connect(addr, server_name) {
                 Ok(connecting) => break (addr, connecting),
                 Err(err @ quinn::ConnectError::InvalidRemoteAddress(_)) => {
                     let (_, Some(next_addr)) =
@@ -466,10 +474,11 @@ impl Net {
         state: State,
         bind_addr: SocketAddr,
         add_peers: HashSet<SeedAddress>,
+        server_names: HashSet<String>,
     ) -> Result<(Self, PeerInfoRx, DialSeedsHandle), Error> {
         tracing::debug!(bind_addr = %bind_addr, "Net::new: Starting initialization");
         tracing::debug!("Net::new: Creating server endpoint");
-        let (server, _) = make_server_endpoint(bind_addr)?;
+        let (server, _) = make_server_endpoint(bind_addr, server_names)?;
         tracing::debug!("Net::new: Server endpoint created");
         let active_peers = Arc::new(RwLock::new(HashMap::new()));
         tracing::debug!("Net::new: Opening database transaction");
@@ -751,8 +760,8 @@ mod crypto_provider_tests {
     #[test]
     fn tls_configs_build_once_a_provider_is_installed() {
         crate::install_default_crypto_provider();
-        let (_server_config, cert) =
-            configure_server().expect("server config should build");
+        let (_server_config, cert) = configure_server(Default::default())
+            .expect("server config should build");
         assert!(!cert.is_empty(), "server config should yield a certificate");
         let _client_config =
             configure_client().expect("client config should build");
@@ -882,6 +891,7 @@ mod peer_handle_test {
             state,
             (Ipv4Addr::LOCALHOST, 0).into(),
             add_peers,
+            HashSet::new(),
         )?;
         Ok((temp_dir, env, net, info_rx, dial_seeds))
     }
@@ -890,8 +900,10 @@ mod peer_handle_test {
     async fn connect_peer_skips_ipv6_on_an_ipv4_endpoint() -> anyhow::Result<()>
     {
         let (_temp_dir, env, net, mut info_rx) = temp_net("peer-family")?;
-        let (remote, _) =
-            make_server_endpoint((Ipv4Addr::LOCALHOST, 0).into())?;
+        let (remote, _) = make_server_endpoint(
+            (Ipv4Addr::LOCALHOST, 0).into(),
+            HashSet::new(),
+        )?;
         let addr = remote.local_addr()?;
         let next_ip = Ipv4Addr::new(127, 0, 0, 2);
         let resolved = ResolvedSeedAddress::Domain {
@@ -958,8 +970,10 @@ mod peer_handle_test {
     /// database holds no resolved address for it.
     #[tokio::test]
     async fn a_seed_host_name_dials_at_startup() -> anyhow::Result<()> {
-        let (remote, _) =
-            make_server_endpoint((Ipv4Addr::LOCALHOST, 0).into())?;
+        let (remote, _) = make_server_endpoint(
+            (Ipv4Addr::LOCALHOST, 0).into(),
+            HashSet::new(),
+        )?;
         let addr = remote.local_addr()?;
         let seed_addr: SeedAddress =
             format!("localhost:{}", addr.port()).parse()?;
@@ -985,8 +999,10 @@ mod peer_handle_test {
     #[tokio::test]
     async fn connect_peer_keeps_a_static_ipv4_address() -> anyhow::Result<()> {
         let (_temp_dir, env, net, _info_rx) = temp_net("peer-static")?;
-        let (remote, _) =
-            make_server_endpoint((Ipv4Addr::LOCALHOST, 0).into())?;
+        let (remote, _) = make_server_endpoint(
+            (Ipv4Addr::LOCALHOST, 0).into(),
+            HashSet::new(),
+        )?;
         let addr = remote.local_addr()?;
 
         net.connect_peer(env, addr.into())?;
@@ -1017,8 +1033,10 @@ mod peer_handle_test {
     async fn rejected_duplicate_has_no_peer_close_event() -> anyhow::Result<()>
     {
         let (_temp_dir, env, net, info_rx) = temp_net("peer-duplicate")?;
-        let (remote, _) =
-            make_server_endpoint((Ipv4Addr::LOCALHOST, 0).into())?;
+        let (remote, _) = make_server_endpoint(
+            (Ipv4Addr::LOCALHOST, 0).into(),
+            HashSet::new(),
+        )?;
         let addr = remote.local_addr()?;
         net.connect_peer(env.clone(), addr.into())?;
         let connection_ctxt = PeerConnectionCtxt {

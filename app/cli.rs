@@ -173,6 +173,10 @@ pub(super) struct RunArgs {
     /// Socket address to host the RPC server
     #[arg(default_value_t = DEFAULT_RPC_ADDR, long, short)]
     rpc_addr: SocketAddr,
+    /// Host name that the P2P server certificate holds, in addition to
+    /// `localhost`. Use this option one time for each host name.
+    #[arg(long = "server-name")]
+    server_names: Vec<String>,
 
     /// Enable Bitcoin Signet in L1 config before start (predefined: localhost:38332)
     #[arg(long)]
@@ -198,6 +202,7 @@ pub struct Config {
     pub network_magic_override:
         Option<coinshift::net::peer_message::MagicBytes>,
     pub rpc_addr: SocketAddr,
+    pub server_names: HashSet<String>,
 }
 
 impl RunArgs {
@@ -236,6 +241,7 @@ impl RunArgs {
             network: self.network,
             network_magic_override: self.network_magic,
             rpc_addr: self.rpc_addr,
+            server_names: HashSet::from_iter(self.server_names),
         })
     }
 }

@@ -112,6 +112,7 @@ pub struct NodeConfig<MainchainTransport = Channel> {
         Option<mainchain::WalletClient<MainchainTransport>>,
     pub magic_bytes_override: Option<crate::net::peer_message::MagicBytes>,
     pub network: Network,
+    pub server_names: HashSet<String>,
     pub wallet: Option<Arc<crate::wallet::Wallet>>,
     pub l1_rpc_config_path: Option<std::path::PathBuf>,
 }
@@ -225,6 +226,7 @@ where
             state.clone(),
             config.bind_addr,
             config.add_peers,
+            config.server_names,
         )?;
         tracing::info!("Node::new: Net created");
         tracing::info!("Node::new: Creating NetTaskHandle");
