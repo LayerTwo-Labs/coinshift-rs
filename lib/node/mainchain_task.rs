@@ -216,7 +216,7 @@ where
         let mut block_infos =
             Vec::<(mainchain::BlockHeaderInfo, mainchain::BlockInfo)>::new();
         const LOG_PROGRESS_INTERVAL: Duration = Duration::from_secs(5);
-        const BATCH_REQUEST_SIZE: u32 = 1000;
+        const BATCH_REQUEST_SIZE: u32 = 20_000;
         let mut progress_logged = Instant::now();
         let mut batch_count = 0;
         loop {
@@ -790,5 +790,152 @@ impl Drop for MainchainTaskHandle {
         if let Some(task) = Arc::get_mut(&mut self.task) {
             task.abort()
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use std::{
+        convert::Infallible,
+        future::Ready,
+        sync::Arc,
+        task::{Context, Poll},
+    };
+
+    use bitcoin::hashes::Hash as _;
+    use parking_lot::Mutex;
+    use tonic::codegen::{BoxFuture, Service, http};
+
+    use super::MainchainTask;
+    use crate::{
+        archive::{
+            Archive,
+            test::{main_header_info, temp_env},
+        },
+        types::proto::{
+            common::{ConsensusHex, ReverseHex},
+            mainchain::{ValidatorClient, generated},
+        },
+    };
+
+    /// Serves `GetBlockInfo` for the chain of [`main_header_info`], and
+    /// records the `max_ancestors` of each request
+    #[derive(Clone, Default)]
+    struct MockValidator {
+        max_ancestors: Arc<Mutex<Vec<u32>>>,
+    }
+
+    impl tonic::server::UnaryService<generated::GetBlockInfoRequest>
+        for MockValidator
+    {
+        type Response = generated::GetBlockInfoResponse;
+        type Future = Ready<
+            Result<
+                tonic::Response<generated::GetBlockInfoResponse>,
+                tonic::Status,
+            >,
+        >;
+
+        fn call(
+            &mut self,
+            request: tonic::Request<generated::GetBlockInfoRequest>,
+        ) -> Ready<
+            Result<
+                tonic::Response<generated::GetBlockInfoResponse>,
+                tonic::Status,
+            >,
+        > {
+            let request = request.into_inner();
+            let block_hash: bitcoin::BlockHash = request
+                .block_hash
+                .as_ref()
+                .expect("block_hash")
+                .decode::<generated::GetBlockInfoRequest, _>("block_hash")
+                .expect("block_hash decodes");
+            let max_ancestors = request.max_ancestors.expect("max_ancestors");
+            self.max_ancestors.lock().push(max_ancestors);
+            let height = u32::from_le_bytes(
+                block_hash.as_byte_array()[1..5]
+                    .try_into()
+                    .expect("4 height bytes"),
+            );
+            let infos = (height.saturating_sub(max_ancestors)..=height)
+                .rev()
+                .map(|height| {
+                    let info = main_header_info(height);
+                    generated::get_block_info_response::Info {
+                        header_info: Some(generated::BlockHeaderInfo {
+                            block_hash: Some(ReverseHex::encode(
+                                &info.block_hash,
+                            )),
+                            prev_block_hash: Some(ReverseHex::encode(
+                                &info.prev_block_hash,
+                            )),
+                            height,
+                            work: Some(ConsensusHex::encode(
+                                &info.work.to_le_bytes(),
+                            )),
+                            timestamp: 0,
+                        }),
+                        block_info: Some(generated::BlockInfo::default()),
+                    }
+                })
+                .collect();
+            std::future::ready(Ok(tonic::Response::new(
+                generated::GetBlockInfoResponse { infos },
+            )))
+        }
+    }
+
+    impl Service<http::Request<tonic::body::Body>> for MockValidator {
+        type Response = http::Response<tonic::body::Body>;
+        type Error = Infallible;
+        type Future = BoxFuture<http::Response<tonic::body::Body>, Infallible>;
+
+        fn poll_ready(
+            &mut self,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Infallible>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(
+            &mut self,
+            request: http::Request<tonic::body::Body>,
+        ) -> BoxFuture<http::Response<tonic::body::Body>, Infallible> {
+            assert_eq!(
+                request.uri().path(),
+                "/cusf.mainchain.v1.ValidatorService/GetBlockInfo"
+            );
+            let mock = self.clone();
+            Box::pin(async move {
+                let mut grpc = tonic::server::Grpc::new(
+                    tonic_prost::ProstCodec::default(),
+                );
+                Ok(grpc.unary(mock, request).await)
+            })
+        }
+    }
+
+    #[test]
+    fn ancestor_walk_asks_for_20000_headers() -> anyhow::Result<()> {
+        let (_temp_dir, env) =
+            temp_env("ancestor-walk-asks-for-20000-headers")?;
+        let archive = Archive::new(&env)?;
+        let mock = MockValidator::default();
+        let mut client = ValidatorClient::new(mock.clone());
+        let tip = main_header_info(100).block_hash;
+        let runtime = tokio::runtime::Runtime::new()?;
+        let available = runtime.block_on(
+            MainchainTask::<MockValidator>::request_ancestor_infos(
+                &env,
+                &archive,
+                &mut client,
+                tip,
+            ),
+        )?;
+        assert!(available);
+        assert_eq!(*mock.max_ancestors.lock(), [19_999]);
+        Ok(())
     }
 }
