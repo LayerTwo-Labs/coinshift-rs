@@ -20,9 +20,9 @@ use crate::{
     types::{
         Accumulator, Address, AmountOverflowError, AmountUnderflowError,
         Authorized, AuthorizedTransaction, BlockHash, BlockIndexEvents,
-        BmmResult, Body, FilledTransaction, GetValue, Header, Network,
-        OutPoint, OutPointKey, Output, SpentOutput, SwapId, Tip, Transaction,
-        Txid, WithdrawalBundle,
+        BmmResult, Body, FilledTransaction, GetValue, Header,
+        MainchainSyncProgress, Network, OutPoint, OutPointKey, Output,
+        SpentOutput, SwapId, Tip, Transaction, Txid, WithdrawalBundle,
         proto::{self, mainchain},
     },
     util::Watchable,
@@ -714,6 +714,11 @@ where
 
     pub fn get_active_peers(&self) -> Vec<Peer> {
         self.net.get_active_peers()
+    }
+
+    /// Get the progress of the startup sync with the mainchain
+    pub fn mainchain_sync_progress(&self) -> MainchainSyncProgress {
+        self.mainchain_task.sync_progress()
     }
 
     pub async fn request_mainchain_ancestor_infos(

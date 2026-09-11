@@ -1676,22 +1676,21 @@ pub(crate) mod test {
     }
 
     pub(crate) fn main_header_info(height: u32) -> BlockHeaderInfo {
-        let block_hash = {
+        let block_hash = |height: u32| {
             let mut bytes = [0u8; 32];
             bytes[0] = 0xff;
             bytes[1..5].copy_from_slice(&height.to_le_bytes());
             bitcoin::BlockHash::from_byte_array(bytes)
         };
-        let prev_block_hash = if height == 0 {
-            bitcoin::BlockHash::all_zeros()
-        } else {
-            main_header_info(height - 1).block_hash
+        let prev_block_hash = match height.checked_sub(1) {
+            Some(prev_height) => block_hash(prev_height),
+            None => bitcoin::BlockHash::all_zeros(),
         };
         BlockHeaderInfo {
-            block_hash,
+            block_hash: block_hash(height),
             prev_block_hash,
             height,
-            work: bitcoin::Work::from_le_bytes([1; 32]),
+            work: bitcoin::Target::MAX.to_work(),
         }
     }
 

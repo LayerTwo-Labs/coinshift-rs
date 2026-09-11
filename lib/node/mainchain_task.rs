@@ -23,7 +23,7 @@ use tokio::{
 use crate::{
     archive::{self, Archive},
     types::{
-        BmmResult,
+        BmmResult, MainchainSyncPhase, MainchainSyncProgress,
         proto::{
             self,
             mainchain::{
@@ -134,10 +134,48 @@ pub(super) enum Event {
     Response(Response),
 }
 
+/// Progress of the startup sync, shared with the RPC server
+#[derive(Clone, Default)]
+struct SyncProgress(Arc<parking_lot::Mutex<MainchainSyncProgress>>);
+
+impl SyncProgress {
+    fn get(&self) -> MainchainSyncProgress {
+        *self.0.lock()
+    }
+
+    /// `next_height` is the height of the next header to fetch
+    fn fetched_headers(&self, tip_height: u32, next_height: Option<u32>) {
+        *self.0.lock() = MainchainSyncProgress {
+            phase: MainchainSyncPhase::Headers,
+            done: tip_height - next_height.unwrap_or(0),
+            total: tip_height,
+            tip_height,
+        };
+    }
+
+    fn start_state(&self, tip_height: u32, total: u32) {
+        *self.0.lock() = MainchainSyncProgress {
+            phase: MainchainSyncPhase::State,
+            done: 0,
+            total,
+            tip_height,
+        };
+    }
+
+    fn connected(&self, blocks: u32) {
+        self.0.lock().done += blocks;
+    }
+
+    fn set_idle(&self) {
+        *self.0.lock() = MainchainSyncProgress::default();
+    }
+}
+
 struct ContextMut<'a, Transport> {
     env: &'a sneed::Env,
     archive: &'a Archive,
     mainchain: &'a mut ValidatorClient<Transport>,
+    sync_progress: &'a SyncProgress,
     event_tx: &'a mut UnboundedSender<Event>,
 }
 
@@ -145,6 +183,7 @@ struct MainchainTask<Transport = tonic::transport::Channel> {
     env: sneed::Env,
     archive: Archive,
     mainchain: ValidatorClient<Transport>,
+    sync_progress: SyncProgress,
     // receive a request, and optional oneshot sender to send the result to
     // instead of sending on `response_tx`
     request_rx: UnboundedReceiver<(Request, Option<oneshot::Sender<Response>>)>,
@@ -195,6 +234,7 @@ where
         env: &sneed::Env,
         archive: &Archive,
         cusf_mainchain: &mut ValidatorClient<Transport>,
+        sync_progress: &SyncProgress,
         block_hash: bitcoin::BlockHash,
     ) -> Result<bool, error::RequestAncestorInfos> {
         let start_time = Instant::now();
@@ -260,6 +300,8 @@ where
                 current_height = current_header.height.checked_sub(1);
             }
             block_infos.extend(block_infos_resp);
+            sync_progress
+                .fetched_headers(block_infos[0].0.height, current_height);
             tracing::info!(
                 %block_hash,
                 batch = batch_count,
@@ -341,6 +383,7 @@ where
     fn sync_side_tips_to_tip(
         mut rwtxn: RwTxn,
         archive: &Archive,
+        sync_progress: &SyncProgress,
         mainchain_tip: bitcoin::BlockHash,
         event_tx: &mut UnboundedSender<Event>,
     ) -> Result<(), error::SyncSideTipsToTip> {
@@ -389,6 +432,16 @@ where
             });
             side_tips_tip_info = main_state_prev_tip_info;
         }
+        if let Some(tip_info) =
+            archive.try_get_main_header_info(&rwtxn, &mainchain_tip)?
+        {
+            let start_height =
+                side_tips_tip_info.map_or(0, |info| info.height + 1);
+            sync_progress.start_state(
+                tip_info.height,
+                tip_info.height + 1 - start_height,
+            );
+        }
         // connect mainchain state tip until mainchain tip is reached
         while extract_tip(side_tips_tip_info) != mainchain_tip {
             // Batch iterator items
@@ -405,6 +458,7 @@ where
                     .take(BATCH_SIZE)
                     .collect()?
             };
+            let batch_len = main_header_infos.len() as u32;
             for main_header_info in main_header_infos {
                 let main_block_info = archive.get_main_block_info(
                     &rwtxn,
@@ -464,6 +518,7 @@ where
                     block_info: main_block_info,
                 });
             }
+            sync_progress.connected(batch_len);
         }
         rwtxn.commit()?;
         // emit events
@@ -591,9 +646,11 @@ where
                     ctxt.env,
                     ctxt.archive,
                     ctxt.mainchain,
+                    ctxt.sync_progress,
                     main_block_hash,
                 )
                 .await;
+                ctxt.sync_progress.set_idle();
                 let response = Response::AncestorInfos(main_block_hash, res);
                 if let Some(response_tx) = response_tx {
                     response_tx
@@ -618,6 +675,7 @@ where
             &self.env,
             &self.archive,
             &mut self.mainchain,
+            &self.sync_progress,
             best_main_tip,
         )
         .await
@@ -639,6 +697,7 @@ where
             let () = Self::sync_side_tips_to_tip(
                 rwtxn,
                 &self.archive,
+                &self.sync_progress,
                 best_main_tip,
                 &mut self.event_tx,
             )
@@ -646,6 +705,7 @@ where
                 tip: best_main_tip,
                 source: Box::new(err),
             })?;
+            self.sync_progress.set_idle();
         }
         enum MailboxItem {
             BlockEvent(proto::mainchain::Event),
@@ -684,6 +744,7 @@ where
                         env: &self.env,
                         archive: &self.archive,
                         mainchain: &mut self.mainchain,
+                        sync_progress: &self.sync_progress,
                         event_tx: &mut self.event_tx,
                     };
                     let () =
@@ -710,6 +771,7 @@ where
                     tracing::error!("Mainchain task error: {err:#}");
                 }
             }
+            self.sync_progress.set_idle();
             tokio::time::sleep(RECONNECT_DELAY).await;
             tracing::info!("Mainchain task: connecting to the mainchain node");
         }
@@ -721,6 +783,7 @@ where
 #[derive(Clone)]
 pub(super) struct MainchainTaskHandle {
     task: Arc<JoinHandle<()>>,
+    sync_progress: SyncProgress,
     // send a request, and optional oneshot sender to receive the result on the
     // corresponding oneshot receiver
     request_tx:
@@ -739,19 +802,26 @@ impl MainchainTaskHandle {
     {
         let (request_tx, request_rx) = mpsc::unbounded();
         let (event_tx, event_rx) = mpsc::unbounded();
+        let sync_progress = SyncProgress::default();
         let task = MainchainTask {
             env,
             archive,
             mainchain,
+            sync_progress: sync_progress.clone(),
             request_rx,
             event_tx,
         };
         let task = spawn(task.run());
         let task_handle = MainchainTaskHandle {
             task: Arc::new(task),
+            sync_progress,
             request_tx,
         };
         (task_handle, event_rx)
+    }
+
+    pub fn sync_progress(&self) -> MainchainSyncProgress {
+        self.sync_progress.get()
     }
 
     /// Send a request
@@ -803,26 +873,32 @@ mod test {
     };
 
     use bitcoin::hashes::Hash as _;
+    use futures::channel::mpsc;
     use parking_lot::Mutex;
     use tonic::codegen::{BoxFuture, Service, http};
 
-    use super::MainchainTask;
+    use super::{MainchainTask, SyncProgress};
     use crate::{
         archive::{
             Archive,
             test::{main_header_info, temp_env},
         },
-        types::proto::{
-            common::{ConsensusHex, ReverseHex},
-            mainchain::{ValidatorClient, generated},
+        types::{
+            MainchainSyncPhase, MainchainSyncProgress,
+            proto::{
+                common::{ConsensusHex, ReverseHex},
+                mainchain::{ValidatorClient, generated},
+            },
         },
     };
 
     /// Serves `GetBlockInfo` for the chain of [`main_header_info`], and
-    /// records the `max_ancestors` of each request
+    /// records the `max_ancestors` and the sync progress of each request
     #[derive(Clone, Default)]
     struct MockValidator {
         max_ancestors: Arc<Mutex<Vec<u32>>>,
+        progress: Arc<Mutex<Vec<MainchainSyncProgress>>>,
+        sync_progress: SyncProgress,
     }
 
     impl tonic::server::UnaryService<generated::GetBlockInfoRequest>
@@ -854,6 +930,7 @@ mod test {
                 .expect("block_hash decodes");
             let max_ancestors = request.max_ancestors.expect("max_ancestors");
             self.max_ancestors.lock().push(max_ancestors);
+            self.progress.lock().push(self.sync_progress.get());
             let height = u32::from_le_bytes(
                 block_hash.as_byte_array()[1..5]
                     .try_into()
@@ -931,11 +1008,76 @@ mod test {
                 &env,
                 &archive,
                 &mut client,
+                &mock.sync_progress,
                 tip,
             ),
         )?;
         assert!(available);
         assert_eq!(*mock.max_ancestors.lock(), [19_999]);
+        Ok(())
+    }
+
+    #[test]
+    fn sync_progress_walks_headers_then_state() -> anyhow::Result<()> {
+        const TIP_HEIGHT: u32 = 20_099;
+        let (_temp_dir, env) =
+            temp_env("sync-progress-walks-headers-then-state")?;
+        let archive = Archive::new(&env)?;
+        let mock = MockValidator::default();
+        let sync_progress = &mock.sync_progress;
+        let mut client = ValidatorClient::new(mock.clone());
+        let tip = main_header_info(TIP_HEIGHT).block_hash;
+        let runtime = tokio::runtime::Runtime::new()?;
+        let available = runtime.block_on(
+            MainchainTask::<MockValidator>::request_ancestor_infos(
+                &env,
+                &archive,
+                &mut client,
+                sync_progress,
+                tip,
+            ),
+        )?;
+        assert!(available);
+        let headers = |done| MainchainSyncProgress {
+            phase: MainchainSyncPhase::Headers,
+            done,
+            total: TIP_HEIGHT,
+            tip_height: TIP_HEIGHT,
+        };
+        assert_eq!(
+            *mock.progress.lock(),
+            [MainchainSyncProgress::default(), headers(20_000)]
+        );
+        assert_eq!(sync_progress.get(), headers(TIP_HEIGHT));
+
+        let (mut event_tx, _event_rx) = mpsc::unbounded();
+        MainchainTask::<MockValidator>::sync_side_tips_to_tip(
+            env.write_txn()?,
+            &archive,
+            sync_progress,
+            tip,
+            &mut event_tx,
+        )?;
+        assert_eq!(
+            serde_json::to_value(sync_progress.get())?,
+            serde_json::json!({
+                "phase": "state",
+                "done": TIP_HEIGHT + 1,
+                "total": TIP_HEIGHT + 1,
+                "tip_height": TIP_HEIGHT,
+            })
+        );
+
+        sync_progress.set_idle();
+        assert_eq!(
+            serde_json::to_value(sync_progress.get())?,
+            serde_json::json!({
+                "phase": "idle",
+                "done": 0,
+                "total": 0,
+                "tip_height": 0,
+            })
+        );
         Ok(())
     }
 }
