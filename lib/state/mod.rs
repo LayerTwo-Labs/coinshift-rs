@@ -168,7 +168,7 @@ pub struct State {
 impl State {
     pub const NUM_DBS: u32 = 18;
 
-    pub fn new(env: &sneed::Env) -> Result<Self, Error> {
+    pub fn new<Tls>(env: &sneed::Env<Tls>) -> Result<Self, Error> {
         let mut rwtxn = env.write_txn().map_err(EnvError::from)?;
         let tip = DatabaseUnique::create(env, &mut rwtxn, "tip")
             .map_err(EnvError::from)?;

@@ -121,7 +121,7 @@ pub struct Node<MainchainTransport = Channel> {
         Option<Arc<Mutex<mainchain::WalletClient<MainchainTransport>>>>,
     /// Swap IDs we created that are still pending (mempool). Only creator can cancel those.
     created_pending_swap_ids: Arc<StdMutex<HashSet<SwapId>>>,
-    env: sneed::Env,
+    env: sneed::Env<heed::WithoutTls>,
     mainchain_task: MainchainTaskHandle,
     mempool: MemPool,
     net: Net,
@@ -152,7 +152,8 @@ where
         tracing::debug!("Node::new: Database directory created/verified");
         let env = {
             use heed::EnvFlags;
-            let mut env_open_opts = heed::EnvOpenOptions::new();
+            let mut env_open_opts =
+                heed::EnvOpenOptions::new().read_txn_without_tls();
             env_open_opts
                 .map_size(128 * 1024 * 1024 * 1024) // 128 GB
                 .max_dbs(
@@ -180,8 +181,7 @@ where
                 | EnvFlags::MAP_ASYNC
                 | EnvFlags::NO_SYNC
                 | EnvFlags::NO_META_SYNC
-                | EnvFlags::NO_READ_AHEAD
-                | EnvFlags::NO_TLS;
+                | EnvFlags::NO_READ_AHEAD;
             unsafe { env_open_opts.flags(fast_flags) };
             tracing::debug!("Node::new: Opening database environment");
             let env = unsafe { Env::open(&env_open_opts, &env_path) }
@@ -322,7 +322,7 @@ where
         }
     }
 
-    pub fn env(&self) -> &Env {
+    pub fn env(&self) -> &Env<heed::WithoutTls> {
         &self.env
     }
 

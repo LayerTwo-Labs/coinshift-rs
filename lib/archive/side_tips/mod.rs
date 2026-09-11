@@ -118,8 +118,8 @@ pub struct SideTips {
 impl SideTips {
     pub const NUM_DBS: u32 = 3;
 
-    pub(crate) fn create(
-        env: &sneed::Env,
+    pub(crate) fn create<Tls>(
+        env: &sneed::Env<Tls>,
         rwtxn: &mut RwTxn,
     ) -> Result<Self, error::Create> {
         let mainchain_tip =
