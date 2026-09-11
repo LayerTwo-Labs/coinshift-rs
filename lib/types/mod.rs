@@ -27,7 +27,8 @@ mod transaction;
 
 pub use address::Address;
 pub use hashes::{
-    BlockHash, Hash, M6id, MerkleRoot, Txid, hash, hash_with_scratch_buffer,
+    BlockHash, Hash, M6id, MerkleRoot, NonZeroBitcoinBlockHash, Txid, hash,
+    hash_with_scratch_buffer,
 };
 pub use swap::{
     ParentChainType, Swap, SwapDirection, SwapError, SwapId, SwapReservation,
