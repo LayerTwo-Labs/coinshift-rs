@@ -51,6 +51,7 @@ Run two or more Coinshift instances on the same machine by giving each its own *
 | RPC        | `127.0.0.1:6255`        | `--rpc-addr 127.0.0.1:6256`        |
 | P2P        | `0.0.0.0:4255`          | `--net-addr 0.0.0.0:4256`          |
 | CLI target | `http://localhost:6255` | `--rpc-url http://localhost:6256`   |
+| RPC cookie | `<datadir>/rpc.cookie`  | `--rpc-cookie-file ~/coinshift-instance2/rpc.cookie` (CLI) |
 
 **Example (second instance):**
 
@@ -63,12 +64,32 @@ cargo run --bin coinshift_app -- --headless \
 
 ```bash
 # Talk to the second instance with the CLI
-cargo run --bin coinshift_app_cli -- --rpc-url http://localhost:6256 balance
+cargo run --bin coinshift_app_cli -- \
+  --rpc-url http://localhost:6256 \
+  --rpc-cookie-file ~/coinshift-instance2/rpc.cookie \
+  balance
 ```
+
+## RPC authentication
+
+The JSON-RPC server controls the wallet: it can transfer, withdraw, mine with
+the enforcer's L1 wallet and set the seed. Every request therefore needs the
+credentials from the node's **cookie file**, written on each start to
+`<datadir>/rpc.cookie` (mode 0600) as `__cookie__:<secret>`, in the style of
+Bitcoin Core. Send it as HTTP basic auth (or the secret alone as a bearer
+token). The CLI reads the default data directory's cookie automatically;
+point it elsewhere with `--rpc-cookie-file`.
+
+- `--rpc-addr` must be a loopback address unless you pass
+  `--rpc-allow-remote`; if you do, keep the cookie on and terminate TLS in
+  front of the node.
+- `--rpc-cookie-file <path>` changes where the node writes the cookie.
+- `--rpc-no-auth` disables authentication. Any local process can then spend
+  the wallet; use it only in throwaway test setups.
 
 ## CLI commands
 
-The CLI talks to the Coinshift RPC server (default `http://localhost:6255`). Use `--rpc-url` to override. Run `cargo run --bin coinshift_app_cli <command> --help` for per-command help.
+The CLI talks to the Coinshift RPC server (default `http://localhost:6255`). Use `--rpc-url` to override and `--rpc-cookie-file` if the node's data directory is not the default. Run `cargo run --bin coinshift_app_cli <command> --help` for per-command help.
 
 ### Wallet / seed
 
@@ -80,8 +101,8 @@ The CLI talks to the Coinshift RPC server (default `http://localhost:6255`). Use
 | `get-new-address` | Get a new address |
 | `get-wallet-addresses` | List wallet addresses (sorted by base58) |
 | `get-wallet-utxos` | List wallet UTXOs |
-| `recover-from-mnemonic` | Set seed from mnemonic and show addresses + balance |
-| `set-seed-from-mnemonic` | Set wallet seed from mnemonic (no extra output) |
+| `recover-from-mnemonic` | Set seed from mnemonic and show addresses + balance. Prompts for the phrase, or reads it with `--mnemonic-file <path>` (`-` for stdin); `--with-passphrase` prompts for a BIP39 passphrase |
+| `set-seed-from-mnemonic` | Set wallet seed from mnemonic (no extra output). Same input options as `recover-from-mnemonic` |
 | `sidechain-wealth` | Total sidechain wealth (sats) |
 
 ### Deposits / withdrawals / transfers
@@ -99,10 +120,11 @@ The CLI talks to the Coinshift RPC server (default `http://localhost:6255`). Use
 
 | Command | Description |
 |---------|-------------|
-| `create-swap` | Create L2->L1 swap (`--parent-chain`, `--l1-recipient-address`, amounts, etc.) |
-| `accept-swap` | Reserve an open swap for your L2 address, **before** paying on L1 (`--swap-id`) |
-| `update-swap-l1-txid` | Set L1 txid and confirmations for a swap |
-| `claim-swap` | Claim swap after L1 confirmations |
+| `create-swap` | Create L2->L1 swap (`--parent-chain signet\|regtest`, `--l1-recipient-address`, amounts, etc.). Only the chain this sidechain is anchored to can be swapped against |
+| `accept-swap` | Reserve an open swap for your L2 address (`--swap-id`). Coordination only: it tells other takers the swap is spoken for |
+| `l1-payment-commitment` | The `OP_RETURN` payload (hex) your L1 payment must carry: it binds the payment to the swap and names the L2 address that gets the escrow (`--swap-id`, `--l2-claimer-address`) |
+| `update-swap-l1-txid` | Record the L1 txid on this node (advisory; lets the node build the claim proof from its parent-chain RPC) |
+| `claim-swap` | Claim a swap with a proof of the L1 payment. Built from the parent-chain RPC, or pass `--l1-proof <hex>` (borsh `L1PaymentProof`: `gettxoutproof` merkle block + raw tx) |
 | `list-swaps` | List all swaps |
 | `list-swaps-by-recipient` | List swaps for one recipient |
 | `get-swap-status` | Status for one swap (`--swap-id`) |

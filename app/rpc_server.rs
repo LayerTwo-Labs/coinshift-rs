@@ -5,8 +5,8 @@ use coinshift::{
     net::Peer,
     state,
     types::{
-        Address, ParentChainType, PointedOutput, Swap, SwapId, SwapState,
-        SwapTxId, Txid, WithdrawalBundle,
+        Address, ParentChainType, PointedOutput, Swap, SwapId, SwapTxId, Txid,
+        WithdrawalBundle,
     },
     wallet::Balance,
 };
@@ -294,15 +294,18 @@ impl RpcServer for RpcServerImpl {
         self.app.node.remove_from_mempool(txid).map_err(custom_err)
     }
 
-    async fn set_seed_from_mnemonic(&self, mnemonic: String) -> RpcResult<()> {
-        let mnemonic =
-            bip39::Mnemonic::from_phrase(&mnemonic, bip39::Language::English)
-                .map_err(custom_err)?;
-        let seed = bip39::Seed::new(&mnemonic, "");
-        let seed_bytes: [u8; 64] = seed.as_bytes().try_into().map_err(
-            |err: <[u8; 64] as TryFrom<&[u8]>>::Error| custom_err(err),
-        )?;
-        self.app.wallet.set_seed(&seed_bytes).map_err(custom_err)
+    async fn set_seed_from_mnemonic(
+        &self,
+        mnemonic: String,
+        passphrase: Option<String>,
+    ) -> RpcResult<()> {
+        self.app
+            .wallet
+            .set_seed_from_mnemonic(
+                &mnemonic,
+                passphrase.as_deref().unwrap_or_default(),
+            )
+            .map_err(custom_err)
     }
 
     async fn sidechain_wealth_sats(&self) -> RpcResult<u64> {
@@ -453,6 +456,72 @@ impl RpcServer for RpcServerImpl {
         let l1_txid =
             SwapTxId::from_hex(&l1_txid_hex).map_err(custom_err_msg)?;
 
+        // This record is advisory: consensus decides claims from the proof
+        // in the claim itself. But a wrong record misleads the UI and makes
+        // the node build a proof for the wrong transaction, so when a
+        // parent-chain RPC is configured the transaction is looked up and
+        // the confirmation count and committed claimer are taken from the
+        // chain rather than from the caller.
+        let (confirmations, l2_claimer_address) = {
+            let rotxn = self.app.node.env().read_txn().map_err(custom_err)?;
+            let swap = self
+                .app
+                .node
+                .state()
+                .get_swap(&rotxn, &swap_id)
+                .map_err(custom_err)?
+                .ok_or_else(|| custom_err_msg("Swap not found"))?;
+            match App::l1_rpc_config(swap.parent_chain) {
+                Some(config) => {
+                    let client =
+                        coinshift::parent_chain_rpc::ParentChainRpcClient::new(
+                            config,
+                        );
+                    let tx_info = client
+                        .get_transaction(&l1_txid.to_hex_rpc())
+                        .map_err(|err| {
+                            custom_err_msg(format!(
+                                "L1 transaction {} not found on the configured \
+                                 {:?} node: {err}",
+                                l1_txid.to_hex_rpc(),
+                                swap.parent_chain
+                            ))
+                        })?;
+                    let (committed_swap, claimer) =
+                        tx_info.swap_commitment().ok_or_else(|| {
+                            custom_err_msg(
+                                "L1 transaction carries no swap commitment \
+                                 (OP_RETURN); it cannot fill any swap",
+                            )
+                        })?;
+                    if committed_swap != swap_id {
+                        return Err(custom_err_msg(format!(
+                            "L1 transaction commits to swap {committed_swap}, \
+                             not {swap_id}"
+                        )));
+                    }
+                    if let Some(requested) = l2_claimer_address
+                        && requested != claimer
+                    {
+                        return Err(custom_err_msg(format!(
+                            "L1 transaction commits to claimer {claimer}, not \
+                             {requested}"
+                        )));
+                    }
+                    (tx_info.confirmations, Some(claimer))
+                }
+                None => {
+                    tracing::warn!(
+                        %swap_id,
+                        "update_swap_l1_txid: no parent-chain RPC configured; \
+                         recording caller-supplied txid and confirmations \
+                         unverified (display only; claims are proven separately)"
+                    );
+                    (confirmations, l2_claimer_address)
+                }
+            }
+        };
+
         let mut rwtxn = self.app.node.env().write_txn().map_err(custom_err)?;
 
         // Get current sidechain block hash and height for reference
@@ -539,136 +608,33 @@ impl RpcServer for RpcServerImpl {
         Ok(txid)
     }
 
+    async fn l1_payment_commitment(
+        &self,
+        swap_id: SwapId,
+        l2_claimer_address: Address,
+    ) -> RpcResult<String> {
+        Ok(hex::encode(coinshift::state::l1_proof::payment_commitment(
+            &swap_id,
+            &l2_claimer_address,
+        )))
+    }
+
     async fn claim_swap(
         &self,
         swap_id: SwapId,
         l2_claimer_address: Option<Address>,
+        l1_proof: Option<String>,
     ) -> RpcResult<Txid> {
-        // Get swap to verify it's ready and get recipient
-        let rotxn = self.app.node.env().read_txn().map_err(custom_err)?;
-        let swap = self
-            .app
-            .node
-            .state()
-            .get_swap(&rotxn, &swap_id)
-            .map_err(custom_err)?
-            .ok_or_else(|| custom_err_msg("Swap not found"))?;
-
-        if !matches!(swap.state, SwapState::ReadyToClaim) {
-            return Err(custom_err_msg(format!(
-                "Swap is not ready to claim (state: {:?})",
-                swap.state
-            )));
-        }
-
-        // Get locked outputs for this swap
-        // Note: We must query the node directly, not the wallet, because the wallet
-        // filters out SwapPending outputs. Locked outputs are identified by checking
-        // if the output content is SwapPending with the matching swap_id.
-        let all_utxos = self.app.node.get_all_utxos().map_err(custom_err)?;
-
-        // Find locked outputs for this swap (same pattern as verify_swap_locks_utxos in integration tests)
-        let mut locked_outputs = Vec::new();
-        for (outpoint, output) in all_utxos {
-            match &output.content {
-                coinshift::types::OutputContent::SwapPending {
-                    swap_id: locked_swap_id,
-                    ..
-                } => {
-                    if *locked_swap_id == swap_id.0 {
-                        tracing::info!(
-                            "Found locked output for swap {}: {:?}",
-                            swap_id,
-                            outpoint
-                        );
-                        locked_outputs.push((outpoint, output));
-                    } else {
-                        tracing::debug!(
-                            "Output {:?} is SwapPending for different swap_id: {:?}",
-                            outpoint,
-                            locked_swap_id
-                        );
-                    }
-                }
-                other => {
-                    tracing::trace!(
-                        "Output {:?} is not SwapPending (content: {:?})",
-                        outpoint,
-                        other
-                    );
-                }
-            }
-        }
-
-        if locked_outputs.is_empty() {
-            return Err(custom_err_msg(format!(
-                "No locked outputs found for swap {}",
-                swap_id
-            )));
-        }
-
-        // Determine recipient. For open swaps this is the on-chain reservation
-        // recorded by `SwapAccept` — the only value consensus will accept, so
-        // any address the caller passes is ignored rather than silently
-        // producing a claim every node rejects.
-        let height = self
-            .app
-            .node
-            .state()
-            .try_get_height(&rotxn)
-            .map_err(custom_err)?
-            .map_or(0, |height| height + 1);
-        let recipient = self
-            .app
-            .node
-            .state()
-            .entitled_claimer_at(&rotxn, &swap, height)
-            .map_err(custom_err)?
-            .ok_or_else(|| {
-                custom_err_msg(
-                    "Open swap has no live reservation; call accept_swap to \
-                     reserve it (before paying on L1) and claim within the \
-                     acceptance window",
-                )
-            })?;
-        if let Some(requested) = l2_claimer_address
-            && requested != recipient
-        {
-            return Err(custom_err_msg(format!(
-                "Swap is reserved for {recipient}, not {requested}"
-            )));
-        }
-
-        // Add locked outputs to wallet temporarily so they can be used for signing
-        // SwapPending outputs are normally filtered out, but we need them in the wallet
-        // for the authorize() call to find the address and signing key
-        use std::collections::HashMap;
-        let locked_utxos: HashMap<_, _> =
-            locked_outputs.iter().cloned().collect();
-        self.app
-            .wallet
-            .put_utxos(&locked_utxos)
-            .map_err(custom_err)?;
-        tracing::debug!(
-            swap_id = %swap_id,
-            num_locked_outputs = locked_outputs.len(),
-            "Added locked outputs to wallet for signing"
-        );
-
-        let accumulator =
-            self.app.node.get_tip_accumulator().map_err(custom_err)?;
-        let l2_claimer_for_tx =
-            swap.l2_recipient.is_none().then_some(recipient);
+        let l1_proof = l1_proof
+            .map(|hex_str| {
+                hex::decode(hex_str.trim()).map_err(|err| {
+                    custom_err_msg(format!("l1_proof is not valid hex: {err}"))
+                })
+            })
+            .transpose()?;
         let tx = self
             .app
-            .wallet
-            .create_swap_claim_tx(
-                &accumulator,
-                swap_id,
-                recipient,
-                locked_outputs,
-                l2_claimer_for_tx,
-            )
+            .build_swap_claim(swap_id, l2_claimer_address, l1_proof)
             .map_err(custom_err)?;
         let txid = tx.txid();
         self.app.sign_and_send(tx).map_err(custom_err)?;
@@ -740,8 +706,25 @@ impl MakeRequestId for RequestIdMaker {
 pub async fn run_server(
     app: App,
     rpc_addr: SocketAddr,
+    rpc_allow_remote: bool,
+    rpc_cookie_file: Option<&std::path::Path>,
 ) -> anyhow::Result<SocketAddr> {
     const REQUEST_ID_HEADER: &str = "x-request-id";
+
+    let () = crate::rpc_auth::check_bind_address(rpc_addr, rpc_allow_remote)?;
+    // Every method here can move funds or change the seed, so the check runs
+    // in the HTTP layer before any JSON-RPC parsing. `None` is the explicit
+    // `--rpc-no-auth` opt-out.
+    let auth = match rpc_cookie_file {
+        Some(path) => Some(crate::rpc_auth::RpcAuth::generate(path)?),
+        None => {
+            tracing::warn!(
+                "RPC authentication is DISABLED (--rpc-no-auth): any process \
+                 that can reach {rpc_addr} can spend the wallet"
+            );
+            None
+        }
+    };
 
     // Ordering here matters! Order here is from official docs on request IDs tracings
     // https://docs.rs/tower-http/latest/tower_http/request_id/index.html#using-trace
@@ -781,8 +764,18 @@ pub async fn run_server(
         )))
         .into_inner();
 
-    let http_middleware = tower::ServiceBuilder::new().layer(tracer);
-    let rpc_middleware = RpcServiceBuilder::new().rpc_logger(1024);
+    let http_middleware = tower::ServiceBuilder::new()
+        .layer(tracer)
+        .option_layer(auth.map(|mut auth| {
+            tower_http::validate_request::ValidateRequestHeaderLayer::custom(
+                move |request: &mut http::Request<_>| auth.validate(request),
+            )
+        }));
+    // Not jsonrpsee's `rpc_logger`: that one logs whole requests, and a
+    // `set_seed_from_mnemonic` request is the wallet mnemonic.
+    let rpc_middleware = RpcServiceBuilder::new().layer(
+        coinshift_app_rpc_api::logger::RedactingRpcLoggerLayer::new(1024),
+    );
 
     let server = Server::builder()
         .set_http_middleware(http_middleware)

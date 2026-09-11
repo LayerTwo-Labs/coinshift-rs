@@ -18,6 +18,8 @@ use l2l_openapi::open_api;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+pub mod auth;
+pub mod logger;
 mod schema;
 
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
@@ -193,10 +195,16 @@ pub trait Rpc {
     #[method(name = "remove_from_mempool")]
     async fn remove_from_mempool(&self, txid: Txid) -> RpcResult<()>;
 
-    /// Set the wallet seed from a mnemonic seed phrase
+    /// Set the wallet seed from a mnemonic seed phrase and optional BIP39
+    /// passphrase. The passphrase is part of the key material: the same
+    /// phrase with a different passphrase is a different wallet.
     #[open_api_method(output_schema(ToSchema))]
     #[method(name = "set_seed_from_mnemonic")]
-    async fn set_seed_from_mnemonic(&self, mnemonic: String) -> RpcResult<()>;
+    async fn set_seed_from_mnemonic(
+        &self,
+        mnemonic: String,
+        passphrase: Option<String>,
+    ) -> RpcResult<()>;
 
     /// Get total sidechain wealth
     #[method(name = "sidechain_wealth")]
@@ -253,8 +261,14 @@ pub trait Rpc {
     #[method(name = "reconstruct_swaps")]
     async fn reconstruct_swaps(&self) -> RpcResult<u32>;
 
-    /// Update swap L1 transaction ID (called when L1 transaction is detected).
-    /// For open swaps, pass l2_claimer_address so the claim is only valid for that address.
+    /// Record the L1 transaction that fills a swap on this node.
+    ///
+    /// Advisory: consensus decides a claim from the proof the claim carries,
+    /// not from this record. It drives the swap's displayed state and is the
+    /// txid the node builds a claim proof from. When a parent-chain RPC is
+    /// configured, the transaction is looked up and its confirmations and
+    /// committed claimer are taken from the chain; `confirmations` and
+    /// `l2_claimer_address` are then only checked for agreement.
     #[method(name = "update_swap_l1_txid")]
     async fn update_swap_l1_txid(
         &self,
@@ -272,10 +286,11 @@ pub trait Rpc {
 
     /// Reserve an open swap for a claimer, before paying on L1.
     ///
-    /// This is what entitles an address to the escrow: the reservation is
-    /// recorded on-chain, so every node agrees who may claim. Reserve *first*,
-    /// then pay on L1 — a reservation taken after the L1 payment can be
-    /// front-run by anyone watching.
+    /// The reservation is coordination: it is recorded on-chain so other
+    /// takers see the swap is spoken for and do not also pay on L1.
+    /// Entitlement to the escrow comes from the L1 payment itself, which must
+    /// commit to the claimer (see `l1_payment_commitment`), so a reservation
+    /// cannot be front-run.
     ///
     /// `l2_claimer_address` defaults to an address of this wallet. The
     /// reservation lapses after the parent chain's acceptance window if the
@@ -288,13 +303,29 @@ pub trait Rpc {
         fee_sats: Option<u64>,
     ) -> RpcResult<Txid>;
 
-    /// Claim a swap (after L1 transaction has required confirmations)
-    /// For open swaps, l2_claimer_address is required (the claimer's L2 address)
+    /// The `OP_RETURN` payload an L1 payment must carry to fill a swap for
+    /// `l2_claimer_address`: it binds the payment to the swap and names the
+    /// L2 address that receives the escrow. Returned as hex, for use as a
+    /// `"data"` output in `createrawtransaction` / `send`.
+    #[method(name = "l1_payment_commitment")]
+    async fn l1_payment_commitment(
+        &self,
+        swap_id: SwapId,
+        l2_claimer_address: Address,
+    ) -> RpcResult<String>;
+
+    /// Claim a swap. The claim must prove the L1 payment: `l1_proof` is the
+    /// hex of a borsh-encoded `L1PaymentProof` (merkle block from
+    /// `gettxoutproof` plus the raw transaction). When omitted, the node
+    /// builds it from its configured parent-chain RPC using the swap's
+    /// recorded L1 txid. The escrow is paid to the L2 address the payment
+    /// committed to; `l2_claimer_address`, if given, must match it.
     #[method(name = "claim_swap")]
     async fn claim_swap(
         &self,
         swap_id: SwapId,
-        l2_claimer_address: Option<Address>, // Required for open swaps
+        l2_claimer_address: Option<Address>,
+        l1_proof: Option<String>,
     ) -> RpcResult<Txid>;
 
     /// List all swaps

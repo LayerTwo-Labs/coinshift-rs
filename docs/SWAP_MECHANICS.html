@@ -363,8 +363,18 @@
   <div class="meta">
     <span><b>source</b> lib/state/swap.rs</span>
     <span><b>see also</b> docs/COINSHIFT_HOW_IT_WORKS.md</span>
-    <span><b>status</b> pre-deployment</span>
+    <span><b>status</b> superseded in part — see note</span>
   </div>
+  <p class="standfirst" style="border-left:3px solid currentColor;padding-left:.75em;margin-top:1em">
+    <b>Update.</b> The L1 leg is no longer taken on faith. A <code>SwapClaim</code> now carries an
+    <code>L1PaymentProof</code> (parent-chain header, merkle branch and raw payment) that consensus
+    verifies against the mainchain headers the node already validates, anchored at the L2 header's
+    <code>prev_main_hash</code>; the payment must commit to the swap and to the claimer in an
+    <code>OP_RETURN</code>, and that commitment is what decides who is paid. The reservation described
+    below still exists but is coordination only. The sections on the boundary, the payout rule and the
+    reservation ordering describe the intermediate design; <code>docs/specs/L1_PAYMENT_PROOFS.html</code>
+    describes what is implemented, and <code>docs/COINSHIFT_HOW_IT_WORKS.md</code> is current.
+  </p>
 </header>
 
 <nav class="toc" aria-label="Contents">

@@ -60,6 +60,10 @@ pub enum Error {
     Wallet(#[from] wallet::Error),
     #[error("L1 config validation failed: {0}")]
     L1ConfigValidation(#[from] coinshift::parent_chain_rpc::Error),
+    #[error("state error")]
+    State(#[from] coinshift::state::Error),
+    #[error("swap claim: {0}")]
+    SwapClaim(String),
 }
 
 impl From<node::Error> for Error {
@@ -376,9 +380,6 @@ impl App {
     ) -> Result<(), Error> {
         use coinshift::parent_chain_rpc::{ParentChainRpcClient, RpcConfig};
         use coinshift::types::{ParentChainType, SwapState, SwapTxId};
-        use serde::{Deserialize, Serialize};
-        use std::collections::HashMap;
-        use std::path::PathBuf;
         use std::time::Duration;
 
         const CHECK_INTERVAL: Duration = Duration::from_secs(10);
@@ -388,33 +389,9 @@ impl App {
             CHECK_INTERVAL.as_secs()
         );
 
-        // Helper to load RPC config (same as in GUI)
+        // Helper to load RPC config (same file as the GUI)
         fn load_rpc_config(parent_chain: ParentChainType) -> Option<RpcConfig> {
-            #[derive(Clone, Serialize, Deserialize)]
-            struct LocalRpcConfig {
-                url: String,
-                user: String,
-                password: String,
-            }
-
-            let config_path = dirs::data_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join("coinshift")
-                .join("l1_rpc_configs.json");
-
-            if let Ok(file_content) = std::fs::read_to_string(&config_path)
-                && let Ok(configs) = serde_json::from_str::<
-                    HashMap<ParentChainType, LocalRpcConfig>,
-                >(&file_content)
-                && let Some(local_config) = configs.get(&parent_chain)
-            {
-                return Some(RpcConfig {
-                    url: local_config.url.clone(),
-                    user: local_config.user.clone(),
-                    password: local_config.password.clone(),
-                });
-            }
-            None
+            App::l1_rpc_config(parent_chain)
         }
 
         loop {
@@ -674,7 +651,7 @@ impl App {
         let wallet = Wallet::new(&config.datadir.join("wallet.mdb"))?;
         if let Some(seed_phrase_path) = &config.mnemonic_seed_phrase_path {
             let mnemonic = std::fs::read_to_string(seed_phrase_path)?;
-            let () = wallet.set_seed_from_mnemonic(mnemonic.as_str())?;
+            let () = wallet.set_seed_from_mnemonic(mnemonic.as_str(), "")?;
         }
 
         tracing::info!(
@@ -885,6 +862,129 @@ impl App {
                 false
             }
         }
+    }
+
+    /// Path of the per-user parent-chain RPC config file.
+    pub fn l1_rpc_config_path() -> std::path::PathBuf {
+        dirs::data_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("coinshift")
+            .join("l1_rpc_configs.json")
+    }
+
+    /// The configured parent-chain RPC for `parent_chain`, if any.
+    pub fn l1_rpc_config(
+        parent_chain: types::ParentChainType,
+    ) -> Option<coinshift::parent_chain_rpc::RpcConfig> {
+        coinshift::parent_chain_rpc::load_rpc_config_from_path(
+            &Self::l1_rpc_config_path(),
+            parent_chain,
+        )
+    }
+
+    /// Build a `SwapClaim` for `swap_id`, ready to sign.
+    ///
+    /// `l1_proof` is the borsh-encoded `L1PaymentProof`; when `None`, it is
+    /// assembled from the configured parent-chain RPC using the swap's
+    /// recorded L1 txid (detected automatically or set through
+    /// `update_swap_l1_txid`). The proof is verified locally against the
+    /// tip's mainchain anchor first, both to fail early with a useful
+    /// message and to learn which L2 address the payment committed to: that
+    /// address receives the escrow, and `requested_claimer`, if given, must
+    /// match it.
+    pub fn build_swap_claim(
+        &self,
+        swap_id: types::SwapId,
+        requested_claimer: Option<Address>,
+        l1_proof: Option<Vec<u8>>,
+    ) -> Result<Transaction, Error> {
+        let rotxn = self.node.env().read_txn().map_err(node::Error::from)?;
+        let state = self.node.state();
+        let swap = state
+            .get_swap(&rotxn, &swap_id)?
+            .ok_or_else(|| Error::SwapClaim("swap not found".to_owned()))?;
+
+        let proof = match l1_proof {
+            Some(proof) => proof,
+            None => {
+                let txid = swap.l1_txid.to_hex_rpc();
+                if txid.chars().all(|c| c == '0') {
+                    return Err(Error::SwapClaim(
+                        "no L1 payment recorded for this swap yet; wait for \
+                         detection, record it with update_swap_l1_txid, or \
+                         pass the proof explicitly"
+                            .to_owned(),
+                    ));
+                }
+                let config = Self::l1_rpc_config(swap.parent_chain)
+                    .ok_or_else(|| {
+                        Error::SwapClaim(format!(
+                            "no parent-chain RPC configured for \
+                             {:?}; configure one or pass the proof (from \
+                             gettxoutproof + getrawtransaction) explicitly",
+                            swap.parent_chain
+                        ))
+                    })?;
+                coinshift::parent_chain_rpc::ParentChainRpcClient::new(config)
+                    .build_l1_payment_proof(&txid)
+                    .map_err(|err| {
+                        Error::SwapClaim(format!(
+                            "failed to build L1 payment proof for {txid}: {err}"
+                        ))
+                    })?
+            }
+        };
+
+        let anchor = state.tip_main_anchor(&rotxn)?.ok_or_else(|| {
+            Error::SwapClaim("no sidechain tip yet".to_owned())
+        })?;
+        let payment =
+            state.verify_l1_payment_proof(&rotxn, &proof, &swap, anchor)?;
+        let recipient = payment.claimer;
+        if let Some(requested) = requested_claimer
+            && requested != recipient
+        {
+            return Err(Error::SwapClaim(format!(
+                "the L1 payment commits to {recipient}, not {requested}; \
+                 the escrow can only be paid to the committed address"
+            )));
+        }
+
+        // Locked outputs are identified by content, not by wallet ownership:
+        // the wallet filters SwapPending outputs out of its own view.
+        let locked_outputs: Vec<(OutPoint, Output)> = self
+            .node
+            .get_all_utxos()?
+            .into_iter()
+            .filter(|(_, output)| {
+                matches!(
+                    output.content,
+                    types::OutputContent::SwapPending { swap_id: locked, .. }
+                        if locked == swap_id.0
+                )
+            })
+            .collect();
+        if locked_outputs.is_empty() {
+            return Err(Error::SwapClaim(format!(
+                "no locked outputs found for swap {swap_id}"
+            )));
+        }
+        // The wallet needs the locked outputs in view to sign the claim.
+        let locked_utxos: HashMap<_, _> =
+            locked_outputs.iter().cloned().collect();
+        self.wallet.put_utxos(&locked_utxos)?;
+
+        let accumulator = self.node.get_tip_accumulator()?;
+        let declared_claimer = swap.l2_recipient.is_none().then_some(recipient);
+        let tx = self.wallet.create_swap_claim_tx(
+            &accumulator,
+            swap_id,
+            recipient,
+            locked_outputs,
+            declared_claimer,
+            proof,
+        )?;
+        Ok(tx)
     }
 
     pub fn sign_and_send(&self, tx: Transaction) -> Result<(), Error> {

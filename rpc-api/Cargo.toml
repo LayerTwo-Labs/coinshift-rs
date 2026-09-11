@@ -7,13 +7,20 @@ publish.workspace = true
 version.workspace = true
 
 [dependencies]
+base64 = "0.22.1"
 bitcoin = { workspace = true, features = ["serde"] }
 jsonrpsee = { workspace = true, features = ["client", "macros", "server"] }
 l2l-openapi = { workspace = true }
 coinshift = { path = "../lib" }
 serde_json = { workspace = true }
 utoipa = { workspace = true }
+http = { workspace = true }
 serde.workspace = true
+tower = "0.5.2"
+tracing = { workspace = true }
+
+[dev-dependencies]
+temp-dir = "0.2"
 
 [lints]
 workspace = true

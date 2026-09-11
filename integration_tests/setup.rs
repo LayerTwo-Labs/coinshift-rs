@@ -178,17 +178,44 @@ impl Sidechain for PostSetup {
             });
         tracing::debug!("Started Coinshift");
         sleep(Duration::from_secs(1)).await;
-        let rpc_client = jsonrpsee::http_client::HttpClient::builder()
-            .build(format!("http://127.0.0.1:{}", reserved_ports.rpc.port()))?;
+        let rpc_url = format!("http://127.0.0.1:{}", reserved_ports.rpc.port());
+        let cookie_path = coinshift_app
+            .data_dir
+            .join(coinshift_app_rpc_api::auth::COOKIE_FILE_NAME);
         tracing::debug!("Generating mnemonic seed phrase");
         // Poll the RPC until it accepts connections. The app needs a moment to
-        // connect to the mainchain gRPC and bind its RPC port; on slower hosts
-        // this can take longer than the fixed sleep above.
-        let mnemonic = {
+        // connect to the mainchain gRPC, write its RPC cookie and bind its
+        // RPC port; on slower hosts this can take longer than the fixed
+        // sleep above.
+        let (rpc_client, mnemonic) = {
             let mut attempt = 0u32;
             loop {
-                match rpc_client.generate_mnemonic().await {
-                    Ok(mnemonic) => break mnemonic,
+                let client = match coinshift_app_rpc_api::auth::read_cookie(
+                    &cookie_path,
+                ) {
+                    Ok((user, secret)) => {
+                        let headers = http::HeaderMap::from_iter([(
+                            http::header::AUTHORIZATION,
+                            coinshift_app_rpc_api::auth::basic_auth_header(
+                                &user, &secret,
+                            ),
+                        )]);
+                        Some(
+                            jsonrpsee::http_client::HttpClient::builder()
+                                .set_headers(headers)
+                                .build(&rpc_url)?,
+                        )
+                    }
+                    Err(_) => None,
+                };
+                let result = match &client {
+                    Some(client) => client.generate_mnemonic().await,
+                    None => Err(jsonrpsee::core::ClientError::Custom(
+                        "RPC cookie not written yet".to_owned(),
+                    )),
+                };
+                match result {
+                    Ok(mnemonic) => break (client.unwrap(), mnemonic),
                     Err(err) => {
                         attempt += 1;
                         if attempt >= 60 {
@@ -200,7 +227,7 @@ impl Sidechain for PostSetup {
             }
         };
         tracing::debug!("Setting mnemonic seed phrase");
-        let () = rpc_client.set_seed_from_mnemonic(mnemonic).await?;
+        let () = rpc_client.set_seed_from_mnemonic(mnemonic, None).await?;
         tracing::debug!("Generating deposit address");
         let deposit_address = rpc_client.get_new_address().await?;
         Ok(Self {

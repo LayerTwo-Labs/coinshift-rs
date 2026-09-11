@@ -367,11 +367,9 @@ where
                     rwtxn.commit().map_err(RwTxnError::from)?;
                 }
                 Err(err) => {
-                    // Check if it's an orphaned lock error
-                    let err_str = format!("{err:#}");
-                    if err_str.contains("orphaned lock")
-                        || err_str.contains("corrupted swap")
-                    {
+                    // An orphaned lock (output locked to a swap that no
+                    // longer exists) is repairable: drop the lock and retry.
+                    if matches!(err, state::Error::OrphanedLock { .. }) {
                         tracing::warn!(
                             error = %err,
                             "Detected orphaned lock error, attempting to clean up"
@@ -429,8 +427,7 @@ where
         let rotxn = self.env.read_txn().map_err(EnvError::from)?;
         let res = self
             .state
-            .get_latest_failed_withdrawal_bundle(&rotxn)
-            .map_err(DbError::from)?
+            .get_latest_failed_withdrawal_bundle(&rotxn)?
             .map(|(height, _)| height);
         Ok(res)
     }

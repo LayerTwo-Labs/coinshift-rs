@@ -1,0 +1,655 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Coinshift Red-Team Remediation</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Serif:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+:root{
+  --ground:#F4F6F4; --surface:#FFFFFF; --ink:#1A222E; --muted:#5F6B78; --rule:#D8DEE2; --rule-soft:#E8ECEF;
+  --accent:#0E6B77; --accent-soft:#E3F0F1; --code:#EEF2F3;
+  --crit:#9A2B1C; --crit-soft:#F8E6E2; --high:#B25A12; --high-soft:#FBEBDD; --med:#866612; --med-soft:#F7EFD7;
+  --low:#3F6C8E; --low-soft:#E4EDF4; --info:#5F6B78; --info-soft:#E9ECEF;
+  --ok:#2F7A4A; --ok-soft:#E1F1E6; --warn:#8A5A0E; --warn-soft:#F8EDD8;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --ground:#10151B; --surface:#171D25; --ink:#E4E8EC; --muted:#9AA5B1; --rule:#2B3540; --rule-soft:#222B34;
+    --accent:#5FBFC9; --accent-soft:#16333A; --code:#1F2830;
+    --crit:#F08C7C; --crit-soft:#3A1A15; --high:#E9A15C; --high-soft:#3A2712; --med:#D9B85A; --med-soft:#332B12;
+    --low:#8FB6D4; --low-soft:#1C2B38; --info:#9AA5B1; --info-soft:#222B34;
+    --ok:#7CC996; --ok-soft:#15301E; --warn:#E3B266; --warn-soft:#33260F;
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#10151B; --surface:#171D25; --ink:#E4E8EC; --muted:#9AA5B1; --rule:#2B3540; --rule-soft:#222B34;
+  --accent:#5FBFC9; --accent-soft:#16333A; --code:#1F2830;
+  --crit:#F08C7C; --crit-soft:#3A1A15; --high:#E9A15C; --high-soft:#3A2712; --med:#D9B85A; --med-soft:#332B12;
+  --low:#8FB6D4; --low-soft:#1C2B38; --info:#9AA5B1; --info-soft:#222B34;
+  --ok:#7CC996; --ok-soft:#15301E; --warn:#E3B266; --warn-soft:#33260F;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--ground);color:var(--ink);font:16px/1.55 "IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif;padding-inline:20px;padding-block:0 64px}
+h1,h2,h3{font-family:"IBM Plex Serif",Georgia,"Times New Roman",serif;font-weight:600;text-wrap:balance;margin:0}
+h1{font-size:2.1rem;line-height:1.15}
+h2{font-size:1.45rem;line-height:1.25;margin-top:0}
+h3{font-size:1.05rem;line-height:1.3}
+p{margin:0}
+a{color:var(--accent)}
+code,.mono{font-family:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.86em}
+code{background:var(--code);padding:.08em .35em;border-radius:3px}
+.wrap{max-width:1180px;margin:0 auto}
+.eyebrow{font-size:.74rem;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);font-weight:600}
+
+/* header */
+header.top{padding-block:40px 28px;border-bottom:1px solid var(--rule);display:grid;gap:18px}
+header.top .lede{max-width:64ch;color:var(--muted);font-size:1.02rem}
+.stats{display:flex;flex-wrap:wrap;gap:0;border:1px solid var(--rule);border-radius:6px;background:var(--surface);overflow:hidden}
+.stat{flex:1 1 150px;padding:14px 18px;border-right:1px solid var(--rule);display:grid;gap:2px}
+.stat:last-child{border-right:0}
+.stat b{font-family:"IBM Plex Serif",Georgia,serif;font-size:1.7rem;font-weight:600;font-variant-numeric:tabular-nums;line-height:1.1}
+.stat span{font-size:.8rem;color:var(--muted)}
+.stat small{font-size:.78rem;color:var(--muted)}
+
+/* layout */
+.page{display:grid;grid-template-columns:250px minmax(0,1fr);gap:40px;padding-top:32px}
+nav.index{position:sticky;top:16px;align-self:start;display:grid;gap:4px;max-height:calc(100vh - 32px);overflow:auto}
+nav.index .eyebrow{margin-bottom:6px}
+nav.index a{display:grid;grid-template-columns:10px 1fr;gap:10px;align-items:baseline;padding:5px 8px;border-radius:4px;color:var(--ink);text-decoration:none;font-size:.86rem;line-height:1.3}
+nav.index a:hover,nav.index a:focus-visible{background:var(--accent-soft);outline:none}
+nav.index a .id{font-family:"IBM Plex Mono",monospace;font-size:.78rem;color:var(--muted);display:block}
+nav.index a .dot{width:10px;height:10px;border-radius:50%;background:var(--info);transform:translateY(1px)}
+nav.index .sep{height:1px;background:var(--rule);margin:8px 0}
+main{display:grid;gap:44px;min-width:0}
+@media (max-width:860px){.page{grid-template-columns:1fr}nav.index{position:static;max-height:none;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:2px 12px}nav.index .sep{display:none}}
+
+/* severity chips */
+.chip{display:inline-flex;align-items:center;gap:6px;padding:2px 9px;border-radius:999px;font-size:.74rem;font-weight:600;letter-spacing:.04em;text-transform:uppercase;line-height:1.5}
+.chip::before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor}
+.sev-crit{color:var(--crit);background:var(--crit-soft)} .sev-high{color:var(--high);background:var(--high-soft)}
+.sev-med{color:var(--med);background:var(--med-soft)} .sev-low{color:var(--low);background:var(--low-soft)} .sev-info{color:var(--info);background:var(--info-soft)}
+.dot.sev-crit{background:var(--crit)} .dot.sev-high{background:var(--high)} .dot.sev-med{background:var(--med)} .dot.sev-low{background:var(--low)} .dot.sev-info{background:var(--info)}
+.tag{display:inline-block;padding:2px 8px;border-radius:3px;font-size:.74rem;font-weight:600;line-height:1.5}
+.tag-ok{color:var(--ok);background:var(--ok-soft)} .tag-warn{color:var(--warn);background:var(--warn-soft)} .tag-plain{color:var(--muted);background:var(--info-soft)}
+
+/* ledger table */
+.ledger{overflow-x:auto;border:1px solid var(--rule);border-radius:6px;background:var(--surface)}
+table{border-collapse:collapse;width:100%;font-size:.9rem}
+th{text-align:left;font-size:.74rem;letter-spacing:.07em;text-transform:uppercase;color:var(--muted);font-weight:600;padding:10px 12px;border-bottom:1px solid var(--rule);white-space:nowrap}
+td{padding:9px 12px;border-bottom:1px solid var(--rule-soft);vertical-align:top}
+tr:last-child td{border-bottom:0}
+td.num{font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}
+td a{color:inherit;text-decoration:none;border-bottom:1px dotted var(--rule)}
+td a:hover{color:var(--accent);border-color:var(--accent)}
+
+/* sections */
+section.finding{border-top:2px solid var(--ink);padding-top:16px;display:grid;gap:18px;scroll-margin-top:16px}
+.fhead{display:grid;gap:8px}
+.fmeta{display:flex;flex-wrap:wrap;gap:10px 14px;align-items:center;font-size:.86rem;color:var(--muted)}
+.fmeta .mono{color:var(--ink)}
+.cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:22px}
+.block{display:grid;gap:8px;max-width:66ch}
+.block h3{color:var(--muted);font-family:"IBM Plex Sans",system-ui,sans-serif;font-size:.74rem;letter-spacing:.09em;text-transform:uppercase;font-weight:600}
+.block p+p{margin-top:4px}
+ul.rules{margin:0;padding-left:1.15em;display:grid;gap:5px}
+ul.rules li::marker{color:var(--accent)}
+.note{border-left:3px solid var(--accent);background:var(--accent-soft);padding:12px 16px;border-radius:0 4px 4px 0;display:grid;gap:6px;max-width:74ch}
+.note.warn{border-color:var(--warn);background:var(--warn-soft)}
+.note b{font-weight:600}
+details{border:1px solid var(--rule);border-radius:4px;background:var(--surface)}
+details summary{cursor:pointer;padding:9px 14px;font-size:.86rem;color:var(--muted);list-style:none;display:flex;justify-content:space-between;gap:12px}
+details summary::after{content:"+";font-family:"IBM Plex Mono",monospace}
+details[open] summary::after{content:"–"}
+details summary:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+details .body{padding:4px 14px 14px;font-size:.86rem;display:grid;gap:12px}
+details ul{margin:0;padding-left:1.1em;display:grid;gap:3px}
+.files li{font-family:"IBM Plex Mono",monospace;font-size:.82rem}
+
+/* proof chain */
+.chain{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;counter-reset:step}
+.chain > div{background:var(--surface);border:1px solid var(--rule);border-radius:4px;padding:12px 14px;display:grid;gap:6px;position:relative;font-size:.88rem}
+.chain > div::before{counter-increment:step;content:counter(step);position:absolute;top:-10px;left:12px;background:var(--accent);color:var(--surface);font-family:"IBM Plex Mono",monospace;font-size:.72rem;font-weight:500;padding:1px 7px;border-radius:999px}
+.chain b{font-weight:600}
+.chain span{color:var(--muted);font-size:.82rem}
+
+/* verify list */
+.verify{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px}
+.verify > div{background:var(--surface);border:1px solid var(--rule);border-radius:4px;padding:12px 14px;display:grid;gap:4px;font-size:.9rem}
+.verify .eyebrow{font-size:.7rem}
+footer{margin-top:48px;padding-top:16px;border-top:1px solid var(--rule);font-size:.82rem;color:var(--muted);max-width:70ch}
+@media (prefers-reduced-motion:no-preference){html{scroll-behavior:smooth}}
+</style>
+</head>
+<body>
+
+<div class="wrap">
+<header class="top">
+  <div class="eyebrow">coinshift-rs · red-team report of 2026-08-12 · remediation on <span class="mono">main</span>, 2026-09-10</div>
+  <h1>Coinshift Red-Team Remediation</h1>
+  <p class="lede">Fourteen findings, fourteen commits on top of <span class="mono">1b8d1d6</span>. This page records what each finding meant for the node, what the commit changed, the tests that pin it, and what a reviewer has to decide before it ships.</p>
+  <div class="stats">
+    <div class="stat"><b>14</b><span>findings addressed</span><small>2 critical/high · 8 medium · 3 low · 1 info</small></div>
+    <div class="stat"><b>14</b><span>commits</span><small>one per finding, <span class="mono">bb91600</span> → <span class="mono">0e37146</span></small></div>
+    <div class="stat"><b>50</b><span>files changed</span><small>+5,297 / −1,685 lines</small></div>
+    <div class="stat"><b>54 → 85</b><span>passing tests</span><small>fmt, clippy, cargo-deny clean</small></div>
+    <div class="stat"><b>4</b><span>consensus changes</span><small>coordinated deployment required</small></div>
+  </div>
+</header>
+
+<div class="page">
+<nav class="index" aria-label="Findings">
+  <div class="eyebrow">Findings by severity</div>
+  <a href="#fnd-001"><span class="dot sev-crit"></span><span><span class="id">FND-001 · critical</span>L1 payment never verified in consensus</span></a>
+  <a href="#fnd-002"><span class="dot sev-high"></span><span><span class="id">FND-002 · high</span>Open-swap claims not bound to the payer</span></a>
+  <a href="#fnd-003"><span class="dot sev-med"></span><span><span class="id">FND-003 · medium</span>Reorg deletes from the wrong table</span></a>
+  <a href="#fnd-004"><span class="dot sev-med"></span><span><span class="id">FND-004 · medium</span>Deleted swap leaves escrow locked</span></a>
+  <a href="#fnd-005"><span class="dot sev-med"></span><span><span class="id">FND-005 · medium</span>RPC has no authentication</span></a>
+  <a href="#fnd-008"><span class="dot sev-med"></span><span><span class="id">FND-008 · medium</span>Panics on enforcer event order</span></a>
+  <a href="#key-001"><span class="dot sev-med"></span><span><span class="id">KEY-001 · medium</span>Seed in a crash-unsafe database</span></a>
+  <a href="#sig-001"><span class="dot sev-med"></span><span><span class="id">SIG-001 · medium</span>Under-signed transactions accepted</span></a>
+  <a href="#dep-001"><span class="dot sev-med"></span><span><span class="id">DEP-001 · medium</span>Hardcoded RPC endpoint and credentials</span></a>
+  <a href="#fnd-006"><span class="dot sev-low"></span><span><span class="id">FND-006 · low</span>Fill detection depends on the wallet</span></a>
+  <a href="#fnd-007"><span class="dot sev-low"></span><span><span class="id">FND-007 · low</span>Bad deposit addresses burn funds</span></a>
+  <a href="#key-002"><span class="dot sev-low"></span><span><span class="id">KEY-002 · low</span>Mnemonic in argv and trace logs</span></a>
+  <a href="#key-003"><span class="dot sev-low"></span><span><span class="id">KEY-003 · low</span>Passphrase field ignored</span></a>
+  <a href="#dep-002"><span class="dot sev-info"></span><span><span class="id">DEP-002 · info</span>Dependency hygiene</span></a>
+  <div class="sep"></div>
+  <a href="#merge"><span class="dot"></span><span>Before merging</span></a>
+  <a href="#verification"><span class="dot"></span><span>Verification</span></a>
+  <a href="#open"><span class="dot"></span><span>Left open</span></a>
+  <a href="#ledger"><span class="dot"></span><span>Commit ledger</span></a>
+</nav>
+
+<main>
+
+<section id="merge" class="finding" style="border-top-color:var(--accent)">
+  <div class="fhead">
+    <div class="eyebrow">Read this first</div>
+    <h2>What a reviewer has to decide before merging</h2>
+  </div>
+  <div class="cols">
+    <div class="note warn">
+      <b>Four commits change consensus.</b>
+      <p>FND-001, FND-002, FND-004 and FND-007 alter what blocks are valid. Nodes on this code reject blocks older nodes accept, so they need a coordinated deployment. Open swaps created before the fork expire back to their creators, as with PR #135.</p>
+    </div>
+    <div class="note warn">
+      <b>Only Signet and Regtest can be swapped against.</b>
+      <p>A claim now proves its L1 payment against the mainchain headers the node validates, so swaps against chains without a header relay (BCH, LTC) are rejected at creation. This follows the repo's own spec, but it removes the BCH testnet flow from the GUI and CLI. The <code>--l1-bch-testnet4</code> flag became <code>--l1-regtest</code>.</p>
+    </div>
+    <div class="note warn">
+      <b>The RPC now requires a cookie.</b>
+      <p>Any script that calls the node needs <code>--rpc-cookie-file</code> (the CLI finds the default data directory's cookie by itself), or the node needs <code>--rpc-no-auth</code>. Non-loopback binds need <code>--rpc-allow-remote</code>.</p>
+    </div>
+    <div class="note">
+      <b>The integration suite was not run here.</b>
+      <p>It needs bitcoind and the enforcer. The rewritten open-swap test compiles and now makes a real regtest payment with a real proof; it should run in CI before this merges.</p>
+    </div>
+  </div>
+</section>
+
+<section id="overview" class="finding">
+  <div class="fhead">
+    <div class="eyebrow">Overview</div>
+    <h2>All fourteen at a glance</h2>
+    <p style="color:var(--muted);max-width:66ch">"Already partly fixed" marks findings PR #135 or #123 had closed in part before this work; the commit covers the residual named in its section.</p>
+  </div>
+  <div class="ledger">
+  <table>
+    <thead><tr><th>Finding</th><th>Severity</th><th>Status</th><th>Consensus</th><th>Commit</th><th>Files</th><th>Δ lines</th></tr></thead>
+    <tbody>
+      <tr><td><a href="#fnd-001">FND-001 L1 payment never verified in consensus</a></td><td><span class="chip sev-crit">Critical</span></td><td><span class="tag tag-ok">Fixed</span></td><td>Yes</td><td class="mono">fc44370</td><td class="num">27</td><td class="num">+2314 −1087</td></tr>
+      <tr><td><a href="#fnd-002">FND-002 Open-swap claims not bound to the payer</a></td><td><span class="chip sev-high">High</span></td><td><span class="tag tag-ok">Fixed</span> <span class="tag tag-plain">partly by #135</span></td><td>Via FND-001</td><td class="mono">0e37146</td><td class="num">4</td><td class="num">+293 −10</td></tr>
+      <tr><td><a href="#fnd-003">FND-003 Reorg deletes from the wrong table</a></td><td><span class="chip sev-med">Medium</span></td><td><span class="tag tag-ok">Fixed</span></td><td>No</td><td class="mono">bb91600</td><td class="num">2</td><td class="num">+183 −5</td></tr>
+      <tr><td><a href="#fnd-004">FND-004 Deleted swap leaves escrow locked</a></td><td><span class="chip sev-med">Medium</span></td><td><span class="tag tag-ok">Fixed</span> <span class="tag tag-plain">partly by #135</span></td><td>No</td><td class="mono">16260cc</td><td class="num">4</td><td class="num">+126 −17</td></tr>
+      <tr><td><a href="#fnd-005">FND-005 RPC has no authentication</a></td><td><span class="chip sev-med">Medium</span></td><td><span class="tag tag-ok">Fixed</span></td><td>No</td><td class="mono">48158d4</td><td class="num">15</td><td class="num">+573 −20</td></tr>
+      <tr><td><a href="#fnd-008">FND-008 Panics on enforcer event order</a></td><td><span class="chip sev-med">Medium</span></td><td><span class="tag tag-ok">Fixed</span></td><td>No</td><td class="mono">f955cc1</td><td class="num">5</td><td class="num">+340 −64</td></tr>
+      <tr><td><a href="#key-001">KEY-001 Seed in a crash-unsafe database</a></td><td><span class="chip sev-med">Medium</span></td><td><span class="tag tag-warn">Fixed except encryption at rest</span></td><td>No</td><td class="mono">d6e4311</td><td class="num">3</td><td class="num">+68 −30</td></tr>
+      <tr><td><a href="#sig-001">SIG-001 Under-signed transactions accepted</a></td><td><span class="chip sev-med">Medium</span></td><td><span class="tag tag-ok">Fixed</span></td><td>No</td><td class="mono">7a96a1d</td><td class="num">3</td><td class="num">+174 −0</td></tr>
+      <tr><td><a href="#dep-001">DEP-001 Hardcoded RPC endpoint and credentials</a></td><td><span class="chip sev-med">Medium</span></td><td><span class="tag tag-ok">Fixed</span></td><td>No</td><td class="mono">4ba4c17</td><td class="num">9</td><td class="num">+384 −341</td></tr>
+      <tr><td><a href="#fnd-006">FND-006 Fill detection depends on the wallet</a></td><td><span class="chip sev-low">Low</span></td><td><span class="tag tag-ok">Fixed</span> <span class="tag tag-plain">rounding by #123</span></td><td>No</td><td class="mono">3e8e650</td><td class="num">3</td><td class="num">+238 −30</td></tr>
+      <tr><td><a href="#fnd-007">FND-007 Bad deposit addresses burn funds</a></td><td><span class="chip sev-low">Low</span></td><td><span class="tag tag-ok">Fixed</span></td><td>Yes</td><td class="mono">e78ff03</td><td class="num">1</td><td class="num">+135 −36</td></tr>
+      <tr><td><a href="#key-002">KEY-002 Mnemonic in argv and trace logs</a></td><td><span class="chip sev-low">Low</span></td><td><span class="tag tag-ok">Fixed</span></td><td>No</td><td class="mono">91a288b</td><td class="num">8</td><td class="num">+313 −32</td></tr>
+      <tr><td><a href="#key-003">KEY-003 Passphrase field ignored</a></td><td><span class="chip sev-low">Low</span></td><td><span class="tag tag-ok">Fixed</span></td><td>No</td><td class="mono">399afd8</td><td class="num">7</td><td class="num">+133 −26</td></tr>
+      <tr><td><a href="#dep-002">DEP-002 Dependency hygiene</a></td><td><span class="chip sev-info">Info</span></td><td><span class="tag tag-warn">Fixed except bincode, reproducible builds</span></td><td>No</td><td class="mono">b6fc4e5</td><td class="num">4</td><td class="num">+61 −25</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<!-- FND-001 -->
+<section id="fnd-001" class="finding">
+  <div class="fhead">
+    <div class="fmeta"><span class="chip sev-crit">Critical</span><span class="mono">FND-001</span><span>commit <span class="mono">fc44370</span></span><span>27 files · +2314 −1087</span><span class="tag tag-warn">consensus change</span></div>
+    <h2>Consensus never verified the L1 payment; any block producer could take an escrow</h2>
+  </div>
+  <div class="cols">
+    <div class="block">
+      <h3>What was wrong</h3>
+      <p>The only check that a swap's parent-chain payment happened lived in the mempool validator, and it read a <code>SwapState</code> that each node computed from its own parent-chain RPC. Block validation checked nothing about L1, and <code>connect</code> overwrote the local state to match the block ("trust the block").</p>
+      <p>A miner could build a claim on an open swap paying themselves, or force-complete a pre-specified swap, with no L1 payment anywhere. Every node accepted the block. PR #135 had fixed <em>who</em> a claim must pay, not <em>whether anything was paid for</em>.</p>
+    </div>
+    <div class="block">
+      <h3>What changed</h3>
+      <p>Option B of the repo's own spec, <code>docs/specs/L1_PAYMENT_PROOFS.html</code>. A <code>SwapClaim</code> now carries an <code>L1PaymentProof</code> in the <code>proof_data</code> field that had been reserved for it: the merkle block from <code>gettxoutproof</code> (header plus branch) and the raw payment. Consensus verifies it from block data alone, on both the mempool and block paths, so the two cannot drift.</p>
+      <p>The interim mitigation the report suggested (reject blocks when the local swap is not ReadyToClaim) was not taken: it would make consensus depend on node-local RPC state and split the chain.</p>
+    </div>
+  </div>
+  <div class="block" style="max-width:none">
+    <h3>The verification chain, in order</h3>
+    <div class="chain">
+      <div><b>Header is a known mainchain block</b><span>Its hash must appear in <code>main_header_infos</code>, the table the enforcer-fed archive writes. State reads it through a second handle to the same LMDB database.</span></div>
+      <div><b>…on the anchor's ancestry</b><span>Walk back from the L2 header's <code>prev_main_hash</code> to the proof block's height; hashes must match. At most <code>max_l1_tx_age_blocks</code> deep.</span></div>
+      <div><b>Confirmations from the anchor</b><span>Depth below <code>prev_main_hash</code>, so every node computes the same number. The tip's anchor is stored per height in <code>main_anchors</code> for the mempool.</span></div>
+      <div><b>Transaction is in the block</b><span><code>MerkleBlock::extract_matches</code> recomputes the header's root and rejects the CVE-2012-2459 duplicate-hash shape.</span></div>
+      <div><b>Pays the swap's recipient</b><span>At least <code>l1_amount</code> to the script of <code>l1_recipient_address</code>, parsed for the swap's chain.</span></div>
+      <div><b>Commits to swap and claimer</b><span>An <code>OP_RETURN</code> of <code>"CSFT" ‖ swap_id ‖ l2_claimer</code>. The committed address is who gets paid; for a pre-specified swap it must equal the fixed recipient.</span></div>
+      <div><b>Claim pays that address</b><span>The full <code>l2_amount</code> must reach the committed claimer. A legacy <code>l2_claimer_address</code> on the claim must agree.</span></div>
+    </div>
+  </div>
+  <div class="cols">
+    <div class="block">
+      <h3>Consequences</h3>
+      <ul class="rules">
+        <li><code>SwapCreate</code> is rejected for chains whose headers the node does not hold and for L1 recipients that do not parse for the chain, so nobody escrows into a swap that could only expire.</li>
+        <li>The commitment makes the payer the claimant: nobody can present a proof of a payment naming their address without having made it. <code>SwapAccept</code> is coordination now, not security.</li>
+        <li>One payment names one swap, so L1 txid uniqueness holds by construction.</li>
+        <li><code>connect</code> records the proven txid and claimer on the swap instead of trusting the block; swap reconstruction reads them from the proof.</li>
+        <li><code>update_swap_l1_txid</code> and RPC-based detection are advisory: display, and the txid the node builds a proof from.</li>
+      </ul>
+    </div>
+    <div class="block">
+      <h3>Surface</h3>
+      <ul class="rules">
+        <li><code>claim_swap(swap_id, l2_claimer_address, l1_proof)</code>: the proof is optional hex; otherwise the node builds it from its parent-chain RPC.</li>
+        <li>New <code>l1_payment_commitment</code> RPC and CLI command returns the <code>OP_RETURN</code> payload a filler puts in a <code>data</code> output.</li>
+        <li><code>App::build_swap_claim</code> is the one claim builder behind the RPC and the GUI; the GUI pane gained a proof field.</li>
+        <li>Selectable chains are Signet and Regtest; default L1 configs point at local nodes on 38332 and 18443.</li>
+      </ul>
+    </div>
+  </div>
+  <details><summary><span>Tests added and files touched</span></summary><div class="body">
+    <div><b>Proof verification</b> (<code>lib/state/l1_proof.rs</code>, synthetic regtest blocks): valid proof with confirmations counted from the anchor; unknown block; sibling block off the anchor's chain; tampered transaction; underpayment, missing and wrong commitment; pre-specified claimer mismatch; unprovable chain and bad encoding; commitment round trip.</div>
+    <div><b>Consensus rules</b> (<code>lib/state/swap.rs</code>): claim without proof rejected; proof paying committed claimer accepted; paying anyone else, or underpaying, rejected; confirmations counted from the anchor; proof for another swap rejected; pre-specified swap requires payment to its recipient; mempool path uses the tip anchor and needs no local state; a reservation does not override the prover.</div>
+    <div><b>SwapCreate</b>: unprovable chain and unparseable recipient rejected. <b>State</b>: sees headers the Archive writes.</div>
+    <div><b>Integration</b> (<code>integration_tests/swap_creation.rs</code>): real regtest payment with the commitment, real proof from <code>gettxoutproof</code>, claim without proof refused, claim to a non-committed address refused, claim with proof completes the swap and records txid and claimer.</div>
+    <ul class="files"><li>lib/state/l1_proof.rs (new)</li><li>lib/state/swap.rs, block.rs, mod.rs, error.rs</li><li>lib/types/swap.rs, lib/wallet.rs, lib/parent_chain_rpc.rs</li><li>app/app.rs, rpc_server.rs, cli.rs, main.rs, gui/swap/detail.rs, gui/swap/create.rs, gui/l1_config.rs</li><li>cli/lib.rs, rpc-api/lib.rs</li><li>integration_tests/* (six files)</li><li>README.md, docs/COINSHIFT_HOW_IT_WORKS.md, docs/SWAP_MECHANICS.html, docs/specs/L1_PAYMENT_PROOFS.html</li></ul>
+  </div></details>
+</section>
+
+<!-- FND-002 -->
+<section id="fnd-002" class="finding">
+  <div class="fhead">
+    <div class="fmeta"><span class="chip sev-high">High</span><span class="mono">FND-002</span><span>commit <span class="mono">0e37146</span></span><span>4 files · +293 −10</span><span class="tag tag-plain">partly fixed by #135</span></div>
+    <h2>Open-swap claims were a race: nothing bound the escrow to whoever paid</h2>
+  </div>
+  <div class="cols">
+    <div class="block">
+      <h3>What was wrong</h3>
+      <p>Once a fill was detected, the mempool accepted any claimer address the claim declared. The L1 sender was recorded but never compared to anything; the L2 binding was only set through a manual RPC on one node. Anyone watching could claim the escrow first.</p>
+      <p>PR #135 introduced <code>SwapAccept</code> reservations, which closed the race on the block path. FND-001 then moved entitlement into the payment itself.</p>
+    </div>
+    <div class="block">
+      <h3>What this commit closes</h3>
+      <p>Automatic detection matched any payment to the right address for the right amount and never set <code>l2_claimer_address</code>. It now reads the <code>OP_RETURN</code> commitment from the payment's script, records only payments that commit to this swap (and to the fixed recipient, for a pre-specified swap), stores the committed claimer, and ignores uncommitted payments with a warning: they are not fills, and a claim built from one would be rejected everywhere.</p>
+      <p><code>update_swap_l1_txid</code> took a txid, a confirmation count and a claimer on the caller's word. With a parent-chain RPC configured it now looks the transaction up and takes the confirmations and committed claimer from the chain, refusing a txid that commits to another swap. Without an RPC it records the values unverified and says so, which is harmless now that claims are proven separately.</p>
+    </div>
+  </div>
+  <details><summary><span>Tests added and files touched</span></summary><div class="body">
+    <div>Detection driven through an in-process JSON-RPC server: a committed payment is recorded with its claimer and marks the swap ReadyToClaim; an uncommitted payment and one for another swap leave it Pending.</div>
+    <ul class="files"><li>lib/state/two_way_peg_data.rs</li><li>lib/parent_chain_rpc.rs (<code>TransactionInfo::swap_commitment</code>, <code>hex</code> field)</li><li>app/rpc_server.rs</li><li>rpc-api/lib.rs</li></ul>
+  </div></details>
+</section>
+
+<!-- FND-003 -->
+<section id="fnd-003" class="finding">
+  <div class="fhead">
+    <div class="fmeta"><span class="chip sev-med">Medium</span><span class="mono">FND-003</span><span>commit <span class="mono">bb91600</span></span><span>2 files · +183 −5</span></div>
+    <h2>Two-way-peg disconnect deleted from the wrong table, and its height check was off by one</h2>
+  </div>
+  <div class="cols">
+    <div class="block">
+      <h3>What was wrong</h3>
+      <p>The withdrawal-bundle branch of <code>disconnect</code> looked up the newest row of <code>withdrawal_bundle_event_blocks</code> and then deleted that index from <code>deposit_blocks</code>, a copy-paste of the deposit branch. After one reorg over a bundle event the withdrawal row stayed and a deposit row belonging to another block vanished, so the next reorg rebuilt the wrong 2WPD range.</p>
+      <p>Writing the regression test exposed a second bug: <code>connect</code> records the sidechain height at which an event block was applied, but <code>disconnect</code> asserted that height minus one, and the <code>net_task</code> search for the last row applied by an earlier block filtered on <code>height − 1</code> too. Connecting a 2WPD with a deposit and then disconnecting it panicked, which would have killed the net task on any reorg across a deposit or bundle event.</p>
+    </div>
+    <div class="block">
+      <h3>What changed</h3>
+      <ul class="rules">
+        <li>Delete from the table the row came from.</li>
+        <li>Compare heights as recorded in both <code>disconnect</code> and <code>net_task::disconnect_tip_</code>.</li>
+        <li>A connect-then-disconnect round trip over a deposit plus a Submitted bundle event pins both tables and shows rows from earlier blocks survive.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- FND-004 -->
+<section id="fnd-004" class="finding">
+  <div class="fhead">
+    <div class="fmeta"><span class="chip sev-med">Medium</span><span class="mono">FND-004</span><span>commit <span class="mono">16260cc</span></span><span>4 files · +126 −17</span><span class="tag tag-plain">partly fixed by #135</span></div>
+    <h2>A deleted swap record left its escrow locked, and the orphan cleanup never fired</h2>
+  </div>
+  <div class="cols">
+    <div class="block">
+      <h3>What was wrong</h3>
+      <p>The report's main vector, the <code>delete_swap</code> RPC removing a Pending swap while its outputs stayed locked and consensus then accepting any claim on the unknown swap, was closed by PR #135: the RPC is gone and claims on unknown swaps fail closed.</p>
+      <p>Two residuals stayed. <code>delete_swap_unchecked</code> only unlocked outputs in the "record missing" branch, so a future caller deleting a readable record would orphan its locks. And <code>Node::submit_transaction</code> triggered orphan cleanup by matching the strings "orphaned lock" and "corrupted swap" in the error text, while the regular-spend validator emitted "Cannot spend locked output", so an orphan hit through a normal transfer was never repaired.</p>
+    </div>
+    <div class="block">
+      <h3>What changed</h3>
+      <ul class="rules">
+        <li><code>delete_swap_unchecked</code> releases the swap's locks unconditionally before deleting; rollback, its one caller, has already unlocked and finds nothing to do.</li>
+        <li>A typed <code>state::Error::OrphanedLock</code> is raised by both <code>validate_swap_create</code> and <code>validate_no_locked_outputs</code> when a lock's swap does not exist or cannot be read; the node matches on the variant.</li>
+        <li>Tests: unlocking on delete; typed error for an orphan versus plain rejection for a live lock; cleanup removes exactly the orphan.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- FND-005 -->
+<section id="fnd-005" class="finding">
+  <div class="fhead">
+    <div class="fmeta"><span class="chip sev-med">Medium</span><span class="mono">FND-005</span><span>commit <span class="mono">48158d4</span></span><span>15 files · +573 −20</span><span class="tag tag-warn">breaking for scripts</span></div>
+    <h2>The JSON-RPC server accepted any request from anyone who could open the socket</h2>
+  </div>
+  <div class="cols">
+    <div class="block">
+      <h3>What was wrong</h3>
+      <p>Every method that matters lives on the RPC: transfer, withdraw, create_deposit and mine (which spend the enforcer's L1 wallet), set_seed_from_mnemonic, stop. On the default loopback bind that meant any local process; with <code>--rpc-addr 0.0.0.0</code>, which the README showed for multi-instance setups, anyone on the network.</p>
+    </div>
+    <div class="block">
+      <h3>What changed</h3>
+      <ul class="rules">
+        <li>Bitcoin Core style cookie: on start the node draws a 32-byte secret and writes <code>__cookie__:&lt;secret&gt;</code> to <code>&lt;datadir&gt;/rpc.cookie</code>, mode 0600, rotated every start.</li>
+        <li>A tower-http validate-request layer in front of jsonrpsee answers 401 to any request without it (basic auth or bearer), compared in constant time.</li>
+        <li><code>--rpc-cookie-file</code> moves the file; <code>--rpc-no-auth</code> disables the check with a warning; a non-loopback <code>--rpc-addr</code> is refused without <code>--rpc-allow-remote</code>.</li>
+        <li>The CLI reads the default data directory's cookie automatically; the GUI console passes its own node's cookie; the integration harness reads it from the spawned node's data directory. Shared parsing and header helpers live in <code>rpc-api/auth.rs</code>.</li>
+      </ul>
+    </div>
+  </div>
+  <details><summary><span>Tests added and files touched</span></summary><div class="body">
+    <div>Header acceptance and rejection (basic, bearer, wrong user, wrong secret, garbage); cookie file mode and rotation across restarts; the bind guard; a live jsonrpsee server that returns 401 without the cookie and answers with it.</div>
+    <ul class="files"><li>app/rpc_auth.rs (new), rpc-api/auth.rs (new)</li><li>app/rpc_server.rs, cli.rs, main.rs, gui/mod.rs, gui/console_logs.rs</li><li>cli/lib.rs, integration_tests/setup.rs</li><li>README.md ("RPC authentication" section)</li></ul>
+  </div></details>
+</section>
+
+<!-- FND-008 -->
+<section id="fnd-008" class="finding">
+  <div class="fhead">
+    <div class="fmeta"><span class="chip sev-med">Medium</span><span class="mono">FND-008</span><span>commit <span class="mono">f955cc1</span></span><span>5 files · +340 −64</span></div>
+    <h2>Assertions in the peg state machine wedged the node on unexpected event order</h2>
+  </div>
+  <div class="cols">
+    <div class="block">
+      <h3>What was wrong</h3>
+      <p>The two-way-peg connect and disconnect path asserted its way through the withdrawal-bundle lifecycle: heights, latest statuses, <code>RollBack::push</code> results, the latest-failed-bundle record. These run inside <code>task::block_in_place</code> in the net task, so a violation killed the task and the node stayed stuck at the same block on every restart, since the enforcer replays the same events.</p>
+      <p>One assertion was simply wrong: a pending bundle collected at height N had to be reported Submitted at exactly N+1, but a slow enforcer, a delayed L1 block or a restart shifts it. The m6id already identifies the bundle.</p>
+    </div>
+    <div class="block">
+      <h3>What changed</h3>
+      <ul class="rules">
+        <li>The height-adjacency assertion became a debug log.</li>
+        <li>Every other assertion is a structured error: <code>UnexpectedWithdrawalBundleStatus</code>, <code>WithdrawalBundleEventOutOfOrder</code>, <code>EventBlockMismatch</code>, <code>InconsistentLatestFailedWithdrawalBundle</code>, <code>LatestFailedWithdrawalBundleMismatch</code>; the height <code>expect</code> in <code>disconnect</code> is <code>NoTip</code>; the reorg loop returns <code>ReorgMissedCommonAncestor</code>.</li>
+        <li>Tests: a Submitted event three blocks after collection is applied; a Confirmed event on a bundle that is not Submitted is an error, not a panic.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- KEY-001 -->
+<section id="key-001" class="finding">
+  <div class="fhead">
+    <div class="fmeta"><span class="chip sev-med">Medium</span><span class="mono">KEY-001</span><span>commit <span class="mono">d6e4311</span></span><span>3 files · +68 −30</span><span class="tag tag-warn">encryption at rest still open</span></div>
+    <h2>The wallet seed lived in a database opened with crash-unsafe flags</h2>
+  </div>
+  <div class="cols">
+    <div class="block">
+      <h3>What was wrong</h3>
+      <p><code>Wallet::new</code> opened LMDB with the node's "fast" flags: WRITE_MAP, MAP_ASYNC, NO_SYNC, NO_META_SYNC. The comment justified the lost durability by the state being reconstructible from the chain, which holds for the chain database and not for the 64-byte seed, the one thing in the data directory that cannot be rebuilt. LMDB documents that these flags can corrupt the database on system failure, and the app never forces a mnemonic backup.</p>
+    </div>
+    <div class="block">
+      <h3>What changed</h3>
+      <ul class="rules">
+        <li>The wallet environment uses LMDB's default fsync-on-commit durability; NO_READ_AHEAD and NO_TLS stay, since they do not affect durability.</li>
+        <li>The wallet directory is set to mode 0700 on Unix.</li>
+        <li>In-memory seed copies made during derivation and address recovery are wrapped in <code>Zeroizing</code>.</li>
+        <li>Test: set a seed, reopen the environment, read it back, check the directory mode.</li>
+      </ul>
+      <p><b>Not done:</b> encrypting the seed at rest with a user passphrase. It needs an unlock flow across the GUI, RPC and headless modes and is documented as open at the field.</p>
+    </div>
+  </div>
+</section>
+
+<!-- SIG-001 -->
+<section id="sig-001" class="finding">
+  <div class="fhead">
+    <div class="fmeta"><span class="chip sev-med">Medium</span><span class="mono">SIG-001</span><span>commit <span class="mono">7a96a1d</span></span><span>3 files · +174 −0</span></div>
+    <h2>The mempool accepted transactions with fewer signatures than inputs</h2>
+  </div>
+  <div class="cols">
+    <div class="block">
+      <h3>What was wrong</h3>
+      <p><code>validate_transaction</code> paired authorizations with spent outputs using <code>zip</code>, which stops at the shorter side, and <code>verify_authorized_transaction</code> batch-verified however many signatures were present. A two-input, one-signature transaction passed the address check for the signed input only and entered every mempool. Only block validation counted signatures, so the first miner to include it paid a BMM bribe for a block every node rejected, and the transaction stayed in the mempool to poison the next template.</p>
+    </div>
+    <div class="block">
+      <h3>What changed</h3>
+      <ul class="rules">
+        <li><code>verify_authorized_transaction</code> returns <code>NotEnoughAuthorizations</code> or <code>TooManyAuthorizations</code>, like the body verifier.</li>
+        <li><code>validate_transaction</code> checks the count explicitly before the per-input loop, with a new <code>WrongAuthorizationCount</code> error naming both numbers.</li>
+        <li>Tests model the exploit shape (attacker input plus victim input, one signature) and the over-signed mirror.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- DEP-001 -->
+<section id="dep-001" class="finding">
+  <div class="fhead">
+    <div class="fmeta"><span class="chip sev-med">Medium</span><span class="mono">DEP-001</span><span>commit <span class="mono">4ba4c17</span></span><span>9 files · +384 −341</span></div>
+    <h2>Swap monitoring was forced onto two hardcoded endpoints, one a public IP with credentials in source</h2>
+  </div>
+  <div class="cols">
+    <div class="block">
+      <h3>What was wrong</h3>
+      <p>An exact-match allowlist refused to start the app on any other URL, and the GUI showed the fields read-only. The BCH entry was a third-party public IP over plaintext HTTP with <code>user</code>/<code>password</code> embedded in the source. Whoever operated, compromised or sat on the path to that host could invent or hide fills for every default-config BCH user.</p>
+    </div>
+    <div class="block">
+      <h3>What changed</h3>
+      <ul class="rules">
+        <li>The allowlist, the exact-match check and the public endpoint are gone. Defaults are a local node on the chain's port with no credentials, offered as a starting point.</li>
+        <li><code>RpcConfig</code> gains an optional <code>cookie_file</code> (Bitcoin Core style, read on every call, precedence over user and password); <code>https://</code> works once the URL is editable.</li>
+        <li><code>RpcConfig::is_plaintext_remote</code> drives a warning at startup, in the GUI and in the CLI when credentials and payment evidence would cross a network in the clear.</li>
+        <li><code>write_l1_config_file</code> no longer discards entries that do not match a built-in and no longer overwrites existing ones. The GUI fields are editable, with a cookie-file field and a "use local default" button; two duplicate config parsers now use the library loader.</li>
+        <li>Files written by the previous version still load.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- FND-006 -->
+<section id="fnd-006" class="finding">
+  <div class="fhead">
+    <div class="fmeta"><span class="chip sev-low">Low</span><span class="mono">FND-006</span><span>commit <span class="mono">3e8e650</span></span><span>3 files · +238 −30</span><span class="tag tag-plain">rounding fixed by #123</span></div>
+    <h2>Fill detection asked the node's wallet, which does not track the swap address</h2>
+  </div>
+  <div class="cols">
+    <div class="block">
+      <h3>What was wrong</h3>
+      <p>Detection called <code>listunspent</code> filtered by the swap's address. On a stock node that returns only outputs the wallet tracks, and an empty list rather than an error for anything else. Nothing in the flow imports the counterparty's address, so in the default configuration detection never fired: the swap expired, the creator reclaimed the escrow, and the filler's payment was gone. A fill spent before it was noticed disappeared from the list as well. The f64 truncation named by the same report had been fixed in #123.</p>
+    </div>
+    <div class="block">
+      <h3>What changed</h3>
+      <ul class="rules">
+        <li>Discovery runs <code>scantxoutset</code> with an <code>addr(…)</code> descriptor across the whole UTXO set, unioned with <code>listunspent</code> for nodes without it. The useless <code>getreceivedbyaddress</code> probe is dropped.</li>
+        <li>When only the wallet source is available and finds nothing, a warning names the address and the alternatives, so a blind node is visible rather than silent.</li>
+        <li>Once a swap's txid is known, <code>query_and_update_swap</code> fetches that transaction directly, so spending the fill no longer stalls confirmation tracking.</li>
+        <li>Tests use an in-process JSON-RPC server: payment seen by <code>scantxoutset</code> with an empty wallet; wallet fallback; no source at all is an error.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- FND-007 -->
+<section id="fnd-007" class="finding">
+  <div class="fhead">
+    <div class="fmeta"><span class="chip sev-low">Low</span><span class="mono">FND-007</span><span>commit <span class="mono">e78ff03</span></span><span>1 file · +135 −36</span><span class="tag tag-warn">consensus change</span></div>
+    <h2>Deposits with unparseable addresses were credited to the all-zeros address</h2>
+  </div>
+  <div class="cols">
+    <div class="block">
+      <h3>What was wrong</h3>
+      <p>The conversion of an enforcer-reported deposit logged a warning and substituted <code>Address::ALL_ZEROS</code> when the bytes were not UTF-8 or did not parse. The comment said the deposit would be ignored; in fact it was credited to an address no key hashes to, burning the value and leaving an unspendable UTXO in the set for good.</p>
+    </div>
+    <div class="block">
+      <h3>What changed</h3>
+      <ul class="rules">
+        <li>Parsing fails with a dedicated <code>InvalidDepositAddress</code> error.</li>
+        <li>The <code>BlockInfo</code> conversion drops exactly that event with an error log, keeps every other event, and still fails on any other malformed field. Every node makes the same decision from the same bytes; the coins remain in the parent-chain escrow.</li>
+        <li>Tests: valid address credited; invalid UTF-8 and bad base58 are errors, never zeros; block info skips the bad deposit and keeps the good one.</li>
+      </ul>
+      <p>Consensus change for any chain that has already seen such a deposit: old nodes hold a zero-address UTXO that new nodes do not.</p>
+    </div>
+  </div>
+</section>
+
+<!-- KEY-002 -->
+<section id="key-002" class="finding">
+  <div class="fhead">
+    <div class="fmeta"><span class="chip sev-low">Low</span><span class="mono">KEY-002</span><span>commit <span class="mono">91a288b</span></span><span>8 files · +313 −32</span></div>
+    <h2>The mnemonic was a command-line argument and reached trace logs on both sides</h2>
+  </div>
+  <div class="cols">
+    <div class="block">
+      <h3>What was wrong</h3>
+      <p><code>set-seed-from-mnemonic</code> and <code>recover-from-mnemonic</code> took the phrase as a positional argument, so it landed in shell history and the process table. Both the server and the CLI client installed jsonrpsee's <code>rpc_logger</code>, which serialises whole requests at TRACE with a 1024-byte cap, well above a mnemonic's length; any trace-level run wrote seeds to stdout, the rolling log and the GUI console buffer.</p>
+    </div>
+    <div class="block">
+      <h3>What changed</h3>
+      <ul class="rules">
+        <li>The commands read the phrase from <code>--mnemonic-file &lt;path&gt;</code> (<code>-</code> for stdin) or a no-echo terminal prompt; <code>--with-passphrase</code> prompts, with confirmation, instead of taking a flag.</li>
+        <li>A <code>RedactingRpcLoggerLayer</code> in the shared rpc-api crate replaces the built-in logger on both sides: method name and id for every call, parameters and responses only for methods that carry no key material, batches by size. <code>set_seed_from_mnemonic</code> and <code>generate_mnemonic</code> are fully redacted.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- KEY-003 -->
+<section id="key-003" class="finding">
+  <div class="fhead">
+    <div class="fmeta"><span class="chip sev-low">Low</span><span class="mono">KEY-003</span><span>commit <span class="mono">399afd8</span></span><span>7 files · +133 −26</span></div>
+    <h2>The GUI's passphrase field was ignored and the seed was shown in clear text</h2>
+  </div>
+  <div class="cols">
+    <div class="block">
+      <h3>What was wrong</h3>
+      <p>The seed pane rendered a masked passphrase field, but the set button passed only the phrase and the wallet hardcoded an empty passphrase. A user who typed one believed it protected the wallet and could not restore it elsewhere with the phrase and passphrase they had kept. The seed words were unmasked.</p>
+    </div>
+    <div class="block">
+      <h3>What changed</h3>
+      <ul class="rules">
+        <li><code>Wallet::set_seed_from_mnemonic</code> takes the passphrase; a <code>Wallet::seed_from_mnemonic</code> helper is the single derivation path for the wallet and the RPC server.</li>
+        <li>The RPC method and CLI commands gain an optional passphrase; the GUI threads its field through, warns that the passphrase is part of the key, and masks the seed behind a reveal toggle.</li>
+        <li>Tests pin the BIP39 reference vector for the "TREZOR" passphrase and check that a wallet set with a passphrase refuses the same phrase with a different one.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- DEP-002 -->
+<section id="dep-002" class="finding">
+  <div class="fhead">
+    <div class="fmeta"><span class="chip sev-info">Informational</span><span class="mono">DEP-002</span><span>commit <span class="mono">b6fc4e5</span></span><span>4 files · +61 −25</span><span class="tag tag-warn">two items left open</span></div>
+    <h2>Dependency hygiene: yanked pins, a floating nightly, an unverified CI download</h2>
+  </div>
+  <div class="cols">
+    <div class="block">
+      <h3>What changed</h3>
+      <ul class="rules">
+        <li><code>bitcoin 0.32.100</code> and <code>bitcoin-units 0.1.100</code> were yanked upstream; the lockfile now resolves to 0.32.102 and 0.1.101 with no source changes. <code>deny.toml</code> fails on any yanked crate instead of warning.</li>
+        <li><code>rust-toolchain.toml</code> is pinned to nightly-2026-08-28, the one CI already needed for a clippy regression; the three toolchain installs in the workflow use the same date.</li>
+        <li>The integration-test job verifies the "latest" bitcoin-patched archive against a pinned SHA-256 computed from the artifact dated 2026-01-22, with the bump procedure in a comment.</li>
+      </ul>
+    </div>
+    <div class="block">
+      <h3>Not done</h3>
+      <p>Migrating the P2P and storage encoding off the unmaintained bincode 1.x, and a reproducible-build story for release images. Both are projects rather than hygiene tweaks.</p>
+    </div>
+  </div>
+</section>
+
+<!-- verification -->
+<section id="verification" class="finding" style="border-top-color:var(--accent)">
+  <div class="fhead">
+    <div class="eyebrow">Verification</div>
+    <h2>What was checked on the final tree</h2>
+  </div>
+  <div class="verify">
+    <div><span class="eyebrow">cargo fmt --check</span><b>clean</b></div>
+    <div><span class="eyebrow">cargo clippy --all-targets</span><b>no warnings</b><span style="color:var(--muted);font-size:.82rem">besides the pre-existing heed NO_TLS deprecation</span></div>
+    <div><span class="eyebrow">cargo deny check</span><b>advisories, bans, licenses, sources ok</b></div>
+    <div><span class="eyebrow">cargo test --workspace</span><b>85 passing, three consecutive runs</b><span style="color:var(--muted);font-size:.82rem">54 before this work</span></div>
+    <div><span class="eyebrow">integration suite</span><b>compiles, not run</b><span style="color:var(--muted);font-size:.82rem">needs bitcoind and the enforcer</span></div>
+    <div><span class="eyebrow">flakiness</span><b>one failure seen once</b><span style="color:var(--muted);font-size:.82rem">LMDB environment open in a pre-existing test helper, early in the session; not reproduced since</span></div>
+  </div>
+</section>
+
+<!-- open -->
+<section id="open" class="finding">
+  <div class="fhead">
+    <div class="eyebrow">Left open</div>
+    <h2>What these commits do not do</h2>
+  </div>
+  <div class="cols">
+    <div class="block">
+      <ul class="rules">
+        <li><b>Header relay for foreign chains.</b> BCH and LTC swaps need their headers and difficulty rules validated in consensus. Until then they are not selectable (FND-001).</li>
+        <li><b>Seed encryption at rest.</b> The seed is durable and owner-only now, but still plaintext on disk (KEY-001).</li>
+        <li><b>bincode 1.x on the wire and storage paths</b>, and reproducible release builds (DEP-002).</li>
+      </ul>
+    </div>
+    <div class="block">
+      <ul class="rules">
+        <li><b>Running the integration suite.</b> The open-swap test was rewritten around a real payment and proof and compiles, but has not executed here.</li>
+        <li><b>The findings themselves</b> remain untracked under <code>docs/found/</code>, along with <code>graphify-out/</code>, exactly as they were.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ledger -->
+<section id="ledger" class="finding">
+  <div class="fhead">
+    <div class="eyebrow">Commit ledger</div>
+    <h2>The fourteen commits in the order they were made</h2>
+    <p style="color:var(--muted);max-width:66ch">Simple, self-contained fixes first; the swap consensus work last, since FND-002 and FND-004 depend on what FND-001 establishes.</p>
+  </div>
+  <div class="ledger">
+  <table>
+    <thead><tr><th>#</th><th>Commit</th><th>Subject</th><th>Finding</th></tr></thead>
+    <tbody>
+      <tr><td class="num">1</td><td class="mono">bb91600</td><td>fix(2wpd): disconnect the right bookkeeping table on reorg</td><td class="mono">FND-003</td></tr>
+      <tr><td class="num">2</td><td class="mono">7a96a1d</td><td>fix(state): require one authorization per input in mempool validation</td><td class="mono">SIG-001</td></tr>
+      <tr><td class="num">3</td><td class="mono">e78ff03</td><td>fix(deposit): reject unparseable deposit addresses instead of burning to zero</td><td class="mono">FND-007</td></tr>
+      <tr><td class="num">4</td><td class="mono">399afd8</td><td>fix(wallet): honour the BIP39 passphrase and mask the seed input</td><td class="mono">KEY-003</td></tr>
+      <tr><td class="num">5</td><td class="mono">91a288b</td><td>fix(cli,rpc): keep the mnemonic out of argv and out of trace logs</td><td class="mono">KEY-002</td></tr>
+      <tr><td class="num">6</td><td class="mono">d6e4311</td><td>fix(wallet): open the seed database durably and zeroize seed copies</td><td class="mono">KEY-001</td></tr>
+      <tr><td class="num">7</td><td class="mono">f955cc1</td><td>fix(2wpd): return errors instead of panicking on unexpected event order</td><td class="mono">FND-008</td></tr>
+      <tr><td class="num">8</td><td class="mono">4ba4c17</td><td>fix(l1): drop the hardcoded RPC allowlist and its embedded credentials</td><td class="mono">DEP-001</td></tr>
+      <tr><td class="num">9</td><td class="mono">3e8e650</td><td>fix(l1): discover swap fills from the UTXO set, not the node's wallet</td><td class="mono">FND-006</td></tr>
+      <tr><td class="num">10</td><td class="mono">48158d4</td><td>feat(rpc): require cookie authentication and loopback binding</td><td class="mono">FND-005</td></tr>
+      <tr><td class="num">11</td><td class="mono">b6fc4e5</td><td>build: move off yanked bitcoin pins, pin the nightly, verify CI downloads</td><td class="mono">DEP-002</td></tr>
+      <tr><td class="num">12</td><td class="mono">16260cc</td><td>fix(swap): never strand escrow behind a deleted swap record</td><td class="mono">FND-004</td></tr>
+      <tr><td class="num">13</td><td class="mono">fc44370</td><td>feat(swap): verify the L1 payment in consensus with proof-carrying claims</td><td class="mono">FND-001</td></tr>
+      <tr><td class="num">14</td><td class="mono">0e37146</td><td>fix(swap): bind detected L1 fills to the payer's committed L2 address</td><td class="mono">FND-002</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <footer>Each commit message carries the full rationale and the tests it adds; <code>git show &lt;hash&gt;</code> is the primary record. Base commit <span class="mono">1b8d1d6</span> ("fix: make main build, run, and test again"); report commit audited was <span class="mono">82f3a71</span>, version 0.14.0-alpha.</footer>
+</section>
+
+</main>
+</div>
+</div>
+</body>
+</html>

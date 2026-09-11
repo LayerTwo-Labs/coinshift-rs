@@ -44,6 +44,10 @@ pub enum Error {
         message_name: String,
         value: String,
     },
+    /// The sidechain address of a deposit could not be parsed. Such a
+    /// deposit is not credited to anyone; see `BlockInfo`'s conversion.
+    #[error("Invalid deposit address: `{address_hex}`")]
+    InvalidDepositAddress { address_hex: String },
     #[error("Missing field in message `{message_name}`: `{field_name}`")]
     MissingField {
         field_name: String,
@@ -433,42 +437,26 @@ pub mod mainchain {
                 address,
                 value_sats,
             } = output;
-            let address = 'address: {
-                // It is wrong to assume that the address is valid UTF8.
-                // In the case that it is not valid UTF8, the deposit should be
-                // ignored.
-                let address_bytes: Vec<u8> =
-                    address
-                        .ok_or_else(|| {
-                            super::Error::missing_field::<
-                                generated::deposit::Output,
-                            >("address")
-                        })?
-                        .decode_bytes::<generated::deposit::Output>(
-                            "address",
-                        )?;
-                let address_utf8: &str =
-                    match std::str::from_utf8(&address_bytes) {
-                        Ok(address_str) => address_str,
-                        Err(_) => {
-                            tracing::warn!(
-                                address_bytes = hex::encode(address_bytes),
-                                "Ignoring invalid deposit address"
-                            );
-                            break 'address Address::ALL_ZEROS;
-                        }
-                    };
-                match Address::from_str(address_utf8) {
-                    Ok(address) => address,
-                    Err(_) => {
-                        tracing::warn!(
-                            address_utf8,
-                            "Ignoring invalid deposit address"
-                        );
-                        Address::ALL_ZEROS
-                    }
-                }
+            // The address bytes come from the parent chain and need not be
+            // valid UTF-8, let alone a valid sidechain address. An address
+            // that does not parse is an error, never a substitute value: the
+            // all-zeros address that used to stand in here has no key, so
+            // crediting it burned the deposit while leaving an unspendable
+            // UTXO in the set forever.
+            let address_bytes: Vec<u8> = address
+                .ok_or_else(|| {
+                    super::Error::missing_field::<generated::deposit::Output>(
+                        "address",
+                    )
+                })?
+                .decode_bytes::<generated::deposit::Output>("address")?;
+            let invalid_address = || super::Error::InvalidDepositAddress {
+                address_hex: hex::encode(&address_bytes),
             };
+            let address = std::str::from_utf8(&address_bytes)
+                .ok()
+                .and_then(|address_utf8| Address::from_str(address_utf8).ok())
+                .ok_or_else(invalid_address)?;
             let value = value_sats
                 .ok_or_else(|| {
                     super::Error::missing_field::<generated::deposit::Output>(
@@ -698,9 +686,25 @@ pub mod mainchain {
                         .map(crate::types::BlockHash)
                 })
                 .transpose()?;
+            // A deposit whose sidechain address does not parse cannot be
+            // credited to anyone. It is dropped here, deterministically, so
+            // every node skips the same event; the coins stay in the parent
+            // chain escrow. Any other conversion failure is still an error.
             let events = events
                 .into_iter()
-                .map(BlockEvent::try_from)
+                .filter_map(|event| match BlockEvent::try_from(event) {
+                    Ok(event) => Some(Ok(event)),
+                    Err(super::Error::InvalidDepositAddress {
+                        address_hex,
+                    }) => {
+                        tracing::error!(
+                            address_hex,
+                            "Skipping deposit with an unparseable sidechain address; it will not be credited"
+                        );
+                        None
+                    }
+                    Err(err) => Some(Err(err)),
+                })
                 .collect::<Result<_, Self::Error>>()?;
             Ok(Self {
                 bmm_commitment,
@@ -1300,5 +1304,100 @@ pub mod mainchain {
                 .await?;
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod deposit_address_tests {
+    use super::{
+        Error,
+        common::Hex,
+        mainchain::{BlockEvent, BlockInfo, generated},
+    };
+    use crate::types::Address;
+
+    fn output(address_hex: &str) -> generated::deposit::Output {
+        generated::deposit::Output {
+            address: Some(Hex {
+                hex: Some(address_hex.to_owned()),
+            }),
+            value_sats: Some(10_000),
+        }
+    }
+
+    fn deposit(address_hex: &str) -> generated::Deposit {
+        generated::Deposit {
+            sequence_number: Some(0),
+            outpoint: Some(generated::OutPoint {
+                txid: Some(super::common::ReverseHex {
+                    hex: Some("11".repeat(32)),
+                }),
+                vout: Some(0),
+            }),
+            output: Some(output(address_hex)),
+        }
+    }
+
+    fn block_info(deposits: Vec<generated::Deposit>) -> generated::BlockInfo {
+        generated::BlockInfo {
+            bmm_commitment: None,
+            events: deposits
+                .into_iter()
+                .map(|deposit| generated::block_info::Event {
+                    event: Some(generated::block_info::event::Event::Deposit(
+                        deposit,
+                    )),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn valid_address_is_credited() {
+        let address = Address([7u8; 20]);
+        let output: crate::types::Output =
+            output(&hex::encode(address.to_string()))
+                .try_into()
+                .unwrap();
+        assert_eq!(output.address, address);
+    }
+
+    /// Neither invalid UTF-8 nor a syntactically bad address may be turned
+    /// into `Address::ALL_ZEROS`.
+    #[test]
+    fn unparseable_address_is_an_error_not_all_zeros() {
+        for address_hex in ["ff", &hex::encode("not-an-address")] {
+            let result: Result<crate::types::Output, _> =
+                output(address_hex).try_into();
+            assert!(
+                matches!(result, Err(Error::InvalidDepositAddress { .. })),
+                "{address_hex}: expected InvalidDepositAddress, got {result:?}"
+            );
+        }
+    }
+
+    /// Block info conversion drops the bad deposit and keeps the rest.
+    #[test]
+    fn block_info_skips_deposit_with_unparseable_address() {
+        let good = Address([7u8; 20]);
+        let block_info: BlockInfo = block_info(vec![
+            deposit("ff"),
+            deposit(&hex::encode(good.to_string())),
+        ])
+        .try_into()
+        .unwrap();
+        let addresses: Vec<Address> = block_info
+            .events
+            .iter()
+            .map(|event| match event {
+                BlockEvent::Deposit(deposit) => deposit.output.address,
+                BlockEvent::WithdrawalBundle(_) => unreachable!(),
+            })
+            .collect();
+        assert_eq!(addresses, vec![good]);
+        assert!(
+            !addresses.contains(&Address::ALL_ZEROS),
+            "no deposit may be credited to the all-zeros address"
+        );
     }
 }

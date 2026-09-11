@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     time::{Duration, Instant},
 };
 
@@ -539,47 +539,23 @@ impl SwapList {
 
     // ── background confirmation checking ───────────────────────────
 
+    /// The user's saved RPC config for `parent_chain`, if any. There is no
+    /// built-in fallback: with nothing configured, L1 monitoring is off for
+    /// that chain rather than pointed at an endpoint the user never chose.
     pub(crate) fn load_rpc_config(
         &self,
         parent_chain: ParentChainType,
     ) -> Option<RpcConfig> {
-        use dirs;
-        use serde::{Deserialize, Serialize};
         use std::path::PathBuf;
-
-        #[derive(Clone, Serialize, Deserialize)]
-        struct LocalRpcConfig {
-            url: String,
-            user: String,
-            password: String,
-        }
 
         let config_path = dirs::data_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("coinshift")
             .join("l1_rpc_configs.json");
-
-        if let Ok(file_content) = std::fs::read_to_string(&config_path)
-            && let Ok(configs) = serde_json::from_str::<
-                HashMap<ParentChainType, LocalRpcConfig>,
-            >(&file_content)
-            && let Some(local_config) = configs.get(&parent_chain)
-        {
-            return Some(RpcConfig {
-                url: local_config.url.clone(),
-                user: local_config.user.clone(),
-                password: local_config.password.clone(),
-            });
-        }
-
-        coinshift::parent_chain_rpc::supported_l1_configs()
-            .into_iter()
-            .find(|(c, _)| *c == parent_chain)
-            .map(|(_, rpc)| RpcConfig {
-                url: rpc.url,
-                user: rpc.user,
-                password: rpc.password,
-            })
+        coinshift::parent_chain_rpc::load_rpc_config_from_path(
+            &config_path,
+            parent_chain,
+        )
     }
 
     fn check_confirmations_dynamically(&mut self, app: &App) {

@@ -1,5 +1,9 @@
 use std::{
-    collections::HashMap, net::SocketAddr, path::PathBuf, time::Duration,
+    collections::HashMap,
+    io::Read as _,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    time::Duration,
 };
 
 use clap::{Parser, Subcommand};
@@ -11,11 +15,100 @@ use coinshift::types::{Address, ParentChainType, SwapId, Txid};
 use coinshift_app_rpc_api::RpcClient;
 use tracing_subscriber::{filter::Targets, layer::SubscriberExt as _};
 
+/// Default location of the node's RPC cookie: the default data directory.
+pub fn default_rpc_cookie_path() -> Option<PathBuf> {
+    Some(
+        dirs::data_dir()?
+            .join("coinshift")
+            .join(coinshift_app_rpc_api::auth::COOKIE_FILE_NAME),
+    )
+}
+
+/// The `Authorization` header to send, from the given cookie file or the
+/// default one. An explicitly empty path means "no credentials". A missing
+/// default cookie is not an error, since the node may run with
+/// `--rpc-no-auth` or on another machine; an explicit path that cannot be
+/// read is.
+pub fn rpc_authorization_header(
+    cookie_file: Option<&Path>,
+) -> anyhow::Result<Option<http::HeaderValue>> {
+    use coinshift_app_rpc_api::auth::{basic_auth_header, read_cookie};
+    match cookie_file {
+        Some(path) if path.as_os_str().is_empty() => Ok(None),
+        Some(path) => {
+            let (user, secret) = read_cookie(path).map_err(|err| {
+                anyhow::anyhow!(
+                    "failed to read RPC cookie {}: {err}",
+                    path.display()
+                )
+            })?;
+            Ok(Some(basic_auth_header(&user, &secret)))
+        }
+        None => {
+            let Some(path) = default_rpc_cookie_path() else {
+                return Ok(None);
+            };
+            match read_cookie(&path) {
+                Ok((user, secret)) => {
+                    Ok(Some(basic_auth_header(&user, &secret)))
+                }
+                Err(err) => {
+                    tracing::debug!(
+                        path = %path.display(),
+                        error = %err,
+                        "no RPC cookie at the default location; sending no credentials"
+                    );
+                    Ok(None)
+                }
+            }
+        }
+    }
+}
+
 fn l1_config_path() -> PathBuf {
     dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("coinshift")
         .join("l1_rpc_configs.json")
+}
+
+/// Read a mnemonic phrase from `path`, from stdin when `path` is `-`, or
+/// from a no-echo terminal prompt when no path is given.
+///
+/// Secrets never come from `argv`: command-line arguments are recorded in
+/// shell history and visible to every process on the machine via `ps`.
+fn read_mnemonic(path: Option<&Path>) -> anyhow::Result<String> {
+    let phrase = match path {
+        Some(path) if path == Path::new("-") => {
+            let mut phrase = String::new();
+            std::io::stdin().read_to_string(&mut phrase)?;
+            phrase
+        }
+        Some(path) => std::fs::read_to_string(path).map_err(|err| {
+            anyhow::anyhow!("failed to read mnemonic file: {err}")
+        })?,
+        None => rpassword::prompt_password("Mnemonic phrase: ")?,
+    };
+    // Normalise whitespace: files often end with a newline, and users may
+    // separate words with several spaces.
+    let phrase = phrase.split_whitespace().collect::<Vec<_>>().join(" ");
+    if phrase.is_empty() {
+        anyhow::bail!("no mnemonic phrase given");
+    }
+    Ok(phrase)
+}
+
+/// Prompt for the BIP39 passphrase when `with_passphrase` is set.
+fn read_passphrase(with_passphrase: bool) -> anyhow::Result<Option<String>> {
+    if !with_passphrase {
+        return Ok(None);
+    }
+    let passphrase = rpassword::prompt_password("BIP39 passphrase: ")?;
+    let confirm = rpassword::prompt_password("Confirm passphrase: ")?;
+    if passphrase != confirm {
+        anyhow::bail!("passphrases do not match");
+    }
+    Ok(Some(passphrase))
 }
 
 fn parse_swap_id(s: &str) -> anyhow::Result<SwapId> {
@@ -126,12 +219,25 @@ pub enum Command {
         #[arg(long)]
         fee_sats: Option<u64>,
     },
-    /// Claim a swap (after L1 has required confirmations). For open swaps, pass l2_claimer_address.
+    /// Claim a swap. The claim proves the L1 payment; the node builds the
+    /// proof from its parent-chain RPC unless --l1-proof is given.
     ClaimSwap {
         #[arg(long, value_parser = parse_swap_id)]
         swap_id: SwapId,
+        /// Must match the L2 address the L1 payment committed to; defaults to it
         #[arg(long)]
         l2_claimer_address: Option<Address>,
+        /// Hex of a borsh-encoded L1PaymentProof (gettxoutproof + raw tx)
+        #[arg(long)]
+        l1_proof: Option<String>,
+    },
+    /// The OP_RETURN payload (hex) an L1 payment must carry to fill a swap
+    /// for the given L2 address; use it as a `data` output
+    L1PaymentCommitment {
+        #[arg(long, value_parser = parse_swap_id)]
+        swap_id: SwapId,
+        #[arg(long)]
+        l2_claimer_address: Address,
     },
     /// Get status of a swap by ID
     GetSwapStatus {
@@ -148,8 +254,19 @@ pub enum Command {
     ListSwaps,
     /// List swaps for a specific recipient address
     ListSwapsByRecipient { recipient: Address },
-    /// Recover wallet from mnemonic phrase (sets seed, then shows addresses and balance)
-    RecoverFromMnemonic { mnemonic: String },
+    /// Recover wallet from mnemonic phrase (sets seed, then shows addresses
+    /// and balance). The phrase is read from `--mnemonic-file` or prompted for
+    /// on the terminal, never taken from the command line, so it does not end
+    /// up in shell history or the process list.
+    RecoverFromMnemonic {
+        /// File containing the mnemonic phrase (or `-` for stdin). Prompts
+        /// on the terminal when omitted.
+        #[arg(long)]
+        mnemonic_file: Option<PathBuf>,
+        /// Prompt for the BIP39 passphrase the wallet was created with
+        #[arg(long)]
+        with_passphrase: bool,
+    },
     /// Reconstruct all swaps from the blockchain
     ReconstructSwaps,
     /// Cancel a swap (only Pending swaps). Unlocks outputs and marks as cancelled.
@@ -170,18 +287,37 @@ pub enum Command {
     OpenApiSchema,
     /// Remove a tx from the mempool
     RemoveFromMempool { txid: Txid },
-    /// Set the wallet seed from a mnemonic seed phrase
-    SetSeedFromMnemonic { mnemonic: String },
+    /// Set the wallet seed from a mnemonic seed phrase. The phrase is read
+    /// from `--mnemonic-file` or prompted for on the terminal, never taken
+    /// from the command line, so it does not end up in shell history or the
+    /// process list.
+    SetSeedFromMnemonic {
+        /// File containing the mnemonic phrase (or `-` for stdin). Prompts
+        /// on the terminal when omitted.
+        #[arg(long)]
+        mnemonic_file: Option<PathBuf>,
+        /// Prompt for a BIP39 passphrase; it changes the derived keys, so
+        /// record it with the mnemonic
+        #[arg(long)]
+        with_passphrase: bool,
+    },
     /// Set L1 RPC config for a parent chain (url required; user/password optional)
     SetL1Config {
         #[arg(long, value_parser = parse_parent_chain)]
         parent_chain: ParentChainType,
+        /// Node RPC URL. Prefer a node on this machine or https://; plaintext
+        /// http:// to a remote host exposes the credentials and lets anyone
+        /// on the path forge swap payment evidence.
         #[arg(long)]
         url: String,
         #[arg(long, default_value = "")]
         user: String,
         #[arg(long, default_value = "")]
         password: String,
+        /// Bitcoin Core style `.cookie` file to read credentials from on
+        /// each call; takes precedence over --user/--password
+        #[arg(long)]
+        cookie_file: Option<PathBuf>,
     },
     /// Get total sidechain wealth
     SidechainWealth,
@@ -234,6 +370,13 @@ pub struct Cli {
     /// Log level
     #[arg(default_value_t = tracing::Level::INFO, long)]
     pub log_level: tracing::Level,
+
+    /// RPC cookie file written by the node (`rpc.cookie` in its data
+    /// directory); its contents are sent as HTTP basic auth. Defaults to the
+    /// default data directory's cookie. Pass an empty path to send no
+    /// credentials (node started with --rpc-no-auth).
+    #[arg(long)]
+    pub rpc_cookie_file: Option<PathBuf>,
 
     #[command(subcommand)]
     pub command: Command,
@@ -299,10 +442,20 @@ where
         Command::ClaimSwap {
             swap_id,
             l2_claimer_address,
+            l1_proof,
         } => {
-            let txid =
-                rpc_client.claim_swap(swap_id, l2_claimer_address).await?;
+            let txid = rpc_client
+                .claim_swap(swap_id, l2_claimer_address, l1_proof)
+                .await?;
             format!("Swap claimed: txid={}", txid)
+        }
+        Command::L1PaymentCommitment {
+            swap_id,
+            l2_claimer_address,
+        } => {
+            rpc_client
+                .l1_payment_commitment(swap_id, l2_claimer_address)
+                .await?
         }
         Command::CreateDeposit {
             address,
@@ -403,8 +556,15 @@ where
             let swaps = rpc_client.list_swaps_by_recipient(recipient).await?;
             serde_json::to_string_pretty(&swaps)?
         }
-        Command::RecoverFromMnemonic { mnemonic } => {
-            rpc_client.set_seed_from_mnemonic(mnemonic).await?;
+        Command::RecoverFromMnemonic {
+            mnemonic_file,
+            with_passphrase,
+        } => {
+            let mnemonic = read_mnemonic(mnemonic_file.as_deref())?;
+            let passphrase = read_passphrase(with_passphrase)?;
+            rpc_client
+                .set_seed_from_mnemonic(mnemonic, passphrase)
+                .await?;
             let addresses = rpc_client.get_wallet_addresses().await?;
             let balance = rpc_client.balance().await?;
             let addrs_json = serde_json::to_string_pretty(&addresses)?;
@@ -457,8 +617,15 @@ where
             let () = rpc_client.remove_from_mempool(txid).await?;
             String::default()
         }
-        Command::SetSeedFromMnemonic { mnemonic } => {
-            let () = rpc_client.set_seed_from_mnemonic(mnemonic).await?;
+        Command::SetSeedFromMnemonic {
+            mnemonic_file,
+            with_passphrase,
+        } => {
+            let mnemonic = read_mnemonic(mnemonic_file.as_deref())?;
+            let passphrase = read_passphrase(with_passphrase)?;
+            let () = rpc_client
+                .set_seed_from_mnemonic(mnemonic, passphrase)
+                .await?;
             String::default()
         }
         Command::SetL1Config {
@@ -466,37 +633,35 @@ where
             url,
             user,
             password,
+            cookie_file,
         } => {
-            let path = l1_config_path();
-            let mut configs: HashMap<ParentChainType, RpcConfig> = if path
-                .exists()
-            {
-                let s = std::fs::read_to_string(&path).map_err(|e| {
-                    anyhow::anyhow!("read config: {}: {}", path.display(), e)
-                })?;
-                serde_json::from_str(&s).unwrap_or_default()
-            } else {
-                HashMap::new()
+            use coinshift::parent_chain_rpc::{
+                read_l1_config_file, write_l1_config_file_contents,
             };
-            configs.insert(
-                parent_chain,
-                RpcConfig {
-                    url: url.clone(),
-                    user: user.clone(),
-                    password: password.clone(),
-                },
-            );
-            if let Some(parent) = path.parent() {
-                drop(std::fs::create_dir_all(parent));
-            }
-            std::fs::write(&path, serde_json::to_string_pretty(&configs)?)
-                .map_err(|e| {
-                    anyhow::anyhow!("write config: {}: {}", path.display(), e)
-                })?;
+            let path = l1_config_path();
+            let config = RpcConfig {
+                url: url.clone(),
+                user: user.clone(),
+                password: password.clone(),
+                cookie_file,
+            };
+            let warning = if config.is_plaintext_remote() {
+                "\nWARNING: plaintext http:// to a remote host; credentials \
+                 and swap payment evidence can be read or forged on the \
+                 network path. Prefer https:// or a local node."
+            } else {
+                ""
+            };
+            let mut configs = read_l1_config_file(&path);
+            configs.insert(parent_chain, config);
+            write_l1_config_file_contents(&path, &configs).map_err(|e| {
+                anyhow::anyhow!("write config: {}: {}", path.display(), e)
+            })?;
             format!(
-                "L1 RPC config saved for {} at {}",
+                "L1 RPC config saved for {} at {}{}",
                 parent_chain.coin_name(),
-                path.display()
+                path.display(),
+                warning
             )
         }
         Command::SidechainWealth => {
@@ -559,18 +724,28 @@ impl Cli {
 
         tracing::info!("request ID: {}", request_id);
 
+        let mut headers = HeaderMap::from_iter([(
+            http::header::HeaderName::from_static("x-request-id"),
+            http::header::HeaderValue::from_str(&request_id)?,
+        )]);
+        if let Some(authorization) =
+            rpc_authorization_header(self.rpc_cookie_file.as_deref())?
+        {
+            headers.insert(http::header::AUTHORIZATION, authorization);
+        }
+
         let builder = HttpClientBuilder::default()
             .request_timeout(Duration::from_secs(
                 self.timeout.unwrap_or(DEFAULT_TIMEOUT),
             ))
             .set_rpc_middleware(
-                jsonrpsee::core::middleware::RpcServiceBuilder::new()
-                    .rpc_logger(1024),
+                jsonrpsee::core::middleware::RpcServiceBuilder::new().layer(
+                    coinshift_app_rpc_api::logger::RedactingRpcLoggerLayer::new(
+                        1024,
+                    ),
+                ),
             )
-            .set_headers(HeaderMap::from_iter([(
-                http::header::HeaderName::from_static("x-request-id"),
-                http::header::HeaderValue::from_str(&request_id)?,
-            )]));
+            .set_headers(headers);
 
         let client = builder.build(self.rpc_url)?;
         let result = handle_command(&client, self.command).await?;

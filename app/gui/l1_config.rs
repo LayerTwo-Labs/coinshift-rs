@@ -4,19 +4,11 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use coinshift::parent_chain_rpc;
+use coinshift::parent_chain_rpc::{self, RpcConfig};
 use coinshift::types::ParentChainType;
 use eframe::egui::{self, Button, Color32, ComboBox, RichText, TextEdit};
 use poll_promise::Promise;
-use serde::{Deserialize, Serialize};
 use serde_json::json;
-
-#[derive(Clone, Default, Deserialize, Serialize)]
-struct RpcConfig {
-    url: String,
-    user: String,
-    password: String,
-}
 
 #[derive(Clone)]
 enum ConnectionStatus {
@@ -31,6 +23,7 @@ pub struct L1Config {
     rpc_url: String,
     rpc_user: String,
     rpc_password: String,
+    rpc_cookie_file: String,
     configs: HashMap<ParentChainType, RpcConfig>,
     connection_status: Arc<Mutex<ConnectionStatus>>,
     status_promise: Option<Promise<anyhow::Result<u64>>>,
@@ -48,6 +41,7 @@ impl Default for L1Config {
             rpc_url: String::new(),
             rpc_user: String::new(),
             rpc_password: String::new(),
+            rpc_cookie_file: String::new(),
             configs: HashMap::new(),
             connection_status: Arc::new(Mutex::new(ConnectionStatus::Unknown)),
             status_promise: None,
@@ -70,50 +64,70 @@ impl L1Config {
     }
 
     fn load(&mut self, _ctx: &egui::Context) {
-        let config_path = Self::config_file_path();
-        if let Ok(file_content) = std::fs::read_to_string(&config_path)
-            && let Ok(stored_configs) = serde_json::from_str::<
-                HashMap<ParentChainType, RpcConfig>,
-            >(&file_content)
-        {
-            self.configs = stored_configs;
-            if let Some(config) = self.configs.get(&self.selected_parent_chain)
-            {
-                self.rpc_url = config.url.clone();
-                self.rpc_user = config.user.clone();
-                self.rpc_password = config.password.clone();
-            } else {
-                self.load_predefined_for_selected();
-            }
-        } else {
-            self.load_predefined_for_selected();
+        self.configs =
+            parent_chain_rpc::read_l1_config_file(&Self::config_file_path());
+        self.load_fields_for_selected();
+    }
+
+    /// Fill the input fields for the selected chain from the saved config,
+    /// or from the local-node default when nothing is saved.
+    fn load_fields_for_selected(&mut self) {
+        let saved = self.configs.get(&self.selected_parent_chain).cloned();
+        let default = parent_chain_rpc::default_l1_configs()
+            .into_iter()
+            .find(|(c, _)| *c == self.selected_parent_chain)
+            .map(|(_, rpc)| rpc);
+        match saved.or(default) {
+            Some(rpc) => self.set_fields(&rpc),
+            None => self.set_fields(&RpcConfig::default()),
         }
     }
 
-    /// Fill URL/user/password from the predefined config for the selected chain.
-    fn load_predefined_for_selected(&mut self) {
-        let predefined = parent_chain_rpc::supported_l1_configs();
-        if let Some((_, rpc)) = predefined
-            .into_iter()
-            .find(|(c, _)| *c == self.selected_parent_chain)
-        {
-            self.rpc_url = rpc.url;
-            self.rpc_user = rpc.user;
-            self.rpc_password = rpc.password;
+    fn set_fields(&mut self, rpc: &RpcConfig) {
+        self.rpc_url = rpc.url.clone();
+        self.rpc_user = rpc.user.clone();
+        self.rpc_password = rpc.password.clone();
+        self.rpc_cookie_file = rpc
+            .cookie_file
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+    }
+
+    fn current_config(&self) -> RpcConfig {
+        RpcConfig {
+            url: self.rpc_url.trim().to_owned(),
+            user: self.rpc_user.clone(),
+            password: self.rpc_password.clone(),
+            cookie_file: {
+                let path = self.rpc_cookie_file.trim();
+                (!path.is_empty()).then(|| PathBuf::from(path))
+            },
+        }
+    }
+
+    fn persist(&self) {
+        let config_path = Self::config_file_path();
+        if let Err(err) = parent_chain_rpc::write_l1_config_file_contents(
+            &config_path,
+            &self.configs,
+        ) {
+            tracing::error!(
+                path = %config_path.display(),
+                error = %err,
+                "L1 Config: failed to persist configuration"
+            );
         } else {
-            self.rpc_url.clear();
-            self.rpc_user.clear();
-            self.rpc_password.clear();
+            tracing::info!(
+                path = %config_path.display(),
+                "L1 Config: configuration persisted to file"
+            );
         }
     }
 
     fn save(&mut self, _ctx: &egui::Context) {
         // Save the user's current input fields for the selected chain
-        let config = RpcConfig {
-            url: self.rpc_url.clone(),
-            user: self.rpc_user.clone(),
-            password: self.rpc_password.clone(),
-        };
+        let config = self.current_config();
 
         tracing::info!(
             chain = ?self.selected_parent_chain,
@@ -124,64 +138,48 @@ impl L1Config {
 
         self.configs
             .insert(self.selected_parent_chain, config.clone());
-
-        // Persist to file
-        let config_path = Self::config_file_path();
-        if let Some(parent_dir) = config_path.parent() {
-            drop(std::fs::create_dir_all(parent_dir));
-        }
-        if let Ok(json) = serde_json::to_string_pretty(&self.configs) {
-            drop(std::fs::write(&config_path, json));
-        }
-        tracing::info!(
-            path = %config_path.display(),
-            "L1 Config: configuration persisted to file"
-        );
+        self.persist();
 
         // Auto-check connection when saving
         if !config.url.is_empty() {
-            self.check_connection(&config.url, &config.user, &config.password);
+            self.check_connection(&config);
         }
     }
 
     fn load_selected_chain_config(&mut self) {
-        self.load_predefined_for_selected();
+        self.load_fields_for_selected();
         // Reset connection status when switching chains
         *self.connection_status.lock().unwrap() = ConnectionStatus::Unknown;
         self.status_promise = None;
     }
 
-    fn check_connection(&mut self, url: &str, user: &str, password: &str) {
-        if url.is_empty() {
+    fn check_connection(&mut self, config: &RpcConfig) {
+        if config.url.is_empty() {
             return;
         }
 
         tracing::info!(
-            url = %url,
-            has_auth = !user.is_empty(),
+            url = %config.url,
+            has_auth = !config.user.is_empty() || config.cookie_file.is_some(),
             "L1 Config: testing connection"
         );
 
-        let url = url.to_string();
-        let user = user.to_string();
-        let password = password.to_string();
+        let config = config.clone();
         let status = self.connection_status.clone();
 
         *status.lock().unwrap() = ConnectionStatus::Checking;
 
         let promise = Promise::spawn_thread("l1_rpc_check", move || {
-            Self::fetch_block_height(&url, &user, &password)
+            Self::fetch_block_height(&config)
         });
 
         self.status_promise = Some(promise);
     }
 
-    fn fetch_block_height(
-        url: &str,
-        user: &str,
-        password: &str,
-    ) -> anyhow::Result<u64> {
+    fn fetch_block_height(config: &RpcConfig) -> anyhow::Result<u64> {
         use std::time::Duration;
+
+        let url = config.url.as_str();
 
         // Use jsonrpc "1.0" to match nodes that accept curl-style requests (e.g. BCH test4)
         let request = json!({
@@ -203,8 +201,8 @@ impl L1Config {
 
         let mut request_builder = client.post(url).json(&request);
 
-        // Add HTTP basic authentication if user and password are provided
-        if !user.is_empty() {
+        // Add HTTP basic authentication if credentials are configured
+        if let Some((user, password)) = config.credentials()? {
             request_builder = request_builder.basic_auth(user, Some(password));
         }
 
@@ -286,7 +284,7 @@ impl L1Config {
             let supported = parent_chain_rpc::supported_l1_parent_chain_types();
             let label = match self.selected_parent_chain {
                 ParentChainType::Signet => "Bitcoin Signet (sBTC)",
-                ParentChainType::BCH => "Bitcoin Cash Testnet 4 (BCH)",
+                ParentChainType::Regtest => "Bitcoin Regtest (local)",
                 _ => "Select network",
             };
             ComboBox::from_id_salt("l1_config_parent_chain")
@@ -295,8 +293,8 @@ impl L1Config {
                     for chain in supported {
                         let option_label = match chain {
                             ParentChainType::Signet => "Bitcoin Signet (sBTC)",
-                            ParentChainType::BCH => {
-                                "Bitcoin Cash Testnet 4 (BCH)"
+                            ParentChainType::Regtest => {
+                                "Bitcoin Regtest (local)"
                             }
                             _ => continue,
                         };
@@ -340,27 +338,46 @@ impl L1Config {
 
         ui.horizontal(|ui| {
             ui.label("RPC URL:");
-            ui.add_enabled(
-                false,
+            ui.add(
                 TextEdit::singleline(&mut self.rpc_url)
                     .hint_text(
                         self.selected_parent_chain.default_rpc_url_hint(),
                     )
                     .desired_width(300.0),
             );
+            if ui.button("Use local default").clicked()
+                && let Some((_, rpc)) = parent_chain_rpc::default_l1_configs()
+                    .into_iter()
+                    .find(|(c, _)| *c == self.selected_parent_chain)
+            {
+                self.set_fields(&rpc);
+            }
         });
         ui.label(
-            RichText::new("Only predefined networks are supported. URL cannot be changed.")
-                .small()
-                .color(Color32::GRAY),
+            RichText::new(
+                "Point this at a node you run or trust. Its answers decide \
+                 when your swaps become claimable.",
+            )
+            .small()
+            .color(Color32::GRAY),
         );
+        if self.current_config().is_plaintext_remote() {
+            ui.label(
+                RichText::new(
+                    "Warning: plaintext http:// to a remote host. Credentials \
+                     and swap payment evidence can be read or forged on the \
+                     network path. Use https:// or a node on this machine.",
+                )
+                .small()
+                .color(Color32::from_rgb(230, 140, 0)),
+            );
+        }
 
         ui.add_space(5.0);
 
         ui.horizontal(|ui| {
             ui.label("RPC User:");
-            ui.add_enabled(
-                false,
+            ui.add(
                 TextEdit::singleline(&mut self.rpc_user)
                     .hint_text("rpcuser")
                     .desired_width(300.0),
@@ -371,14 +388,32 @@ impl L1Config {
 
         ui.horizontal(|ui| {
             ui.label("RPC Password:");
-            ui.add_enabled(
-                false,
+            ui.add(
                 TextEdit::singleline(&mut self.rpc_password)
                     .hint_text("rpcpassword")
                     .password(true)
                     .desired_width(300.0),
             );
         });
+
+        ui.add_space(5.0);
+
+        ui.horizontal(|ui| {
+            ui.label("Cookie file:");
+            ui.add(
+                TextEdit::singleline(&mut self.rpc_cookie_file)
+                    .hint_text("optional, e.g. ~/.bitcoin/signet/.cookie")
+                    .desired_width(300.0),
+            );
+        });
+        ui.label(
+            RichText::new(
+                "A cookie file, when set, is read on every call and takes \
+                 precedence over user/password.",
+            )
+            .small()
+            .color(Color32::GRAY),
+        );
 
         // Show current saved configuration
         if let Some(saved_config) =
@@ -420,14 +455,12 @@ impl L1Config {
             ConnectionStatus::Unknown => {
                 // Allow check using current URL (predefined when chain selected) even if not saved yet
                 if !self.rpc_url.is_empty() {
-                    let url = self.rpc_url.clone();
-                    let user = self.rpc_user.clone();
-                    let password = self.rpc_password.clone();
+                    let config = self.current_config();
                     ui.horizontal(|ui| {
                         ui.label(RichText::new("●").color(Color32::GRAY));
                         ui.label("Status: Unknown");
                         if ui.button("Check Connection").clicked() {
-                            self.check_connection(&url, &user, &password);
+                            self.check_connection(&config);
                         }
                     });
                 }
@@ -452,11 +485,9 @@ impl L1Config {
                     ui.label(format!("Latest Block Height: {}", block_height));
                 });
                 if !self.rpc_url.is_empty() {
-                    let url = self.rpc_url.clone();
-                    let user = self.rpc_user.clone();
-                    let password = self.rpc_password.clone();
+                    let config = self.current_config();
                     if ui.button("Refresh").clicked() {
-                        self.check_connection(&url, &user, &password);
+                        self.check_connection(&config);
                     }
                 }
             }
@@ -472,11 +503,9 @@ impl L1Config {
                 let error_msg = format!("Error: {}", error);
                 ui.label(RichText::new(error_msg).small().color(Color32::RED));
                 if !self.rpc_url.is_empty() {
-                    let url = self.rpc_url.clone();
-                    let user = self.rpc_user.clone();
-                    let password = self.rpc_password.clone();
+                    let config = self.current_config();
                     if ui.button("Retry").clicked() {
-                        self.check_connection(&url, &user, &password);
+                        self.check_connection(&config);
                     }
                 }
             }
@@ -503,18 +532,9 @@ impl L1Config {
                     chain = ?self.selected_parent_chain,
                     "L1 Config: clearing configuration"
                 );
-                self.rpc_url.clear();
-                self.rpc_user.clear();
-                self.rpc_password.clear();
+                self.set_fields(&RpcConfig::default());
                 self.configs.remove(&self.selected_parent_chain);
-                // Persist the updated configs to file
-                let config_path = Self::config_file_path();
-                if let Some(parent_dir) = config_path.parent() {
-                    drop(std::fs::create_dir_all(parent_dir));
-                }
-                if let Ok(json) = serde_json::to_string_pretty(&self.configs) {
-                    drop(std::fs::write(&config_path, json));
-                }
+                self.persist();
                 // Reset connection status
                 *self.connection_status.lock().unwrap() =
                     ConnectionStatus::Unknown;

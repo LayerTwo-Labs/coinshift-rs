@@ -59,7 +59,9 @@ tonic = { workspace = true }
 tonic-prost = { workspace = true }
 tracing = { workspace = true }
 transitive = "1.2.0"
+url = "2.5.4"
 utoipa = { workspace = true, features = ["macros", "non_strict_integers"] }
+zeroize = "1.8.2"
 
 [dependencies.educe]
 version = "0.6.0"

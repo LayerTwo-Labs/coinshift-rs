@@ -1,2 +1,5 @@
 [toolchain]
-channel = "nightly"
+# Pinned to a dated nightly so every build (dev, CI, Docker) compiles with the
+# same compiler, and a bad nightly cannot land in a release unnoticed. Bump
+# deliberately; the CI workflow's `toolchain:` inputs must match this value.
+channel = "nightly-2026-08-28"

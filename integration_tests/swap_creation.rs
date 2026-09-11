@@ -10,7 +10,11 @@ use bip300301_enforcer_integration_tests::{
     },
     util::{AbortOnDrop, AsyncTrial, TestFailureCollector, TestFileRegistry},
 };
-use coinshift::types::{Address, ParentChainType, SwapId, SwapState};
+use bip300301_enforcer_lib::bins::CommandExt as _;
+use coinshift::{
+    state::l1_proof::L1PaymentProof,
+    types::{Address, ParentChainType, SwapId, SwapState},
+};
 use coinshift_app_rpc_api::RpcClient as _;
 use futures::{
     FutureExt as _, StreamExt as _, channel::mpsc, future::BoxFuture,
@@ -50,6 +54,116 @@ const SWAP_FEE: u64 = 1_000;
 /// requires as proof they control the address they are reserving for.
 const ACCEPT_FUNDING: u64 = 100_000;
 const ACCEPT_FEE: u64 = 1_000; // 0.00001 BTC
+
+/// Run a `bitcoin-cli` command against the regtest node and return stdout.
+async fn bitcoin_cli(
+    enforcer_post_setup: &EnforcerPostSetup,
+    method: &str,
+    args: impl IntoIterator<Item = String>,
+) -> anyhow::Result<String> {
+    Ok(enforcer_post_setup
+        .bitcoin_cli
+        .command::<String, _, _, _, _>([], method, args)
+        .run_utf8()
+        .await?
+        .trim()
+        .to_owned())
+}
+
+/// Make sure Bitcoin Core's own wallet has mature coins to pay a swap with.
+async fn fund_core_wallet(
+    enforcer_post_setup: &EnforcerPostSetup,
+) -> anyhow::Result<()> {
+    let balance: f64 = bitcoin_cli(enforcer_post_setup, "getbalance", [])
+        .await?
+        .parse()?;
+    if balance >= 1.0 {
+        return Ok(());
+    }
+    let address = bitcoin_cli(enforcer_post_setup, "getnewaddress", []).await?;
+    // 101 blocks: one coinbase matures.
+    let _hashes = bitcoin_cli(
+        enforcer_post_setup,
+        "generatetoaddress",
+        ["101".to_owned(), address],
+    )
+    .await?;
+    Ok(())
+}
+
+/// Pay `l1_amount_sats` to `l1_recipient` on regtest with the swap
+/// commitment for `claimer` in an `OP_RETURN` output, confirm it in one
+/// block, and return the txid.
+async fn pay_swap_on_l1(
+    enforcer_post_setup: &EnforcerPostSetup,
+    sidechain: &PostSetup,
+    swap_id: SwapId,
+    claimer: Address,
+    l1_recipient: &str,
+    l1_amount_sats: u64,
+) -> anyhow::Result<String> {
+    let commitment = sidechain
+        .rpc_client
+        .l1_payment_commitment(swap_id, claimer)
+        .await?;
+    let outputs = serde_json::json!([
+        { l1_recipient: bitcoin::Amount::from_sat(l1_amount_sats).to_btc() },
+        { "data": commitment },
+    ]);
+    // `send` funds, signs and broadcasts in one call. An explicit fee rate:
+    // a fresh regtest chain has no fee history for the estimator.
+    let response = bitcoin_cli(
+        enforcer_post_setup,
+        "send",
+        [
+            outputs.to_string(),
+            "null".to_owned(),
+            "unset".to_owned(),
+            "1".to_owned(),
+        ],
+    )
+    .await?;
+    let response: serde_json::Value = serde_json::from_str(&response)?;
+    let txid = response["txid"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("send returned no txid: {response}"))?
+        .to_owned();
+    let mine_to = bitcoin_cli(enforcer_post_setup, "getnewaddress", []).await?;
+    let _hashes = bitcoin_cli(
+        enforcer_post_setup,
+        "generatetoaddress",
+        ["1".to_owned(), mine_to],
+    )
+    .await?;
+    Ok(txid)
+}
+
+/// Build the claim's proof the way a taker without a configured parent-chain
+/// RPC would: `gettxoutproof` plus `getrawtransaction`, borsh-encoded, hex.
+async fn build_l1_proof_hex(
+    enforcer_post_setup: &EnforcerPostSetup,
+    txid: &str,
+) -> anyhow::Result<String> {
+    let merkle_block = hex::decode(
+        bitcoin_cli(
+            enforcer_post_setup,
+            "gettxoutproof",
+            [serde_json::json!([txid]).to_string()],
+        )
+        .await?,
+    )?;
+    let raw_tx = hex::decode(
+        bitcoin_cli(
+            enforcer_post_setup,
+            "getrawtransaction",
+            [txid.to_owned()],
+        )
+        .await?,
+    )?;
+    Ok(hex::encode(
+        L1PaymentProof::new(merkle_block, raw_tx).to_bytes(),
+    ))
+}
 
 /// Verify that a swap was created successfully
 async fn verify_swap_created(
@@ -269,7 +383,7 @@ async fn swap_creation_fixed_task(
     let l2_recipient_address = sidechain.rpc_client.get_new_address().await?;
 
     // Generate a regtest address for L1 recipient
-    let l1_recipient_address = "bcrt1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh";
+    let l1_recipient_address = "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080";
 
     // Create a pre-specified swap (with l2_recipient)
     tracing::info!("Creating pre-specified swap");
@@ -357,7 +471,7 @@ async fn swap_creation_open_task(
     .await?;
     tracing::info!("Deposited to sidechain successfully");
 
-    let l1_recipient_address = "bcrt1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh";
+    let l1_recipient_address = "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080";
 
     // Create an open swap (without l2_recipient)
     tracing::info!("Creating open swap");
@@ -448,7 +562,7 @@ async fn swap_creation_open_fill_task(
     .await?;
     tracing::info!("Deposited to sidechain successfully");
 
-    let l1_recipient_address = "bcrt1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh";
+    let l1_recipient_address = "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080";
 
     // Create an open swap (without l2_recipient)
     tracing::info!("Creating open swap to later fill");
@@ -521,58 +635,75 @@ async fn swap_creation_open_fill_task(
     sidechain.bmm_single(&mut enforcer_post_setup).await?;
     sleep(std::time::Duration::from_millis(500)).await;
 
-    // Now Bob pays on L1 and reports it.
-    let fake_l1_txid_hex = "11".repeat(32);
-    sidechain
-        .rpc_client
-        .update_swap_l1_txid(
-            swap_id,
-            fake_l1_txid_hex.clone(),
-            1,
-            Some(claimer_address),
-        )
-        .await?;
-    // Allow wallet/state tasks to catch up
-    sleep(std::time::Duration::from_millis(500)).await;
-    wait_for_locked_utxos(&sidechain.rpc_client, swap_id, SWAP_L2_AMOUNT)
-        .await?;
-
-    tracing::info!(
-        "Open swap state updated to ReadyToClaim with L2 claimer address. swap_id={}, claimer={}",
+    // Now Bob pays on L1, for real: a regtest transaction to the swap's
+    // recipient carrying the OP_RETURN commitment to this swap and to Bob's
+    // L2 address, confirmed in a block.
+    fund_core_wallet(&enforcer_post_setup).await?;
+    let l1_txid = pay_swap_on_l1(
+        &enforcer_post_setup,
+        &sidechain,
         swap_id,
-        claimer_address
-    );
-    let status_ready = sidechain
-        .rpc_client
-        .get_swap_status(swap_id)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("Swap not found after L1 update"))?;
-    anyhow::ensure!(
-        matches!(status_ready.state, SwapState::ReadyToClaim),
-        "Swap not ReadyToClaim after L1 update: {:?}",
-        status_ready.state
-    );
-    anyhow::ensure!(
-        status_ready.l2_claimer_address == Some(claimer_address),
-        "Stored l2_claimer_address should match: {:?}",
-        status_ready.l2_claimer_address
-    );
+        claimer_address,
+        l1_recipient_address,
+        SWAP_L1_AMOUNT,
+    )
+    .await?;
+    tracing::info!(swap_id = %swap_id, %l1_txid, "Paid the swap on L1");
 
-    // A claim naming anyone else must be refused, whatever this node's local
-    // view of the L1 fill says — the reservation decides.
+    // Confirmations are measured from the mainchain block the sidechain tip
+    // was built against, so a sidechain block has to be produced on top of
+    // the payment's block before the proof is deep enough.
+    sidechain.bmm_single(&mut enforcer_post_setup).await?;
+    sleep(std::time::Duration::from_millis(500)).await;
+
+    let proof_hex = build_l1_proof_hex(&enforcer_post_setup, &l1_txid).await?;
+
+    // Front-running: someone else takes the (public) proof and claims to
+    // their own address. The payment commits to Bob, so this is refused.
     let interloper = sidechain.rpc_client.get_new_address().await?;
     let stolen = sidechain
         .rpc_client
-        .claim_swap(swap_id, Some(interloper))
+        .claim_swap(swap_id, Some(interloper), Some(proof_hex.clone()))
         .await;
     anyhow::ensure!(
         stolen.is_err(),
-        "claiming an open swap reserved for someone else must fail"
+        "claiming to an address the L1 payment did not commit to must fail"
     );
 
-    // Claim the swap: recipient is taken from stored l2_claimer_address (can pass None)
-    let claim_txid = sidechain.rpc_client.claim_swap(swap_id, None).await?;
-    tracing::info!(swap_id = %swap_id, claim_txid = %claim_txid, "Claimed swap");
+    // A claim with no proof at all is refused too, whatever the local view.
+    let unproven = sidechain.rpc_client.claim_swap(swap_id, None, None).await;
+    anyhow::ensure!(
+        unproven.is_err(),
+        "claiming without a proof and without a parent-chain RPC must fail"
+    );
+
+    // Bob claims with the proof; the escrow goes to the committed address.
+    // Retry briefly: the node learns of the payment's mainchain block through
+    // the enforcer, which may lag the BMM by a moment.
+    let mut claim_txid = None;
+    let mut last_err = None;
+    for _ in 0..30 {
+        match sidechain
+            .rpc_client
+            .claim_swap(swap_id, None, Some(proof_hex.clone()))
+            .await
+        {
+            Ok(txid) => {
+                claim_txid = Some(txid);
+                break;
+            }
+            Err(err) => {
+                last_err = Some(err);
+                sleep(std::time::Duration::from_millis(500)).await;
+            }
+        }
+    }
+    let claim_txid = claim_txid.ok_or_else(|| {
+        anyhow::anyhow!(
+            "claim with a valid proof never succeeded: {last_err:?}"
+        )
+    })?;
+    tracing::info!(swap_id = %swap_id, %claim_txid, "Claimed swap with L1 proof");
 
     // Mine the claim transaction into a block
     sidechain.bmm_single(&mut enforcer_post_setup).await?;
@@ -611,11 +742,21 @@ async fn swap_creation_open_fill_task(
         "Expected no locked outputs after swap completion"
     );
 
+    anyhow::ensure!(
+        completed_swap.l2_claimer_address == Some(claimer_address),
+        "the committed claimer must be recorded on the swap: {:?}",
+        completed_swap.l2_claimer_address
+    );
+    anyhow::ensure!(
+        completed_swap.l1_txid.to_hex_rpc() == l1_txid,
+        "the proven L1 txid must be recorded on the swap"
+    );
+
     // Final report
     tracing::info!(
         swap_id = %swap_id,
         swap_create_txid = %swap_txid,
-        fake_l1_txid_hex = %fake_l1_txid_hex,
+        l1_txid = %l1_txid,
         claim_txid = %claim_txid,
         l1_recipient = l1_recipient_address,
         l1_amount_sats = SWAP_L1_AMOUNT,

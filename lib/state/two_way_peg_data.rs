@@ -105,6 +105,35 @@ fn collect_withdrawal_bundle(
     Ok(Some(bundle))
 }
 
+/// The bundle's latest recorded status is not the one this event expects.
+fn unexpected_status(
+    m6id: M6id,
+    bundle_status: &RollBack<WithdrawalBundleStatus>,
+    block_height: u32,
+) -> Error {
+    let latest = bundle_status.latest();
+    Error::UnexpectedWithdrawalBundleStatus {
+        m6id,
+        status: latest.value,
+        status_height: latest.height,
+        block_height,
+    }
+}
+
+/// A status could not be pushed because the event is older than the latest
+/// recorded status.
+fn out_of_order(
+    m6id: M6id,
+    bundle_status: &RollBack<WithdrawalBundleStatus>,
+    block_height: u32,
+) -> Error {
+    Error::WithdrawalBundleEventOutOfOrder {
+        m6id,
+        block_height,
+        latest_height: bundle_status.latest().height,
+    }
+}
+
 fn connect_withdrawal_bundle_submitted(
     state: &State,
     rwtxn: &mut RwTxn,
@@ -119,7 +148,20 @@ fn connect_withdrawal_bundle_submitted(
         .map_err(DbError::from)?
         && bundle.compute_m6id() == m6id
     {
-        assert_eq!(bundle_block_height, block_height - 1);
+        // The m6id commits to the bundle's contents, which is what ties the
+        // event to the pending bundle. The bundle is usually submitted in the
+        // parent-chain block right after it was collected, but a slow
+        // enforcer, a delayed L1 block or a restart in between can push the
+        // Submitted event out by one or more sidechain blocks. That is
+        // ordinary timing, not corruption.
+        if bundle_block_height + 1 != block_height {
+            tracing::debug!(
+                %block_height,
+                %bundle_block_height,
+                %m6id,
+                "Withdrawal bundle submitted later than the block after it was collected"
+            );
+        }
 
         // Calculate total withdrawal amount from bundle outputs
         let total_withdrawal_value: bitcoin::Amount = bundle
@@ -199,10 +241,15 @@ fn connect_withdrawal_bundle_submitted(
         // Already applied: the m6id is already recorded, so this submission is
         // a no-op. `disconnect_withdrawal_bundle_submitted` mirrors this by
         // leaving the stored bundle untouched.
-        assert_eq!(
-            bundle_status.earliest().value,
-            WithdrawalBundleStatus::Submitted
-        );
+        let earliest = bundle_status.earliest();
+        if earliest.value != WithdrawalBundleStatus::Submitted {
+            return Err(Error::UnexpectedWithdrawalBundleStatus {
+                m6id,
+                status: earliest.value,
+                status_height: earliest.height,
+                block_height,
+            });
+        }
     } else {
         tracing::warn!(
             %event_block_hash,
@@ -244,10 +291,9 @@ fn connect_withdrawal_bundle_confirmed(
         // Already applied
         return Ok(());
     }
-    assert_eq!(
-        bundle_status.latest().value,
-        WithdrawalBundleStatus::Submitted
-    );
+    if bundle_status.latest().value != WithdrawalBundleStatus::Submitted {
+        return Err(unexpected_status(m6id, &bundle_status, block_height));
+    }
 
     // Log withdrawal bundle confirmation
     match &bundle {
@@ -328,7 +374,7 @@ fn connect_withdrawal_bundle_confirmed(
     }
     bundle_status
         .push(WithdrawalBundleStatus::Confirmed, block_height)
-        .expect("Push confirmed status should be valid");
+        .map_err(|_| out_of_order(m6id, &bundle_status, block_height))?;
     state
         .withdrawal_bundles
         .put(rwtxn, &m6id, &(bundle, bundle_status))
@@ -352,10 +398,9 @@ fn connect_withdrawal_bundle_failed(
         // Already applied
         return Ok(());
     }
-    assert_eq!(
-        bundle_status.latest().value,
-        WithdrawalBundleStatus::Submitted
-    );
+    if bundle_status.latest().value != WithdrawalBundleStatus::Submitted {
+        return Err(unexpected_status(m6id, &bundle_status, block_height));
+    }
 
     // Log withdrawal bundle failure
     match &bundle {
@@ -395,7 +440,7 @@ fn connect_withdrawal_bundle_failed(
         "Handling failed withdrawal bundle");
     bundle_status
         .push(WithdrawalBundleStatus::Failed, block_height)
-        .expect("Push failed status should be valid");
+        .map_err(|_| out_of_order(m6id, &bundle_status, block_height))?;
     match &bundle {
         WithdrawalBundleInfo::Unknown
         | WithdrawalBundleInfo::UnknownConfirmed { .. } => (),
@@ -418,9 +463,14 @@ fn connect_withdrawal_bundle_failed(
                 .try_get(rwtxn, &())
                 .map_err(DbError::from)?
             {
-                latest_failed_m6id
-                    .push(m6id, block_height)
-                    .expect("Push latest failed m6id should be valid");
+                let latest_height = latest_failed_m6id.latest().height;
+                latest_failed_m6id.push(m6id, block_height).map_err(|_| {
+                    Error::WithdrawalBundleEventOutOfOrder {
+                        m6id,
+                        block_height,
+                        latest_height,
+                    }
+                })?;
                 latest_failed_m6id
             } else {
                 RollBack::new(m6id, block_height)
@@ -569,11 +619,69 @@ fn query_and_update_swap(
     let client = ParentChainRpcClient::new(rpc_config.clone());
     let amount_sats = swap.l1_amount.to_sat();
 
-    // Find transactions matching address and amount
-    let matches = client.find_transactions_by_address_and_amount(
-        &swap.l1_recipient_address,
-        amount_sats,
-    )?;
+    // Check if this is an update or new detection
+    let zero_hash32 = [0u8; 32];
+    let is_new = matches!(swap.l1_txid, SwapTxId::Hash32(h) if h == zero_hash32)
+        || matches!(swap.l1_txid, SwapTxId::Hash(ref v) if v.is_empty() || v.iter().all(|&b| b == 0));
+
+    // Once the fill's txid is known, track it directly. Discovery only sees
+    // outputs that are still unspent, so a fill the creator has already
+    // spent would otherwise vanish from view before it reached the required
+    // confirmations and the swap would never become claimable.
+    let matches = if is_new {
+        client.find_transactions_by_address_and_amount(
+            &swap.l1_recipient_address,
+            amount_sats,
+        )?
+    } else {
+        let tx_info = client.get_transaction(&swap.l1_txid.to_hex_rpc())?;
+        vec![(String::new(), tx_info)]
+    };
+
+    // Only a payment that commits to this swap can ever be claimed: the
+    // claim's proof is checked for that commitment by consensus, and the
+    // committed L2 address is who gets paid. A payment to the right address
+    // for the right amount without it is not a fill of this swap, so do not
+    // record it; the claim built from it would be rejected by every node.
+    let matches: Vec<_> = matches
+        .into_iter()
+        .filter_map(|(sender, tx_info)| {
+            match tx_info.swap_commitment() {
+                Some((committed_swap, claimer)) if committed_swap == swap.id => {
+                    if let Some(recipient) = swap.l2_recipient
+                        && recipient != claimer
+                    {
+                        tracing::warn!(
+                            swap_id = %swap.id,
+                            l1_txid = %tx_info.txid,
+                            %claimer,
+                            %recipient,
+                            "L1 payment commits to a claimer other than the swap's fixed recipient; ignoring"
+                        );
+                        return None;
+                    }
+                    Some((sender, claimer, tx_info))
+                }
+                Some((other, _)) => {
+                    tracing::debug!(
+                        swap_id = %swap.id,
+                        l1_txid = %tx_info.txid,
+                        committed_swap = %other,
+                        "L1 payment commits to another swap; ignoring"
+                    );
+                    None
+                }
+                None => {
+                    tracing::warn!(
+                        swap_id = %swap.id,
+                        l1_txid = %tx_info.txid,
+                        "L1 payment to the swap's address carries no swap commitment (OP_RETURN); it cannot be claimed and is ignored"
+                    );
+                    None
+                }
+            }
+        })
+        .collect();
 
     if matches.is_empty() {
         return Ok(false);
@@ -584,7 +692,7 @@ fn query_and_update_swap(
     let max_age = swap.parent_chain.max_l1_tx_age_blocks();
     let matches: Vec<_> = matches
         .into_iter()
-        .filter(|(_, tx_info)| {
+        .filter(|(_, _, tx_info)| {
             if tx_info.confirmations == 0 || tx_info.blockheight.is_none() {
                 return false;
             }
@@ -611,16 +719,11 @@ fn query_and_update_swap(
 
     // Use the first valid match (most recent transaction)
     // In a production system, you might want to handle multiple matches differently
-    let (sender_address, tx_info) = &matches[0];
+    let (sender_address, claimer, tx_info) = &matches[0];
 
     // Convert txid string from parent chain RPC (RPC byte order) to SwapTxId (canonical storage)
     let l1_txid = SwapTxId::from_hex_rpc(&tx_info.txid)
         .map_err(|_| crate::parent_chain_rpc::Error::InvalidResponse)?;
-
-    // Check if this is an update or new detection
-    let zero_hash32 = [0u8; 32];
-    let is_new = matches!(swap.l1_txid, SwapTxId::Hash32(h) if h == zero_hash32)
-        || matches!(swap.l1_txid, SwapTxId::Hash(ref v) if v.is_empty() || v.iter().all(|&b| b == 0));
 
     if is_new {
         // L1 transaction uniqueness: do not accept an L1 tx already used by another swap
@@ -647,10 +750,12 @@ fn query_and_update_swap(
             "Detected new L1 transaction for swap"
         );
 
-        // Update swap with L1 transaction
-        // For open swaps, we don't store the sender address here - the claimer will provide
-        // their L2 address when claiming, and we'll verify they sent the L1 transaction
+        // Record the payment and the L2 address it committed to. The
+        // commitment is what consensus will pay when the claim connects, so
+        // recording it here is display and convenience; it is also what the
+        // claim builder pays.
         swap.update_l1_txid(l1_txid);
+        swap.set_l2_claimer_address(*claimer);
 
         // Save the sidechain block reference where this validation occurred
         swap.set_l1_txid_validation_block(block_hash, block_height);
@@ -968,8 +1073,7 @@ pub fn connect(
             .map_err(DbError::from)?;
     }
     let last_withdrawal_bundle_failure_height = state
-        .get_latest_failed_withdrawal_bundle(rwtxn)
-        .map_err(DbError::from)?
+        .get_latest_failed_withdrawal_bundle(rwtxn)?
         .map(|(height, _bundle)| height)
         .unwrap_or_default();
     if block_height - last_withdrawal_bundle_failure_height
@@ -1108,17 +1212,33 @@ fn disconnect_withdrawal_bundle_confirmed(
         // Already applied
         return Ok(());
     }
-    assert_eq!(
-        latest_bundle_status.value,
-        WithdrawalBundleStatus::Confirmed
-    );
-    assert_eq!(latest_bundle_status.height, block_height);
-    let prev_bundle_status = prev_bundle_status
-        .expect("Pop confirmed bundle status should be valid");
-    assert_eq!(
-        prev_bundle_status.latest().value,
-        WithdrawalBundleStatus::Submitted
-    );
+    if latest_bundle_status.value != WithdrawalBundleStatus::Confirmed
+        || latest_bundle_status.height != block_height
+    {
+        return Err(Error::UnexpectedWithdrawalBundleStatus {
+            m6id,
+            status: latest_bundle_status.value,
+            status_height: latest_bundle_status.height,
+            block_height,
+        });
+    }
+    // A Confirmed status is only ever pushed on top of a Submitted one, so
+    // there must be a previous status and it must be Submitted.
+    let prev_bundle_status = match prev_bundle_status {
+        Some(prev)
+            if prev.latest().value == WithdrawalBundleStatus::Submitted =>
+        {
+            prev
+        }
+        _ => {
+            return Err(Error::UnexpectedWithdrawalBundleStatus {
+                m6id,
+                status: latest_bundle_status.value,
+                status_height: latest_bundle_status.height,
+                block_height,
+            });
+        }
+    };
     match bundle {
         WithdrawalBundleInfo::Known(_) | WithdrawalBundleInfo::Unknown => (),
         WithdrawalBundleInfo::UnknownConfirmed { spend_utxos } => {
@@ -1163,16 +1283,33 @@ fn disconnect_withdrawal_bundle_failed(
     if latest_bundle_status.value == WithdrawalBundleStatus::Submitted {
         // Already applied
         return Ok(());
-    } else {
-        assert_eq!(latest_bundle_status.value, WithdrawalBundleStatus::Failed);
     }
-    assert_eq!(latest_bundle_status.height, block_height);
-    let prev_bundle_status =
-        prev_bundle_status.expect("Pop failed bundle status should be valid");
-    assert_eq!(
-        prev_bundle_status.latest().value,
-        WithdrawalBundleStatus::Submitted
-    );
+    if latest_bundle_status.value != WithdrawalBundleStatus::Failed
+        || latest_bundle_status.height != block_height
+    {
+        return Err(Error::UnexpectedWithdrawalBundleStatus {
+            m6id,
+            status: latest_bundle_status.value,
+            status_height: latest_bundle_status.height,
+            block_height,
+        });
+    }
+    // A Failed status is only ever pushed on top of a Submitted one.
+    let prev_bundle_status = match prev_bundle_status {
+        Some(prev)
+            if prev.latest().value == WithdrawalBundleStatus::Submitted =>
+        {
+            prev
+        }
+        _ => {
+            return Err(Error::UnexpectedWithdrawalBundleStatus {
+                m6id,
+                status: latest_bundle_status.value,
+                status_height: latest_bundle_status.height,
+                block_height,
+            });
+        }
+    };
     match &bundle {
         WithdrawalBundleInfo::Unknown
         | WithdrawalBundleInfo::UnknownConfirmed { .. } => (),
@@ -1205,10 +1342,20 @@ fn disconnect_withdrawal_bundle_failed(
                 .latest_failed_withdrawal_bundle
                 .try_get(rwtxn, &())
                 .map_err(DbError::from)?
-                .expect("latest failed withdrawal bundle should exist")
+                .ok_or(Error::InconsistentLatestFailedWithdrawalBundle {
+                    m6id,
+                })?
                 .pop();
-            assert_eq!(latest_failed_m6id.value, m6id);
-            assert_eq!(latest_failed_m6id.height, block_height);
+            if latest_failed_m6id.value != m6id
+                || latest_failed_m6id.height != block_height
+            {
+                return Err(Error::LatestFailedWithdrawalBundleMismatch {
+                    expected: m6id,
+                    block_height,
+                    found: latest_failed_m6id.value,
+                    found_height: latest_failed_m6id.height,
+                });
+            }
             if let Some(prev_latest_failed_m6id) = prev_latest_failed_m6id {
                 state
                     .latest_failed_withdrawal_bundle
@@ -1310,9 +1457,7 @@ pub fn disconnect(
     rwtxn: &mut RwTxn,
     two_way_peg_data: &TwoWayPegData,
 ) -> Result<(), Error> {
-    let block_height = state
-        .try_get_height(rwtxn)?
-        .expect("Height should not be None");
+    let block_height = state.try_get_height(rwtxn)?.ok_or(Error::NoTip)?;
     let mut accumulator = state
         .utreexo_accumulator
         .try_get(rwtxn, &())
@@ -1378,13 +1523,23 @@ pub fn disconnect(
             .last(rwtxn)
             .map_err(DbError::from)?
             .ok_or(Error::NoWithdrawalBundleEventBlock)?;
-        assert_eq!(
-            latest_withdrawal_bundle_event_block_hash,
-            last_withdrawal_bundle_event_block_hash
-        );
-        assert_eq!(block_height - 1, last_withdrawal_bundle_event_block_height);
+        // `connect` records the height of the sidechain tip at the time the
+        // event block was applied, and `disconnect` runs before `disconnect_tip`
+        // lowers the height, so the two must match exactly.
+        if latest_withdrawal_bundle_event_block_hash
+            != last_withdrawal_bundle_event_block_hash
+            || block_height != last_withdrawal_bundle_event_block_height
+        {
+            return Err(Error::EventBlockMismatch {
+                table: "withdrawal_bundle_event_blocks",
+                block_height,
+                expected_hash: latest_withdrawal_bundle_event_block_hash,
+                found_hash: last_withdrawal_bundle_event_block_hash,
+                found_height: last_withdrawal_bundle_event_block_height,
+            });
+        }
         if !state
-            .deposit_blocks
+            .withdrawal_bundle_event_blocks
             .delete(rwtxn, &last_withdrawal_bundle_event_block_seq_idx)
             .map_err(DbError::from)?
         {
@@ -1392,8 +1547,7 @@ pub fn disconnect(
         };
     }
     let last_withdrawal_bundle_failure_height = state
-        .get_latest_failed_withdrawal_bundle(rwtxn)
-        .map_err(DbError::from)?
+        .get_latest_failed_withdrawal_bundle(rwtxn)?
         .map(|(height, _bundle)| height)
         .unwrap_or_default();
     if block_height - last_withdrawal_bundle_failure_height
@@ -1419,8 +1573,17 @@ pub fn disconnect(
             .last(rwtxn)
             .map_err(DbError::from)?
             .ok_or(Error::NoDepositBlock)?;
-        assert_eq!(latest_deposit_block_hash, last_deposit_block_hash);
-        assert_eq!(block_height - 1, last_deposit_block_height);
+        if latest_deposit_block_hash != last_deposit_block_hash
+            || block_height != last_deposit_block_height
+        {
+            return Err(Error::EventBlockMismatch {
+                table: "deposit_blocks",
+                block_height,
+                expected_hash: latest_deposit_block_hash,
+                found_hash: last_deposit_block_hash,
+                found_height: last_deposit_block_height,
+            });
+        }
         if !state
             .deposit_blocks
             .delete(rwtxn, &last_deposit_block_seq_idx)
@@ -1566,6 +1729,119 @@ mod withdrawal_bundle_reversal_tests {
         WithdrawalBundleEvent { m6id, status }
     }
 
+    /// A bundle collected at height N is normally reported as Submitted by
+    /// the 2WPD of block N+1, but a slow enforcer, a delayed L1 block or a
+    /// restart in between can push the event to a later block. The m6id
+    /// identifies the bundle; the height gap is timing, not corruption, and
+    /// must not kill the net task.
+    #[test]
+    fn connect_accepts_delayed_bundle_submission() {
+        let (_dir, env, state) = test_state();
+        let outpoint = OutPoint::Regular {
+            txid: Txid([9u8; 32]),
+            vout: 0,
+        };
+        let key = OutPointKey::from(&outpoint);
+        let output = Output {
+            address: Address([1u8; 20]),
+            content: OutputContent::Value(sat(30_000)),
+        };
+        let bundle = WithdrawalBundle::new(
+            9,
+            sat(1_000),
+            BTreeMap::from([(outpoint, output.clone())]),
+            vec![bitcoin::TxOut {
+                value: sat(29_000),
+                script_pubkey: bitcoin::ScriptBuf::new(),
+            }],
+        )
+        .unwrap();
+        let m6id = bundle.compute_m6id();
+
+        let mut rwtxn = env.write_txn().unwrap();
+        state.utxos.put(&mut rwtxn, &key, &output).unwrap();
+        state
+            .pending_withdrawal_bundle
+            .put(&mut rwtxn, &(), &(bundle, 9))
+            .unwrap();
+        let mut accumulator_diff = AccumulatorDiff::default();
+
+        // Collected at 9, submitted at 12 rather than 10.
+        connect_withdrawal_bundle_event(
+            &state,
+            &mut rwtxn,
+            12,
+            &mut accumulator_diff,
+            &bitcoin::BlockHash::all_zeros(),
+            &bundle_event(m6id, WithdrawalBundleStatus::Submitted),
+        )
+        .expect("a late Submitted event must be applied, not panic");
+        let (_bundle, bundle_status) = state
+            .withdrawal_bundles
+            .try_get(&rwtxn, &m6id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            bundle_status.latest().value,
+            WithdrawalBundleStatus::Submitted
+        );
+        assert_eq!(bundle_status.latest().height, 12);
+        assert!(
+            state.utxos.try_get(&rwtxn, &key).unwrap().is_none(),
+            "the bundle's input must be spent"
+        );
+        assert!(
+            state
+                .pending_withdrawal_bundle
+                .try_get(&rwtxn, &())
+                .unwrap()
+                .is_none(),
+            "the pending bundle must be consumed"
+        );
+    }
+
+    /// A Confirmed event for a bundle whose latest status is not Submitted is
+    /// a malformed event sequence. It must surface as an error the caller can
+    /// handle, not a panic that takes the net task down.
+    #[test]
+    fn connect_confirmed_without_submitted_is_an_error() {
+        let (_dir, env, state) = test_state();
+        let m6id = M6id(bitcoin::Txid::all_zeros());
+        let mut rwtxn = env.write_txn().unwrap();
+        state
+            .withdrawal_bundles
+            .put(
+                &mut rwtxn,
+                &m6id,
+                &(
+                    WithdrawalBundleInfo::Unknown,
+                    RollBack::new(WithdrawalBundleStatus::Failed, 5),
+                ),
+            )
+            .unwrap();
+        let mut accumulator_diff = AccumulatorDiff::default();
+        let result = connect_withdrawal_bundle_event(
+            &state,
+            &mut rwtxn,
+            6,
+            &mut accumulator_diff,
+            &bitcoin::BlockHash::all_zeros(),
+            &bundle_event(m6id, WithdrawalBundleStatus::Confirmed),
+        );
+        assert!(
+            matches!(
+                result,
+                Err(Error::UnexpectedWithdrawalBundleStatus {
+                    status: WithdrawalBundleStatus::Failed,
+                    status_height: 5,
+                    block_height: 6,
+                    ..
+                })
+            ),
+            "expected UnexpectedWithdrawalBundleStatus, got {result:?}"
+        );
+    }
+
     /// The parent chain only refuses a bundle proposal while its m6id is still
     /// pending, so once an m6id has expired the very same m6id can be proposed
     /// again, producing the event sequence `Submitted(X)`, `Failed(X)`,
@@ -1678,5 +1954,314 @@ mod withdrawal_bundle_reversal_tests {
             state.stxos.try_get(&rwtxn, &key).unwrap().is_none(),
             "disconnect must not re-spend the UTXO restored by the expiry"
         );
+    }
+}
+
+#[cfg(test)]
+mod event_block_bookkeeping_tests {
+    use bitcoin::hashes::Hash as _;
+    use sneed::Env;
+
+    use super::*;
+    use crate::types::{
+        Accumulator, Address, Txid,
+        proto::mainchain::{BlockInfo, Deposit},
+    };
+
+    fn sat(value: u64) -> bitcoin::Amount {
+        bitcoin::Amount::from_sat(value)
+    }
+
+    /// Build a `State` backed by a fresh temporary LMDB environment.
+    fn test_state() -> (temp_dir::TempDir, Env, State) {
+        let dir = temp_dir::TempDir::new().unwrap();
+        let mut opts = heed::EnvOpenOptions::new();
+        opts.map_size(10 * 1024 * 1024).max_dbs(State::NUM_DBS);
+        let env = unsafe { Env::open(&opts, dir.path()) }.unwrap();
+        let state = State::new(&env).unwrap();
+        (dir, env, state)
+    }
+
+    /// 2WPD carrying one deposit and one `Submitted` withdrawal-bundle event in
+    /// the same parent-chain block.
+    fn two_way_peg_data(
+        event_block_hash: bitcoin::BlockHash,
+        deposit: Deposit,
+        m6id: M6id,
+    ) -> TwoWayPegData {
+        let block_info = BlockInfo {
+            bmm_commitment: None,
+            events: vec![
+                BlockEvent::Deposit(deposit),
+                BlockEvent::WithdrawalBundle(WithdrawalBundleEvent {
+                    m6id,
+                    status: WithdrawalBundleStatus::Submitted,
+                }),
+            ],
+        };
+        let mut two_way_peg_data = TwoWayPegData::default();
+        two_way_peg_data
+            .block_info
+            .insert(event_block_hash, block_info);
+        two_way_peg_data
+    }
+
+    /// Connecting 2WPD records the event block in `deposit_blocks` and in
+    /// `withdrawal_bundle_event_blocks`; disconnecting the same 2WPD must
+    /// remove exactly those two rows, each from its own table. The withdrawal
+    /// branch used to delete from `deposit_blocks` by the withdrawal sequence
+    /// index, leaving the withdrawal row behind and removing a deposit row it
+    /// did not own, so reorg bookkeeping drifted after the first reorg over a
+    /// bundle event.
+    #[test]
+    fn disconnect_removes_rows_from_their_own_tables() {
+        let (_dir, env, state) = test_state();
+        let event_block_hash = bitcoin::BlockHash::from_byte_array([7u8; 32]);
+        let earlier_block_hash = bitcoin::BlockHash::from_byte_array([6u8; 32]);
+
+        // A withdrawal waiting to be bundled, collected at height 9.
+        let withdrawal_outpoint = OutPoint::Regular {
+            txid: Txid([9u8; 32]),
+            vout: 0,
+        };
+        let withdrawal_output = Output {
+            address: Address([1u8; 20]),
+            content: OutputContent::Value(sat(30_000)),
+        };
+        let bundle = WithdrawalBundle::new(
+            9,
+            sat(1_000),
+            BTreeMap::from([(withdrawal_outpoint, withdrawal_output.clone())]),
+            vec![bitcoin::TxOut {
+                value: sat(29_000),
+                script_pubkey: bitcoin::ScriptBuf::new(),
+            }],
+        )
+        .unwrap();
+        let m6id = bundle.compute_m6id();
+
+        let deposit = Deposit {
+            tx_index: 0,
+            outpoint: bitcoin::OutPoint {
+                txid: bitcoin::Txid::from_byte_array([8u8; 32]),
+                vout: 0,
+            },
+            output: Output {
+                address: Address([2u8; 20]),
+                content: OutputContent::Value(sat(10_000)),
+            },
+        };
+        let two_way_peg_data =
+            two_way_peg_data(event_block_hash, deposit, m6id);
+
+        let mut rwtxn = env.write_txn().unwrap();
+        // Sidechain block 10 is the tip; its 2WPD is being connected.
+        state.height.put(&mut rwtxn, &(), &10u32).unwrap();
+        state
+            .tip
+            .put(&mut rwtxn, &(), &BlockHash([10u8; 32]))
+            .unwrap();
+        state
+            .utxos
+            .put(
+                &mut rwtxn,
+                &OutPointKey::from(&withdrawal_outpoint),
+                &withdrawal_output,
+            )
+            .unwrap();
+        state
+            .pending_withdrawal_bundle
+            .put(&mut rwtxn, &(), &(bundle, 9))
+            .unwrap();
+        // The bundle's input must be in the accumulator for connect to spend it.
+        let mut accumulator = Accumulator::default();
+        let mut seed_diff = AccumulatorDiff::default();
+        seed_diff.insert(
+            hash(&PointedOutput {
+                outpoint: withdrawal_outpoint,
+                output: withdrawal_output.clone(),
+            })
+            .into(),
+        );
+        accumulator.apply_diff(seed_diff).unwrap();
+        state
+            .utreexo_accumulator
+            .put(&mut rwtxn, &(), &accumulator)
+            .unwrap();
+        // Rows recorded by an earlier block; they must survive the reorg.
+        state
+            .deposit_blocks
+            .put(&mut rwtxn, &0, &(earlier_block_hash, 3))
+            .unwrap();
+        state
+            .withdrawal_bundle_event_blocks
+            .put(&mut rwtxn, &0, &(earlier_block_hash, 3))
+            .unwrap();
+
+        connect(&state, &mut rwtxn, &two_way_peg_data, None, None).unwrap();
+        assert_eq!(
+            state.deposit_blocks.last(&rwtxn).unwrap(),
+            Some((1, (event_block_hash, 10))),
+            "connect must record the deposit block"
+        );
+        assert_eq!(
+            state.withdrawal_bundle_event_blocks.last(&rwtxn).unwrap(),
+            Some((1, (event_block_hash, 10))),
+            "connect must record the withdrawal bundle event block"
+        );
+
+        disconnect(&state, &mut rwtxn, &two_way_peg_data).unwrap();
+        assert_eq!(
+            state.deposit_blocks.last(&rwtxn).unwrap(),
+            Some((0, (earlier_block_hash, 3))),
+            "disconnect must remove only the disconnected deposit row"
+        );
+        assert_eq!(
+            state.withdrawal_bundle_event_blocks.last(&rwtxn).unwrap(),
+            Some((0, (earlier_block_hash, 3))),
+            "disconnect must remove the disconnected withdrawal event row"
+        );
+    }
+}
+
+#[cfg(test)]
+mod detection_tests {
+    use sneed::Env;
+
+    use super::*;
+    use crate::{
+        parent_chain_rpc::tests::fake_rpc,
+        state::l1_proof::{commitment_script_for, payment_commitment},
+        types::{Address, SwapDirection},
+    };
+
+    const L1_RECIPIENT: &str = "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080";
+
+    fn test_state() -> (temp_dir::TempDir, Env, State) {
+        let dir = temp_dir::TempDir::new().unwrap();
+        let mut opts = heed::EnvOpenOptions::new();
+        opts.map_size(10 * 1024 * 1024).max_dbs(State::NUM_DBS);
+        let env = unsafe { Env::open(&opts, dir.path()) }.unwrap();
+        let state = State::new(&env).unwrap();
+        (dir, env, state)
+    }
+
+    fn open_swap() -> Swap {
+        Swap::new(
+            SwapId([21u8; 32]),
+            SwapDirection::L2ToL1,
+            ParentChainType::Regtest,
+            SwapTxId::Hash32([0u8; 32]),
+            Some(1),
+            None,
+            bitcoin::Amount::from_sat(50_000),
+            L1_RECIPIENT.to_owned(),
+            bitcoin::Amount::from_sat(40_000),
+            0,
+            None,
+            Some(Address([5u8; 20])),
+        )
+    }
+
+    /// `getrawtransaction` (verbose) JSON for a payment of the swap amount
+    /// to the recipient, optionally carrying `commitment` as an OP_RETURN.
+    fn tx_json(
+        txid: &str,
+        commitment: Option<bitcoin::ScriptBuf>,
+    ) -> serde_json::Value {
+        let mut vout = vec![serde_json::json!({
+            "value": 0.0004,
+            "n": 0,
+            "scriptPubKey": {
+                "address": L1_RECIPIENT,
+                "hex": "0014751e76e8199196d454941c45d1b3a323f1433bd6"
+            }
+        })];
+        if let Some(script) = commitment {
+            vout.push(serde_json::json!({
+                "value": 0.0,
+                "n": 1,
+                "scriptPubKey": { "hex": hex::encode(script.as_bytes()) }
+            }));
+        }
+        serde_json::json!({
+            "txid": txid,
+            "confirmations": 3,
+            "blockheight": 120,
+            "vout": vout,
+            "vin": [],
+        })
+    }
+
+    fn run_detection(
+        swap: &mut Swap,
+        commitment: Option<bitcoin::ScriptBuf>,
+    ) -> bool {
+        let (_dir, env, state) = test_state();
+        let txid = "ab".repeat(32);
+        let txid_for_scan = txid.clone();
+        let (url, server) = fake_rpc(move |method| match method {
+            "scantxoutset" => Ok(serde_json::json!({
+                "success": true,
+                "unspents": [{"txid": txid_for_scan, "vout": 0}]
+            })),
+            "listunspent" => Ok(serde_json::json!([])),
+            "getblockchaininfo" => Ok(serde_json::json!({"blocks": 122})),
+            "getrawtransaction" => Ok(tx_json(&txid, commitment.clone())),
+            "stop" => Ok(serde_json::json!(true)),
+            other => Err(format!("unexpected method {other}")),
+        });
+        let config = RpcConfig {
+            url: url.clone(),
+            ..RpcConfig::default()
+        };
+        let mut rwtxn = env.write_txn().unwrap();
+        state.save_swap(&mut rwtxn, swap).unwrap();
+        let updated = query_and_update_swap(
+            &state,
+            &mut rwtxn,
+            &config,
+            swap,
+            BlockHash([0u8; 32]),
+            7,
+        )
+        .unwrap();
+        drop(
+            ParentChainRpcClient::new(config)
+                .call::<serde_json::Value>("stop", serde_json::json!([]))
+                .unwrap(),
+        );
+        server.join().unwrap();
+        updated
+    }
+
+    /// Automatic detection records the L2 address the payment committed to,
+    /// so the fill is bound to its payer on every node that sees it, and it
+    /// never records a payment that no claim could ever prove.
+    #[test]
+    fn detection_records_committed_claimer_and_ignores_uncommitted_payments() {
+        let claimer = Address([7u8; 20]);
+
+        let mut swap = open_swap();
+        let script = commitment_script_for(&swap.id, &claimer);
+        assert!(run_detection(&mut swap, Some(script)));
+        assert_eq!(swap.l2_claimer_address, Some(claimer));
+        assert_eq!(swap.l1_txid.to_hex_rpc(), "ab".repeat(32));
+        assert_eq!(swap.state, SwapState::ReadyToClaim);
+
+        let mut swap = open_swap();
+        assert!(!run_detection(&mut swap, None), "no commitment: not a fill");
+        assert_eq!(swap.state, SwapState::Pending);
+        assert_eq!(swap.l2_claimer_address, None);
+
+        let mut swap = open_swap();
+        let other = commitment_script_for(&SwapId([99u8; 32]), &claimer);
+        assert!(
+            !run_detection(&mut swap, Some(other)),
+            "other swap: not a fill"
+        );
+
+        // Sanity on the commitment helper the RPC exposes to fillers.
+        assert_eq!(payment_commitment(&swap.id, &claimer).len(), 56);
     }
 }
