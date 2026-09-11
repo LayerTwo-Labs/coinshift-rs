@@ -166,6 +166,8 @@ pub enum Command {
         #[arg(value_parser = parse_swap_id)]
         swap_id: SwapId,
     },
+    /// Get the progress of the startup sync with the mainchain
+    MainchainSyncProgress,
     /// Attempt to mine a sidechain block
     Mine {
         #[arg(long)]
@@ -458,6 +460,10 @@ where
                 )
                 .await?;
             "Swap L1 txid updated".to_string()
+        }
+        Command::MainchainSyncProgress => {
+            let progress = rpc_client.mainchain_sync_progress().await?;
+            serde_json::to_string_pretty(&progress)?
         }
         Command::Mine { fee_sats } => {
             let () = rpc_client.mine(fee_sats).await?;
