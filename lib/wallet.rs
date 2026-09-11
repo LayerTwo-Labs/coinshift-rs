@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     path::Path,
 };
 
@@ -11,6 +11,7 @@ use futures::{Stream, StreamExt};
 use heed::types::{Bytes, SerdeBincode, U8};
 use rustreexo::accumulator::node_hash::BitcoinNodeHash;
 use serde::{Deserialize, Serialize};
+use serde_with::{MapPreventDuplicates, serde_as};
 use sneed::{
     DatabaseUnique, Env, EnvError, RoTxn, RwTxnError, UnitKey,
     db::error::Error as DbError,
@@ -46,6 +47,17 @@ pub struct Balance {
     pub available: Amount,
 }
 
+/// Destinations of a transfer. Each address takes a value in sats.
+/// A repeated address is an error.
+#[serde_as]
+#[derive(
+    Clone, Debug, Deserialize, PartialEq, Eq, Serialize, utoipa::ToSchema,
+)]
+#[schema(value_type = BTreeMap<String, u64>)]
+pub struct TransferDests(
+    #[serde_as(as = "MapPreventDuplicates<_, _>")] pub BTreeMap<Address, u64>,
+);
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("address {address} does not exist")]
@@ -78,6 +90,8 @@ pub enum Error {
     NoSeed,
     #[error("not enough funds")]
     NotEnoughFunds,
+    #[error("no transfer destination")]
+    NoTransferDestination,
     #[error("utxo does not exist")]
     NoUtxo,
     #[error("failed to parse mnemonic seed phrase")]
@@ -603,6 +617,36 @@ impl Wallet {
     where
         F: Fn(&OutPoint) -> bool,
     {
+        self.create_transaction_many(
+            accumulator,
+            &BTreeMap::from([(address, value)]),
+            fee,
+            is_locked,
+        )
+    }
+
+    /// Pay each address in `dests`, and pay the change to a new address.
+    /// `is_locked` is a function that returns true if an outpoint is locked to
+    /// a swap
+    pub fn create_transaction_many<F>(
+        &self,
+        accumulator: &Accumulator,
+        dests: &BTreeMap<Address, bitcoin::Amount>,
+        fee: bitcoin::Amount,
+        is_locked: F,
+    ) -> Result<Transaction, Error>
+    where
+        F: Fn(&OutPoint) -> bool,
+    {
+        if dests.is_empty() {
+            return Err(Error::NoTransferDestination);
+        }
+        let value = dests
+            .values()
+            .try_fold(bitcoin::Amount::ZERO, |total, value| {
+                total.checked_add(*value)
+            })
+            .ok_or(AmountOverflowError)?;
         let (total, coins) = self.select_coins_with_filter(
             value.checked_add(fee).ok_or(AmountOverflowError)?,
             is_locked,
@@ -618,16 +662,17 @@ impl Wallet {
         let input_utxo_hashes: Vec<BitcoinNodeHash> =
             inputs.iter().map(|(_, hash)| hash.into()).collect();
         let proof = accumulator.prove(&input_utxo_hashes)?;
-        let outputs = vec![
-            Output {
-                address,
-                content: OutputContent::Value(value),
-            },
-            Output {
-                address: self.get_new_address()?,
-                content: OutputContent::Value(change),
-            },
-        ];
+        let mut outputs: Vec<Output> = dests
+            .iter()
+            .map(|(address, value)| Output {
+                address: *address,
+                content: OutputContent::Value(*value),
+            })
+            .collect();
+        outputs.push(Output {
+            address: self.get_new_address()?,
+            content: OutputContent::Value(change),
+        });
         Ok(Transaction {
             inputs,
             proof,
@@ -1369,5 +1414,147 @@ mod tests {
             wallet.select_coins_with_filter(sat(1000), |_| true),
             Err(Error::NotEnoughFunds)
         ));
+    }
+
+    fn funded_wallet(
+        values_sats: &[u64],
+    ) -> anyhow::Result<(temp_dir::TempDir, Wallet, Accumulator)> {
+        use crate::types::AccumulatorDiff;
+
+        let (dir, wallet) = test_wallet();
+        wallet.set_seed(&[2u8; 64])?;
+
+        let mut utxos = HashMap::new();
+        let mut diff = AccumulatorDiff::default();
+        for (index, value_sats) in values_sats.iter().enumerate() {
+            let outpoint = regular_outpoint(index as u32);
+            let output = Output {
+                address: wallet.get_new_address()?,
+                content: OutputContent::Value(sat(*value_sats)),
+            };
+            let pointed = PointedOutput {
+                outpoint,
+                output: output.clone(),
+            };
+            diff.insert(hash(&pointed).into());
+            utxos.insert(outpoint, output);
+        }
+        wallet.put_utxos(&utxos)?;
+        let mut accumulator = Accumulator::default();
+        accumulator.apply_diff(diff)?;
+        Ok((dir, wallet, accumulator))
+    }
+
+    fn value_of(output: &Output) -> u64 {
+        output.get_value().to_sat()
+    }
+
+    #[test]
+    fn create_transaction_many_pays_each_address() -> anyhow::Result<()> {
+        let (_dir, wallet, accumulator) = funded_wallet(&[10_000])?;
+
+        let dests = BTreeMap::from([
+            (Address([1u8; 20]), sat(1000)),
+            (Address([2u8; 20]), sat(2000)),
+            (Address([3u8; 20]), sat(3000)),
+        ]);
+        let tx = wallet.create_transaction_many(
+            &accumulator,
+            &dests,
+            sat(500),
+            |_| false,
+        )?;
+
+        assert_eq!(tx.outputs.len(), 4);
+        for (index, (address, value)) in dests.iter().enumerate() {
+            assert_eq!(tx.outputs[index].address, *address);
+            assert_eq!(value_of(&tx.outputs[index]), value.to_sat());
+        }
+        let change = &tx.outputs[3];
+        assert_eq!(value_of(change), 10_000 - 1000 - 2000 - 3000 - 500);
+        assert!(wallet.get_addresses()?.contains(&change.address));
+        Ok(())
+    }
+
+    #[test]
+    fn create_transaction_keeps_one_payment_and_change() -> anyhow::Result<()> {
+        let (_dir, wallet, accumulator) = funded_wallet(&[10_000])?;
+
+        let dest = Address([4u8; 20]);
+        let tx = wallet.create_transaction(
+            &accumulator,
+            dest,
+            sat(1000),
+            sat(500),
+            |_| false,
+        )?;
+
+        assert_eq!(tx.outputs.len(), 2);
+        assert_eq!(tx.outputs[0].address, dest);
+        assert_eq!(value_of(&tx.outputs[0]), 1000);
+        assert_eq!(value_of(&tx.outputs[1]), 10_000 - 1000 - 500);
+        assert!(wallet.get_addresses()?.contains(&tx.outputs[1].address));
+        Ok(())
+    }
+
+    #[test]
+    fn create_transaction_many_rejects_an_overflow() -> anyhow::Result<()> {
+        let (_dir, wallet, accumulator) = funded_wallet(&[10_000])?;
+
+        let half = sat(bitcoin::Amount::MAX.to_sat() / 2);
+        let dests = BTreeMap::from([
+            (Address([1u8; 20]), half),
+            (Address([2u8; 20]), half + sat(1)),
+        ]);
+        let result = wallet.create_transaction_many(
+            &accumulator,
+            &dests,
+            sat(500),
+            |_| false,
+        );
+        assert!(matches!(result, Err(Error::AmountOverflow(_))));
+        Ok(())
+    }
+
+    #[test]
+    fn create_transaction_many_needs_a_destination() -> anyhow::Result<()> {
+        let (_dir, wallet, accumulator) = funded_wallet(&[10_000])?;
+
+        let result = wallet.create_transaction_many(
+            &accumulator,
+            &BTreeMap::new(),
+            sat(500),
+            |_| false,
+        );
+        assert!(matches!(result, Err(Error::NoTransferDestination)));
+        Ok(())
+    }
+
+    #[test]
+    fn create_transaction_many_totals_the_values() -> anyhow::Result<()> {
+        let (_dir, wallet, accumulator) = funded_wallet(&[1000, 1000])?;
+
+        let dests = BTreeMap::from([
+            (Address([1u8; 20]), sat(900)),
+            (Address([2u8; 20]), sat(900)),
+        ]);
+        // Each coin alone is too small, so the sum decides the selection.
+        let tx = wallet.create_transaction_many(
+            &accumulator,
+            &dests,
+            sat(100),
+            |_| false,
+        )?;
+        assert_eq!(tx.inputs.len(), 2);
+        assert_eq!(value_of(&tx.outputs[2]), 100);
+
+        let result = wallet.create_transaction_many(
+            &accumulator,
+            &dests,
+            sat(1000),
+            |_| false,
+        );
+        assert!(matches!(result, Err(Error::NotEnoughFunds)));
+        Ok(())
     }
 }

@@ -9,7 +9,7 @@ use coinshift::{
         ParentChainType, PointedOutput, Swap, SwapId, SwapState, Transaction,
         TxData, Txid, WithdrawalBundle, schema as coinshift_schema,
     },
-    wallet::Balance,
+    wallet::{Balance, TransferDests},
 };
 use jsonrpsee::{core::RpcResult, proc_macros::rpc};
 use l2l_openapi::open_api;
@@ -20,7 +20,7 @@ use super::{GetBlockTemplateResponse, schema};
     Address, BlockIndexDeposit, BlockIndexSpend, BlockIndexTx, M6id,
     MainchainSyncPhase,
     MerkleRoot, OutPoint, Output, OutputContent, ParentChainType, Swap, SwapId,
-    SwapState, Transaction, TxData, Txid, schema::BitcoinTxid,
+    SwapState, Transaction, TransferDests, TxData, Txid, schema::BitcoinTxid,
     coinshift_schema::BitcoinAddr, coinshift_schema::BitcoinOutPoint,
     coinshift_schema::UtreexoProof,
 ])]
@@ -230,6 +230,15 @@ pub trait Rpc {
         &self,
         dest: Address,
         value_sats: u64,
+        fee_sats: u64,
+    ) -> RpcResult<Txid>;
+
+    /// Transfer funds to each address in `dests`, which maps an address to a
+    /// value in sats
+    #[method(name = "transfer_many")]
+    async fn transfer_many(
+        &self,
+        dests: TransferDests,
         fee_sats: u64,
     ) -> RpcResult<Txid>;
 

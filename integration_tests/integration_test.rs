@@ -20,6 +20,7 @@ use crate::{
         swap_creation_fixed_trial, swap_creation_open_fill_trial,
         swap_creation_open_trial,
     },
+    transfer_many::transfer_many_trial,
     unknown_withdrawal::unknown_withdrawal_trial,
     util::BinPaths,
 };
@@ -128,6 +129,11 @@ pub fn tests(
             failure_collector.clone(),
         ),
         multi_node_verification_trial(
+            bin_paths.clone(),
+            file_registry.clone(),
+            failure_collector.clone(),
+        ),
+        transfer_many_trial(
             bin_paths.clone(),
             file_registry.clone(),
             failure_collector.clone(),

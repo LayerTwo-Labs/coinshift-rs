@@ -8,7 +8,7 @@ use coinshift::{
         Address, MainchainSyncProgress, ParentChainType, PointedOutput, Swap,
         SwapId, SwapState, SwapTxId, Txid, WithdrawalBundle,
     },
-    wallet::Balance,
+    wallet::{Balance, TransferDests},
 };
 use coinshift_app_rpc_api::{GetBlockTemplateResponse, RpcServer};
 use jsonrpsee::{
@@ -402,6 +402,35 @@ impl RpcServer for RpcServerImpl {
                 &accumulator,
                 dest,
                 Amount::from_sat(value_sats),
+                Amount::from_sat(fee_sats),
+                |outpoint| self.app.is_output_locked_to_swap(outpoint),
+            )
+            .map_err(custom_err)?;
+        let txid = tx.txid();
+        self.app.sign_and_send(tx).map_err(custom_err)?;
+        Ok(txid)
+    }
+
+    async fn transfer_many(
+        &self,
+        dests: TransferDests,
+        fee_sats: u64,
+    ) -> RpcResult<Txid> {
+        let dests = dests
+            .0
+            .into_iter()
+            .map(|(address, value_sats)| {
+                (address, Amount::from_sat(value_sats))
+            })
+            .collect();
+        let accumulator =
+            self.app.node.get_tip_accumulator().map_err(custom_err)?;
+        let tx = self
+            .app
+            .wallet
+            .create_transaction_many(
+                &accumulator,
+                &dests,
                 Amount::from_sat(fee_sats),
                 |outpoint| self.app.is_output_locked_to_swap(outpoint),
             )

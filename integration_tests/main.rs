@@ -18,6 +18,7 @@ mod multi_node_verification;
 mod receive_address;
 mod setup;
 mod swap_creation;
+mod transfer_many;
 mod unknown_withdrawal;
 mod util;
 

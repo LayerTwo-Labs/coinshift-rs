@@ -8,6 +8,7 @@ use jsonrpsee::{core::client::ClientT, http_client::HttpClientBuilder};
 
 use coinshift::parent_chain_rpc::RpcConfig;
 use coinshift::types::{Address, ParentChainType, SwapId, Txid};
+use coinshift::wallet::TransferDests;
 use coinshift_app_rpc_api::RpcClient;
 use tracing_subscriber::{filter::Targets, layer::SubscriberExt as _};
 
@@ -25,6 +26,10 @@ fn parse_swap_id(s: &str) -> anyhow::Result<SwapId> {
         anyhow::anyhow!("swap_id must be 32 bytes (64 hex chars)")
     })?;
     Ok(SwapId(arr))
+}
+
+fn parse_transfer_dests(s: &str) -> anyhow::Result<TransferDests> {
+    Ok(serde_json::from_str(s)?)
 }
 
 fn parse_parent_chain(s: &str) -> anyhow::Result<ParentChainType> {
@@ -202,6 +207,14 @@ pub enum Command {
         dest: Address,
         #[arg(long)]
         value_sats: u64,
+        #[arg(long)]
+        fee_sats: u64,
+    },
+    /// Transfer funds to each address in a JSON map of address to value in
+    /// sats, such as `{"<address>": 1000}`
+    TransferMany {
+        #[arg(value_parser = parse_transfer_dests)]
+        dests: TransferDests,
         #[arg(long)]
         fee_sats: u64,
     },
@@ -541,6 +554,10 @@ where
             let txid = rpc_client.transfer(dest, value_sats, fee_sats).await?;
             format!("{txid}")
         }
+        Command::TransferMany { dests, fee_sats } => {
+            let txid = rpc_client.transfer_many(dests, fee_sats).await?;
+            format!("{txid}")
+        }
         Command::Withdraw {
             mainchain_address,
             amount_sats,
@@ -601,5 +618,43 @@ impl Cli {
         let client = builder.build(self.rpc_url)?;
         let result = handle_command(&client, self.command).await?;
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::*;
+
+    #[test]
+    fn parse_transfer_many() {
+        let address = Address([1u8; 20]);
+        let cli = Cli::parse_from([
+            "coinshift_app_cli",
+            "transfer-many",
+            &format!("{{\"{address}\": 1000}}"),
+            "--fee-sats",
+            "500",
+        ]);
+        let Command::TransferMany { dests, fee_sats } = cli.command else {
+            panic!("expected transfer-many");
+        };
+        assert_eq!(dests.0, BTreeMap::from([(address, 1000)]));
+        assert_eq!(fee_sats, 500);
+    }
+
+    // A repeated address must not silently drop one of the two payments.
+    #[test]
+    fn refuse_a_repeated_address() {
+        let address = Address([1u8; 20]);
+        let result = Cli::try_parse_from([
+            "coinshift_app_cli",
+            "transfer-many",
+            &format!("{{\"{address}\": 1000, \"{address}\": 5000}}"),
+            "--fee-sats",
+            "500",
+        ]);
+        assert!(result.is_err());
     }
 }
