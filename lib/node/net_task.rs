@@ -432,7 +432,7 @@ fn reorg_to_tip(
         let rpc_config_getter: Option<
             &dyn Fn(ParentChainType) -> Option<RpcConfig>,
         > = rpc_config_getter.as_ref().map(|b| b.as_ref());
-        let () = connect_tip_(
+        let () = match connect_tip_(
             &mut rwtxn,
             archive,
             mempool,
@@ -442,7 +442,20 @@ fn reorg_to_tip(
             &two_way_peg_data,
             rpc_config_getter,
             wallet,
-        )?;
+        ) {
+            Ok(()) => (),
+            Err(err) => {
+                if !is_fatal_reorg_error(&err) {
+                    // Discard the invalid body, so that the block is reported
+                    // missing again and the real body is re-requested.
+                    drop(rwtxn);
+                    let mut rwtxn = env.write_txn().map_err(EnvError::from)?;
+                    let () = archive.delete_body(&mut rwtxn, header.hash())?;
+                    rwtxn.commit().map_err(RwTxnError::from)?;
+                }
+                return Err(err);
+            }
+        };
         let new_tip_hash = state.try_get_tip(&rwtxn)?.unwrap();
         let bmm_verification =
             archive.get_best_main_verification(&rwtxn, new_tip_hash)?;

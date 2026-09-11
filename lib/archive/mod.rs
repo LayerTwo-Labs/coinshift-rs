@@ -863,6 +863,38 @@ impl Archive {
         Ok(())
     }
 
+    /// Delete a stored body, reversing the effects of [`Self::put_body`].
+    ///
+    /// Used to discard a body that was stored before its contents could be
+    /// validated (e.g. a body received from a peer) and later turned out to be
+    /// invalid, so that the block is reported missing again by
+    /// [`Self::iter_missing_bodies`] and the real body is re-requested.
+    pub fn delete_body(
+        &self,
+        rwtxn: &mut RwTxn,
+        block_hash: BlockHash,
+    ) -> Result<(), Error> {
+        self.bodies.delete(rwtxn, &block_hash)?;
+        let mut queue = VecDeque::from_iter([block_hash]);
+        'update_side_tips: while let Some(block_hash) = queue.pop_front() {
+            if !self
+                .side_tips
+                .sidechain_tips()
+                .contains_key(rwtxn, &block_hash)
+                .map_err(side_tips::Error::from)?
+            {
+                continue 'update_side_tips;
+            };
+            // SAFETY: this loop also disconnects descendants
+            let () = unsafe {
+                self.side_tips.disconnect_sidechain_tip(rwtxn, &block_hash)
+            }?;
+            let successors = self.get_successors(rwtxn, Some(block_hash))?;
+            queue.extend(successors);
+        }
+        Ok(())
+    }
+
     /// Store a header.
     ///
     /// The following predicates MUST be met before calling this function:
