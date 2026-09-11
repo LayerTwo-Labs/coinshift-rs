@@ -165,6 +165,15 @@ pub trait Rpc {
     #[method(name = "getblockcount")]
     async fn getblockcount(&self) -> RpcResult<u32>;
 
+    /// Invalidate a block, potentially re-orging to a valid ancestor of the
+    /// current tip.
+    #[open_api_method(output_schema(ToSchema))]
+    #[method(name = "invalidate_block")]
+    async fn invalidate_block(
+        &self,
+        block_hash: coinshift::types::BlockHash,
+    ) -> RpcResult<()>;
+
     /// Get the height of the latest failed withdrawal bundle
     #[method(name = "latest_failed_withdrawal_bundle_height")]
     async fn latest_failed_withdrawal_bundle_height(

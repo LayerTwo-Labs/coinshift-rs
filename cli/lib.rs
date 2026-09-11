@@ -124,6 +124,11 @@ pub enum Command {
     GetWalletUtxos,
     /// Get the current block count
     GetBlockcount,
+    /// Invalidate a block, potentially re-orging to a valid ancestor of the
+    /// current tip.
+    InvalidateBlock {
+        block_hash: coinshift::types::BlockHash,
+    },
     /// Reserve an open swap for your L2 address, on-chain.
     ///
     /// Do this BEFORE paying on L1: the reservation is what entitles you to the
@@ -408,6 +413,10 @@ where
         Command::GetBlockcount => {
             let blockcount = rpc_client.getblockcount().await?;
             format!("{blockcount}")
+        }
+        Command::InvalidateBlock { block_hash } => {
+            let () = rpc_client.invalidate_block(block_hash).await?;
+            String::default()
         }
         Command::GetSwapStatus { swap_id } => {
             let status = rpc_client.get_swap_status(swap_id).await?;

@@ -134,7 +134,7 @@ fn connect_tip_(
     Ok(())
 }
 
-fn disconnect_tip_(
+pub(in crate::node) fn disconnect_tip_(
     rwtxn: &mut RwTxn<'_>,
     archive: &Archive,
     mempool: &MemPool,
@@ -839,15 +839,27 @@ impl NetTask {
                         return Ok(());
                     }
                 }
-                // check that headers are sequential based on prev_side_hash
-                let mut prev_side_hash = start_hash;
-                for header in &headers {
-                    if header.prev_side_hash != prev_side_hash {
-                        tracing::warn!(%addr, ?req, ?headers,"Invalid response from peer; non-sequential headers");
-                        let () = ctxt.net.remove_active_peer(addr);
-                        return Ok(());
+                // check that headers are sequential based on prev_side_hash,
+                // and no header builds on an invalidated block.
+                {
+                    let rotxn = ctxt.env.read_txn().map_err(EnvError::from)?;
+                    let mut prev_side_hash = start_hash;
+                    for header in &headers {
+                        if header.prev_side_hash != prev_side_hash {
+                            tracing::warn!(%addr, ?req, ?headers,"Invalid response from peer; non-sequential headers");
+                            let () = ctxt.net.remove_active_peer(addr);
+                            return Ok(());
+                        }
+                        if ctxt
+                            .archive
+                            .invalidated_block(&rotxn, &header.hash())?
+                        {
+                            tracing::warn!(%addr, ?req, ?headers,"Invalid response from peer; invalidated block header");
+                            let () = ctxt.net.remove_active_peer(addr);
+                            return Ok(());
+                        }
+                        prev_side_hash = Some(header.hash());
                     }
-                    prev_side_hash = Some(header.hash());
                 }
                 // Store new headers
                 let () = tokio::task::block_in_place(|| {
