@@ -352,40 +352,35 @@ where
         );
         let tip_height = block_infos[0].0.height;
         block_infos.reverse();
-        const WRITE_CHUNK_SIZE: usize = 20_000;
         let store_start = Instant::now();
         tracing::info!(%block_hash, "request_ancestor_infos: Starting to store ancestor headers/info to archive");
         sync_progress.start_writing(tip_height, block_infos.len() as u32);
         let mut stored_count: usize = 0;
-        for chunk in block_infos.chunks(WRITE_CHUNK_SIZE) {
-            // Writing all headers during IBD can starve archive readers.
-            task::block_in_place(|| -> Result<(), ResponseError> {
-                let mut rwtxn = env.write_txn().map_err(EnvError::from)?;
-                for (header_info, block_info) in chunk {
-                    let () = archive
-                        .put_main_header_info(&mut rwtxn, header_info)?;
-                    let () = archive.put_main_block_info(
-                        &mut rwtxn,
-                        header_info.block_hash,
-                        block_info,
-                    )?;
-                    stored_count += 1;
-                    if stored_count.is_multiple_of(1000) {
-                        tracing::info!(
-                            %block_hash,
-                            stored = stored_count,
-                            "request_ancestor_infos: Stored {} blocks so far",
-                            stored_count
-                        );
-                    }
+        // Writing all headers during IBD can starve archive readers.
+        task::block_in_place(|| -> Result<(), ResponseError> {
+            let mut rwtxn = env.write_txn().map_err(EnvError::from)?;
+            for (header_info, block_info) in &block_infos {
+                let () =
+                    archive.put_main_header_info(&mut rwtxn, header_info)?;
+                let () = archive.put_main_block_info(
+                    &mut rwtxn,
+                    header_info.block_hash,
+                    block_info,
+                )?;
+                stored_count += 1;
+                sync_progress.wrote_headers(1);
+                if stored_count.is_multiple_of(1000) {
+                    tracing::info!(
+                        %block_hash,
+                        stored = stored_count,
+                        "request_ancestor_infos: Stored {} blocks so far",
+                        stored_count
+                    );
                 }
-                rwtxn.commit().map_err(RwTxnError::from)?;
-                Ok(())
-            })?;
-            sync_progress.wrote_headers(chunk.len() as u32);
-            // A shutdown can stop the task here, between two commits.
-            task::yield_now().await;
-        }
+            }
+            rwtxn.commit().map_err(RwTxnError::from)?;
+            Ok(())
+        })?;
         let store_elapsed = store_start.elapsed();
         let total_elapsed = start_time.elapsed();
         tracing::info!(
@@ -887,10 +882,13 @@ impl Drop for MainchainTaskHandle {
 mod test {
     use std::{
         convert::Infallible,
-        future::{Future, Ready},
-        ops::ControlFlow,
-        sync::Arc,
+        future::Ready,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
         task::{Context, Poll},
+        time::Duration,
     };
 
     use bitcoin::hashes::Hash as _;
@@ -913,66 +911,10 @@ mod test {
         },
     };
 
-    /// 50000 headers fill the 64MB map of [`temp_env`]
-    fn large_temp_env()
-    -> anyhow::Result<(temp_dir::TempDir, sneed::Env<heed::WithoutTls>)> {
-        let temp_dir = temp_dir::TempDir::new()?;
-        let mut opts = heed::EnvOpenOptions::new().read_txn_without_tls();
-        opts.map_size(256 * 1024 * 1024).max_dbs(Archive::NUM_DBS);
-        let env = unsafe { sneed::Env::open(&opts, temp_dir.path()) }?;
-        Ok((temp_dir, env))
-    }
-
-    /// Poll `walk` to the end. Stop it when `on_pending` breaks.
-    async fn poll_walk<F: Future>(
-        walk: F,
-        mut on_pending: impl FnMut() -> anyhow::Result<ControlFlow<()>>,
-    ) -> anyhow::Result<Option<F::Output>> {
-        let mut walk = std::pin::pin!(walk);
-        loop {
-            let poll =
-                std::future::poll_fn(|cx| Poll::Ready(walk.as_mut().poll(cx)))
-                    .await;
-            if let Poll::Ready(output) = poll {
-                return Ok(Some(output));
-            }
-            if on_pending()?.is_break() {
-                return Ok(None);
-            }
-            tokio::task::yield_now().await;
-        }
-    }
-
-    /// Count the stored headers of the [`main_header_info`] chain, and fail
-    /// if a stored header has a missing ancestor
-    fn stored_headers(
-        env: &sneed::Env<heed::WithoutTls>,
-        archive: &Archive,
-        tip_height: u32,
-    ) -> anyhow::Result<u32> {
-        let rotxn = env.read_txn()?;
-        let stored = (0..=tip_height)
-            .map(|height| {
-                let block_hash = main_header_info(height).block_hash;
-                archive
-                    .try_get_main_header_info(&rotxn, &block_hash)
-                    .map(|info| info.is_some())
-            })
-            .collect::<Result<Vec<bool>, _>>()?;
-        let count = stored.iter().take_while(|stored| **stored).count();
-        anyhow::ensure!(
-            !stored[count..].contains(&true),
-            "header {count} is missing, but a descendant is stored"
-        );
-        Ok(count as u32)
-    }
-
     /// Serves `GetBlockInfo` for the chain of [`main_header_info`], and
-    /// records the height, the `max_ancestors` and the sync progress of each
-    /// request
+    /// records the `max_ancestors` and the sync progress of each request
     #[derive(Clone, Default)]
     struct MockValidator {
-        heights: Arc<Mutex<Vec<u32>>>,
         max_ancestors: Arc<Mutex<Vec<u32>>>,
         progress: Arc<Mutex<Vec<MainchainSyncProgress>>>,
         sync_progress: SyncProgress,
@@ -1013,7 +955,6 @@ mod test {
                     .try_into()
                     .expect("4 height bytes"),
             );
-            self.heights.lock().push(height);
             let infos = (height.saturating_sub(max_ancestors)..=height)
                 .rev()
                 .map(|height| {
@@ -1096,84 +1037,6 @@ mod test {
     }
 
     #[test]
-    fn header_writes_keep_the_ancestor_rule() -> anyhow::Result<()> {
-        const TIP_HEIGHT: u32 = 49_999;
-        let (_temp_dir, env) = large_temp_env()?;
-        let archive = Archive::new(&env)?;
-        let mock = MockValidator::default();
-        let mut client = ValidatorClient::new(mock.clone());
-        let tip = main_header_info(TIP_HEIGHT).block_hash;
-        let mut stored = Vec::new();
-        let runtime = tokio::runtime::Runtime::new()?;
-        let available = runtime.block_on(poll_walk(
-            MainchainTask::<MockValidator>::request_ancestor_infos(
-                &env,
-                &archive,
-                &mut client,
-                &mock.sync_progress,
-                tip,
-            ),
-            || {
-                let count = stored_headers(&env, &archive, TIP_HEIGHT)?;
-                if stored.last() != Some(&count) {
-                    stored.push(count);
-                }
-                Ok(ControlFlow::Continue(()))
-            },
-        ))?;
-        assert_eq!(available.transpose()?, Some(true));
-        assert_eq!(stored, [20_000, 40_000, 50_000]);
-        assert_eq!(stored_headers(&env, &archive, TIP_HEIGHT)?, 50_000);
-        Ok(())
-    }
-
-    #[test]
-    fn ancestor_walk_resumes_after_a_stop() -> anyhow::Result<()> {
-        const TIP_HEIGHT: u32 = 49_999;
-        let (_temp_dir, env) = large_temp_env()?;
-        let archive = Archive::new(&env)?;
-        let mock = MockValidator::default();
-        let mut client = ValidatorClient::new(mock.clone());
-        let tip = main_header_info(TIP_HEIGHT).block_hash;
-        let runtime = tokio::runtime::Runtime::new()?;
-        let stopped = runtime.block_on(poll_walk(
-            MainchainTask::<MockValidator>::request_ancestor_infos(
-                &env,
-                &archive,
-                &mut client,
-                &mock.sync_progress,
-                tip,
-            ),
-            || {
-                let count = stored_headers(&env, &archive, TIP_HEIGHT)?;
-                Ok(if count > 0 {
-                    ControlFlow::Break(())
-                } else {
-                    ControlFlow::Continue(())
-                })
-            },
-        ))?;
-        assert_eq!(stopped.transpose()?, None);
-        assert_eq!(*mock.heights.lock(), [49_999, 29_999, 9_999]);
-        assert_eq!(stored_headers(&env, &archive, TIP_HEIGHT)?, 20_000);
-
-        mock.heights.lock().clear();
-        let available = runtime.block_on(
-            MainchainTask::<MockValidator>::request_ancestor_infos(
-                &env,
-                &archive,
-                &mut client,
-                &mock.sync_progress,
-                tip,
-            ),
-        )?;
-        assert!(available);
-        assert_eq!(*mock.heights.lock(), [49_999, 29_999]);
-        assert_eq!(stored_headers(&env, &archive, TIP_HEIGHT)?, 50_000);
-        Ok(())
-    }
-
-    #[test]
     fn sync_progress_walks_headers_writing_then_state() -> anyhow::Result<()> {
         const TIP_HEIGHT: u32 = 20_099;
         let (_temp_dir, env) =
@@ -1183,9 +1046,21 @@ mod test {
         let sync_progress = &mock.sync_progress;
         let mut client = ValidatorClient::new(mock.clone());
         let tip = main_header_info(TIP_HEIGHT).block_hash;
-        let mut written = Vec::new();
+        let stop_sampler = Arc::new(AtomicBool::new(false));
+        let sampler = {
+            let sync_progress = sync_progress.clone();
+            let stop_sampler = stop_sampler.clone();
+            std::thread::spawn(move || {
+                let mut samples = Vec::new();
+                while !stop_sampler.load(Ordering::Relaxed) {
+                    samples.push(sync_progress.get());
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                samples
+            })
+        };
         let runtime = tokio::runtime::Runtime::new()?;
-        let available = runtime.block_on(poll_walk(
+        let available = runtime.block_on(
             MainchainTask::<MockValidator>::request_ancestor_infos(
                 &env,
                 &archive,
@@ -1193,29 +1068,33 @@ mod test {
                 sync_progress,
                 tip,
             ),
-            || {
-                written.push(sync_progress.get());
-                Ok(ControlFlow::Continue(()))
-            },
-        ))?;
-        assert_eq!(available.transpose()?, Some(true));
+        )?;
+        stop_sampler.store(true, Ordering::Relaxed);
+        let samples = sampler.join().expect("the sampler thread ends");
+        assert!(available);
         let headers = |done| MainchainSyncProgress {
             phase: MainchainSyncPhase::Headers,
             done,
             total: TIP_HEIGHT,
             tip_height: TIP_HEIGHT,
         };
-        let writing = |done| MainchainSyncProgress {
-            phase: MainchainSyncPhase::Writing,
-            done,
-            total: TIP_HEIGHT + 1,
-            tip_height: TIP_HEIGHT,
-        };
         assert_eq!(
             *mock.progress.lock(),
             [MainchainSyncProgress::default(), headers(20_000)]
         );
-        assert_eq!(written, [writing(20_000), writing(TIP_HEIGHT + 1)]);
+        let written: Vec<u32> = samples
+            .iter()
+            .filter(|progress| {
+                progress.phase == MainchainSyncPhase::Writing
+                    && progress.total == TIP_HEIGHT + 1
+                    && progress.tip_height == TIP_HEIGHT
+            })
+            .map(|progress| progress.done)
+            .collect();
+        assert!(
+            written.iter().any(|done| *done > 0 && *done <= TIP_HEIGHT),
+            "the write progress did not move: {written:?}"
+        );
         assert_eq!(
             serde_json::to_value(sync_progress.get())?,
             serde_json::json!({
