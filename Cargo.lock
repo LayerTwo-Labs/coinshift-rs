@@ -1390,7 +1390,7 @@ dependencies = [
 
 [[package]]
 name = "coinshift"
-version = "0.14.6"
+version = "0.14.7"
 dependencies = [
  "anyhow",
  "async-lock",
@@ -1451,7 +1451,7 @@ dependencies = [
 
 [[package]]
 name = "coinshift_app"
-version = "0.14.6"
+version = "0.14.7"
 dependencies = [
  "anyhow",
  "bincode",
@@ -1497,7 +1497,7 @@ dependencies = [
 
 [[package]]
 name = "coinshift_app_cli"
-version = "0.14.6"
+version = "0.14.7"
 dependencies = [
  "anyhow",
  "bitcoin",
@@ -1519,7 +1519,7 @@ dependencies = [
 
 [[package]]
 name = "coinshift_app_rpc_api"
-version = "0.14.6"
+version = "0.14.7"
 dependencies = [
  "bitcoin",
  "coinshift",
@@ -1532,7 +1532,7 @@ dependencies = [
 
 [[package]]
 name = "coinshift_integration_tests"
-version = "0.14.6"
+version = "0.14.7"
 dependencies = [
  "anyhow",
  "bincode",
@@ -7634,7 +7634,7 @@ dependencies = [
 
 [[package]]
 name = "tonic"
-version = "0.14.6"
+version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac2a5518c70fa84342385732db33fb3f44bc4cc748936eb5833d2df34d6445ef"
 dependencies = [
@@ -7663,7 +7663,7 @@ dependencies = [
 
 [[package]]
 name = "tonic-build"
-version = "0.14.6"
+version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c68f61875ac5293cf72e6c8cf0158086428c82c37229e98c840878f1706b0322"
 dependencies = [
@@ -7675,7 +7675,7 @@ dependencies = [
 
 [[package]]
 name = "tonic-health"
-version = "0.14.6"
+version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fcfab99db777fba2802f0dfa861d1628d1ae916fb199d29819941f139ae85082"
 dependencies = [
@@ -7688,7 +7688,7 @@ dependencies = [
 
 [[package]]
 name = "tonic-prost"
-version = "0.14.6"
+version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "50849f68853be452acf590cde0b146665b8d507b3b8af17261df47e02c209ea0"
 dependencies = [
@@ -7699,7 +7699,7 @@ dependencies = [
 
 [[package]]
 name = "tonic-prost-build"
-version = "0.14.6"
+version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "654e5643eff75d7f8c99197ce1440ed19a3474eada74c12bbac488b2cafdae27"
 dependencies = [
