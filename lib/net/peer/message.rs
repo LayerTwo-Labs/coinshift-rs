@@ -16,20 +16,22 @@ pub const MAGIC_BYTES_LEN: usize = 4;
 
 pub type MagicBytes = [u8; MAGIC_BYTES_LEN];
 
+// First 25 bits are the US-TTY Baudot–Murray code for "SHIFT".
+// The least significant bits of the 4th byte encode the network
+// identifier.
 pub const fn magic_bytes(network: Network) -> MagicBytes {
-    // First 4 bytes are the US-TTY (LSB Right) Baudot–Murray code for "SHIFT".
-    // Rightmost bits of the 4th byte is the network identifier.
-    let b0 = 0b0010_0001; // S(10100) - lower 5 bits: 10100, upper 3 bits from H: 001
-    let b1 = 0b1000_1001; // H(00101) upper 2 bits + I(00110) full + F(01101) lower 1 bit
-    let b2 = 0b0000_1011; // F(01101) upper 4 bits + T(10000) lower 4 bits
-    let mut b3 = 0b0000_0001; // T(10000) upper 1 bit
-
-    match network {
-        Network::Regtest => (),
-        Network::Signet => b3 |= 0b0000_0001,
-        Network::Alphanet => b3 |= 0b0000_0011,
+    const PREFIX: [u8; 4] =
+        [0b0010_1101, 0b0000_1100, 0b1101_1000, 0b0000_0000];
+    const fn network_identifier(network: Network) -> u8 {
+        match network {
+            Network::Regtest => 0b0000_0000,
+            Network::Signet => 0b0000_0001,
+            Network::Alphanet => 0b0000_0011,
+        }
     }
-    [b0, b1, b2, b3]
+    let mut res = PREFIX;
+    *res.last_mut().unwrap() |= network_identifier(network);
+    res
 }
 
 #[derive(BorshSerialize, Clone, Debug, Deserialize, Serialize)]
@@ -300,5 +302,36 @@ impl ResponseMessage {
         } else {
             std::fmt::Debug::fmt(headers, f)
         }
+    }
+}
+
+#[cfg(test)]
+mod network_tests {
+    use std::collections::HashSet;
+
+    use super::{MagicBytes, Network, magic_bytes};
+
+    const EXPECTED: [(Network, MagicBytes); 3] = [
+        (Network::Regtest, [0x2d, 0x0c, 0xd8, 0x00]),
+        (Network::Signet, [0x2d, 0x0c, 0xd8, 0x01]),
+        (Network::Alphanet, [0x2d, 0x0c, 0xd8, 0x03]),
+    ];
+
+    #[test]
+    fn network_magic_matches_the_baudot_encoding() {
+        for (network, expected) in EXPECTED {
+            assert_eq!(magic_bytes(network), expected, "{network:?}");
+        }
+    }
+
+    /// The old prefix put the last bit of "T" in bit 0, the same bit that
+    /// Signet sets, so Regtest and Signet shared one value.
+    #[test]
+    fn network_magic_keeps_each_network_separate() {
+        let magics: HashSet<MagicBytes> = EXPECTED
+            .iter()
+            .map(|(network, _)| magic_bytes(*network))
+            .collect();
+        assert_eq!(magics.len(), EXPECTED.len());
     }
 }
