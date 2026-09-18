@@ -1,3 +1,5 @@
+//! Sidechain state as of the current sidechain tip
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use bincode;
@@ -17,11 +19,12 @@ use crate::{
     authorization::Authorization,
     types::{
         Accumulator, Address, AmountOverflowError, AmountUnderflowError,
-        Authorized, AuthorizedTransaction, BlockHash, Body, FilledTransaction,
-        GetAddress, GetValue, Header, InPoint, M6id, MerkleRoot, OutPoint,
-        OutPointKey, Output, ParentChainType, PointedOutput, SpentOutput, Swap,
-        SwapId, SwapReservation, SwapState, SwapTxId, Transaction, TxData,
-        VERSION, Verify, Version, WithdrawalBundle, WithdrawalBundleStatus,
+        Authorized, AuthorizedTransaction, BlockHash, BlockIndexEvents, Body,
+        FilledTransaction, GetAddress, GetValue, Header, InPoint, M6id,
+        MerkleRoot, OutPoint, OutPointKey, Output, ParentChainType,
+        PointedOutput, PointedOutputRef, SpentOutput, Swap, SwapId,
+        SwapReservation, SwapState, SwapTxId, Transaction, TxData, VERSION,
+        Verify, Version, WithdrawalBundle, WithdrawalBundleStatus,
         proto::mainchain::TwoWayPegData,
     },
     util::Watchable,
@@ -116,6 +119,10 @@ pub struct State {
         SerdeBincode<M6id>,
         SerdeBincode<(WithdrawalBundleInfo, RollBack<WithdrawalBundleStatus>)>,
     >,
+    /// Coin movements that no block body carries, keyed by the height that
+    /// applied them
+    pub block_index_events:
+        DatabaseUnique<SerdeBincode<u32>, SerdeBincode<BlockIndexEvents>>,
     /// deposit blocks and the height at which they were applied, keyed sequentially
     pub deposit_blocks: DatabaseUnique<
         SerdeBincode<u32>,
@@ -159,9 +166,9 @@ pub struct State {
 }
 
 impl State {
-    pub const NUM_DBS: u32 = 17;
+    pub const NUM_DBS: u32 = 18;
 
-    pub fn new(env: &sneed::Env) -> Result<Self, Error> {
+    pub fn new<Tls>(env: &sneed::Env<Tls>) -> Result<Self, Error> {
         let mut rwtxn = env.write_txn().map_err(EnvError::from)?;
         let tip = DatabaseUnique::create(env, &mut rwtxn, "tip")
             .map_err(EnvError::from)?;
@@ -185,6 +192,9 @@ impl State {
         .map_err(EnvError::from)?;
         let withdrawal_bundles =
             DatabaseUnique::create(env, &mut rwtxn, "withdrawal_bundles")
+                .map_err(EnvError::from)?;
+        let block_index_events =
+            DatabaseUnique::create(env, &mut rwtxn, "block_index_events")
                 .map_err(EnvError::from)?;
         let deposit_blocks =
             DatabaseUnique::create(env, &mut rwtxn, "deposit_blocks")
@@ -235,6 +245,7 @@ impl State {
             pending_withdrawal_bundle,
             latest_failed_withdrawal_bundle,
             withdrawal_bundles,
+            block_index_events,
             deposit_blocks,
             withdrawal_bundle_event_blocks,
             utreexo_accumulator,
@@ -246,6 +257,19 @@ impl State {
             swap_reservations,
             _version: version,
         })
+    }
+
+    /// Coin movements that the block at this height applied outside its body.
+    pub fn get_block_index_events(
+        &self,
+        rotxn: &RoTxn,
+        height: u32,
+    ) -> Result<BlockIndexEvents, Error> {
+        let events = self
+            .block_index_events
+            .try_get(rotxn, &height)?
+            .unwrap_or_default();
+        Ok(events)
     }
 
     pub fn try_get_tip(
@@ -392,10 +416,30 @@ impl State {
             .map_err(DbError::from)?)
     }
 
+    fn validate_utxo_hashes(
+        transaction: &FilledTransaction,
+    ) -> Result<(), Error> {
+        for (outpoint, utxo_hash, output) in transaction.inputs() {
+            let outpoint = *outpoint;
+            let utxo_hash = *utxo_hash;
+            let computed_utxo_hash =
+                crate::types::hash(&PointedOutputRef { outpoint, output });
+            if utxo_hash != computed_utxo_hash {
+                return Err(Error::UtxoHashMismatch {
+                    computed: computed_utxo_hash,
+                    outpoint,
+                    input_hash: utxo_hash,
+                });
+            }
+        }
+        Ok(())
+    }
+
     pub fn validate_filled_transaction(
         &self,
         transaction: &FilledTransaction,
     ) -> Result<bitcoin::Amount, Error> {
+        let () = Self::validate_utxo_hashes(transaction)?;
         let mut value_in = bitcoin::Amount::ZERO;
         let mut value_out = bitcoin::Amount::ZERO;
         for utxo in &transaction.spent_utxos {
@@ -581,7 +625,7 @@ impl State {
                         .ok_or(AmountOverflowError)?;
                 }
                 if let InPoint::Withdrawal { .. } = spent_output.inpoint {
-                    total_withdrawal_stxo_value = total_deposit_stxo_value
+                    total_withdrawal_stxo_value = total_withdrawal_stxo_value
                         .checked_add(spent_output.output.get_value())
                         .ok_or(AmountOverflowError)?;
                 }
@@ -2119,7 +2163,7 @@ mod tests {
     use super::*;
     use crate::types::{Address, Output, OutputContent, Transaction};
 
-    fn test_state() -> (temp_dir::TempDir, Env, State) {
+    pub(super) fn test_state() -> (temp_dir::TempDir, Env, State) {
         let dir = temp_dir::TempDir::new().unwrap();
         let mut opts = heed::EnvOpenOptions::new();
         opts.map_size(10 * 1024 * 1024).max_dbs(State::NUM_DBS);
@@ -2159,5 +2203,147 @@ mod tests {
             matches!(result, Err(Error::SpendWithdrawalOutput)),
             "spending a withdrawal output should be rejected, got {result:?}"
         );
+    }
+
+    #[test]
+    fn block_index_events_round_trip() -> anyhow::Result<()> {
+        use bitcoin::hashes::Hash as _;
+
+        let (_dir, env, state) = test_state();
+        let deposit_outpoint = |byte: u8| {
+            OutPoint::Deposit(bitcoin::OutPoint {
+                txid: bitcoin::Txid::from_byte_array([byte; 32]),
+                vout: 0,
+            })
+        };
+        let events = BlockIndexEvents {
+            deposits: vec![(
+                deposit_outpoint(1),
+                Output {
+                    address: Address([1u8; 20]),
+                    content: OutputContent::Value(bitcoin::Amount::from_sat(
+                        5000,
+                    )),
+                },
+            )],
+            bundle_spends: vec![(
+                deposit_outpoint(2),
+                M6id(bitcoin::Txid::from_byte_array([3; 32])),
+            )],
+        };
+        {
+            let mut rwtxn = env.write_txn()?;
+            state.block_index_events.put(&mut rwtxn, &7, &events)?;
+            rwtxn.commit()?;
+        }
+        {
+            let rotxn = env.read_txn()?;
+            anyhow::ensure!(state.get_block_index_events(&rotxn, 7)? == events);
+            // A height that moved nothing outside its body reads as empty.
+            anyhow::ensure!(
+                state.get_block_index_events(&rotxn, 8)?.is_empty()
+            );
+        }
+
+        // A disconnect drops the events, so a reorg leaves nothing behind for
+        // the block that takes the height.
+        {
+            let mut rwtxn = env.write_txn()?;
+            state.block_index_events.delete(&mut rwtxn, &7)?;
+            rwtxn.commit()?;
+        }
+        let rotxn = env.read_txn()?;
+        anyhow::ensure!(state.get_block_index_events(&rotxn, 7)?.is_empty());
+
+        // A height that moved nothing writes no row, so deleting it again is
+        // still safe.
+        {
+            let mut rwtxn = env.write_txn()?;
+            state.block_index_events.delete(&mut rwtxn, &8)?;
+            rwtxn.commit()?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn sidechain_wealth() -> anyhow::Result<()> {
+        use std::str::FromStr;
+
+        use bitcoin::hashes::Hash as _;
+
+        let value_output = |sats: u64| Output {
+            address: Address::ALL_ZEROS,
+            content: OutputContent::Value(bitcoin::Amount::from_sat(sats)),
+        };
+        let (_dir, env, state) = test_state();
+        {
+            let mut rwtxn = env.write_txn()?;
+
+            // One unspent DEPOSIT UTXO: 50 sats.
+            let deposit_utxo_op = OutPoint::Deposit(bitcoin::OutPoint {
+                txid: bitcoin::Txid::from_str(
+                    "0000000000000000000000000000000000000000000000000000000000000001",
+                )?,
+                vout: 0,
+            });
+            state.utxos.put(
+                &mut rwtxn,
+                &OutPointKey::from(&deposit_utxo_op),
+                &value_output(50),
+            )?;
+
+            // Two spent DEPOSIT STXOs: 100 + 100 sats.
+            for (i, sats) in [(2u8, 100u64), (3u8, 100u64)] {
+                let op = OutPoint::Deposit(bitcoin::OutPoint {
+                    txid: bitcoin::Txid::from_byte_array([i; 32]),
+                    vout: 0,
+                });
+                let stxo = SpentOutput {
+                    output: value_output(sats),
+                    inpoint: InPoint::Regular {
+                        txid: [i; 32].into(),
+                        vin: 0,
+                    },
+                };
+                state
+                    .stxos
+                    .put(&mut rwtxn, &OutPointKey::from(&op), &stxo)?;
+            }
+
+            // Two WITHDRAWAL STXOs: 10 + 10 sats
+            for (i, sats) in [(4u8, 10u64), (5u8, 10u64)] {
+                let op = OutPoint::Regular {
+                    txid: [i; 32].into(),
+                    vout: 0,
+                };
+                let stxo = SpentOutput {
+                    output: value_output(sats),
+                    inpoint: InPoint::Withdrawal {
+                        m6id: crate::types::M6id(
+                            bitcoin::Txid::from_byte_array([i; 32]),
+                        ),
+                    },
+                };
+                state
+                    .stxos
+                    .put(&mut rwtxn, &OutPointKey::from(&op), &stxo)?;
+            }
+
+            rwtxn.commit()?;
+        }
+
+        let rotxn = env.read_txn()?;
+        let sidechain_wealth = state.sidechain_wealth(&rotxn)?;
+
+        // Correct value: deposit UTXO 50 + deposit STXOs 200 - withdrawal
+        // STXOs 20 = 230 sats.
+        let expected_sidechain_wealth = bitcoin::Amount::from_sat(230);
+        anyhow::ensure!(
+            sidechain_wealth == expected_sidechain_wealth,
+            "Expected sidechain wealth ({}), but computed ({})",
+            expected_sidechain_wealth,
+            sidechain_wealth,
+        );
+        Ok(())
     }
 }

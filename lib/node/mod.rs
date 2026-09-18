@@ -7,21 +7,23 @@ use std::{
 
 use bitcoin::amount::CheckedSum;
 use fallible_iterator::FallibleIterator;
-use futures::{Stream, future::BoxFuture};
-use sneed::{DbError, Env, EnvError, RwTxnError, env};
+use futures::Stream;
+use sneed::{DbError, Env, EnvError, RoTxn, RwTxnError, env};
 use tokio::sync::Mutex;
 use tonic::transport::Channel;
 
 use crate::{
     archive::{self, Archive},
     mempool::{self, MemPool},
-    net::{self, Net, Peer},
+    net::{self, DialSeedsHandle, Net, Peer},
     state::{self, State},
     types::{
         Accumulator, Address, AmountOverflowError, AmountUnderflowError,
-        Authorized, AuthorizedTransaction, BlockHash, BmmResult, Body,
-        FilledTransaction, GetValue, Header, Network, OutPoint, OutPointKey,
-        Output, SpentOutput, SwapId, Tip, Transaction, Txid, WithdrawalBundle,
+        Authorized, AuthorizedTransaction, BlockHash, BlockIndexEvents,
+        BmmResult, Body, FilledTransaction, GetValue, Header,
+        MainchainSyncProgress, Network, OutPoint, OutPointKey, Output,
+        SpentOutput, SwapId, Tip, Transaction, Txid, WithdrawalBundle,
+        net::SeedAddress,
         proto::{self, mainchain},
     },
     util::Watchable,
@@ -63,6 +65,8 @@ pub enum Error {
     Net(#[from] Box<net::Error>),
     #[error("net task error")]
     NetTask(#[source] Box<net_task::Error>),
+    #[error("block {block_hash} is not in the current chain")]
+    NotInCurrentChain { block_hash: BlockHash },
     #[error("No CUSF mainchain wallet client")]
     NoCusfMainchainWalletClient,
     #[error("peer info stream closed")]
@@ -100,12 +104,15 @@ impl From<state::Error> for Error {
 /// Configuration for constructing a [`Node`].
 #[derive(Clone)]
 pub struct NodeConfig<MainchainTransport = Channel> {
+    pub add_peers: HashSet<SeedAddress>,
     pub datadir: std::path::PathBuf,
     pub bind_addr: SocketAddr,
     pub cusf_mainchain: mainchain::ValidatorClient<MainchainTransport>,
     pub cusf_mainchain_wallet:
         Option<mainchain::WalletClient<MainchainTransport>>,
+    pub magic_bytes_override: Option<crate::net::peer_message::MagicBytes>,
     pub network: Network,
+    pub server_names: HashSet<String>,
     pub wallet: Option<Arc<crate::wallet::Wallet>>,
     pub l1_rpc_config_path: Option<std::path::PathBuf>,
 }
@@ -113,12 +120,13 @@ pub struct NodeConfig<MainchainTransport = Channel> {
 #[derive(Clone)]
 pub struct Node<MainchainTransport = Channel> {
     archive: Archive,
-    cusf_mainchain: Arc<Mutex<mainchain::ValidatorClient<MainchainTransport>>>,
+    cusf_mainchain: mainchain::ValidatorClient<MainchainTransport>,
     cusf_mainchain_wallet:
         Option<Arc<Mutex<mainchain::WalletClient<MainchainTransport>>>>,
     /// Swap IDs we created that are still pending (mempool). Only creator can cancel those.
     created_pending_swap_ids: Arc<StdMutex<HashSet<SwapId>>>,
-    env: sneed::Env,
+    _dial_seeds: Arc<DialSeedsHandle>,
+    env: sneed::Env<heed::WithoutTls>,
     mainchain_task: MainchainTaskHandle,
     mempool: MemPool,
     net: Net,
@@ -149,14 +157,15 @@ where
         tracing::debug!("Node::new: Database directory created/verified");
         let env = {
             use heed::EnvFlags;
-            let mut env_open_opts = heed::EnvOpenOptions::new();
+            let mut env_open_opts =
+                heed::EnvOpenOptions::new().read_txn_without_tls();
             env_open_opts
                 .map_size(128 * 1024 * 1024 * 1024) // 128 GB
                 .max_dbs(
-                    State::NUM_DBS
-                        + Archive::NUM_DBS
+                    Archive::NUM_DBS
                         + MemPool::NUM_DBS
-                        + Net::NUM_DBS,
+                        + Net::NUM_DBS
+                        + State::NUM_DBS,
                 );
             // Apply LMDB "fast" flags consistent with our benchmark setup:
             // - WRITE_MAP lets us write directly into the memory map instead of
@@ -177,8 +186,7 @@ where
                 | EnvFlags::MAP_ASYNC
                 | EnvFlags::NO_SYNC
                 | EnvFlags::NO_META_SYNC
-                | EnvFlags::NO_READ_AHEAD
-                | EnvFlags::NO_TLS;
+                | EnvFlags::NO_READ_AHEAD;
             unsafe { env_open_opts.flags(fast_flags) };
             tracing::debug!("Node::new: Opening database environment");
             let env = unsafe { Env::open(&env_open_opts, &env_path) }
@@ -201,7 +209,7 @@ where
         let mempool = MemPool::new(&env)?;
         tracing::debug!("Node::new: MemPool created");
         tracing::info!("Node::new: Creating MainchainTaskHandle");
-        let (mainchain_task, mainchain_task_response_rx) =
+        let (mainchain_task, mainchain_task_event_rx) =
             MainchainTaskHandle::new(
                 env.clone(),
                 archive.clone(),
@@ -209,12 +217,16 @@ where
             );
         tracing::info!("Node::new: MainchainTaskHandle created");
         tracing::info!(bind_addr = %config.bind_addr, "Node::new: Creating Net");
-        let (net, peer_info_rx) = Net::new(
+        let (net, peer_info_rx, dial_seeds) = Net::new(
+            runtime.handle(),
             &env,
             archive.clone(),
+            config.magic_bytes_override,
             config.network,
             state.clone(),
             config.bind_addr,
+            config.add_peers,
+            config.server_names,
         )?;
         tracing::info!("Node::new: Net created");
         tracing::info!("Node::new: Creating NetTaskHandle");
@@ -224,7 +236,7 @@ where
             env.clone(),
             archive.clone(),
             mainchain_task.clone(),
-            mainchain_task_response_rx,
+            mainchain_task_event_rx,
             mempool.clone(),
             net.clone(),
             peer_info_rx,
@@ -284,9 +296,10 @@ where
         );
         Ok(Self {
             archive,
-            cusf_mainchain: Arc::new(Mutex::new(config.cusf_mainchain)),
+            cusf_mainchain: config.cusf_mainchain,
             cusf_mainchain_wallet,
             created_pending_swap_ids: Arc::new(StdMutex::new(HashSet::new())),
+            _dial_seeds: Arc::new(dial_seeds),
             env,
             mainchain_task,
             mempool,
@@ -319,7 +332,7 @@ where
         }
     }
 
-    pub fn env(&self) -> &Env {
+    pub fn env(&self) -> &Env<heed::WithoutTls> {
         &self.env
     }
 
@@ -327,19 +340,47 @@ where
         &self.archive
     }
 
-    /// Borrow the CUSF mainchain client, and execute the provided future.
-    /// The CUSF mainchain client will be locked while the future is running.
-    pub async fn with_cusf_mainchain<F, Output>(&self, f: F) -> Output
+    /// Borrow the CUSF mainchain client
+    #[inline(always)]
+    pub fn with_cusf_mainchain<F, Output>(&self, f: F) -> Output
     where
-        F: for<'cusf_mainchain> FnOnce(
-            &'cusf_mainchain mut mainchain::ValidatorClient<MainchainTransport>,
-        )
-            -> BoxFuture<'cusf_mainchain, Output>,
+        F: FnOnce(&mainchain::ValidatorClient<MainchainTransport>) -> Output,
     {
-        let mut cusf_mainchain_lock = self.cusf_mainchain.lock().await;
-        let res = f(&mut cusf_mainchain_lock).await;
-        drop(cusf_mainchain_lock);
-        res
+        f(&self.cusf_mainchain)
+    }
+
+    /// Invalidate a block.
+    /// This will delete the header and body, and mark invalid, the specified
+    /// block and any descendants.
+    /// The node will re-org to a previous valid block in the active chain.
+    pub fn invalidate_block(&self, block_hash: BlockHash) -> Result<(), Error> {
+        let mut rwtxn = self.env.write_txn().map_err(EnvError::from)?;
+        let Some(header) = self.archive.try_get_header(&rwtxn, block_hash)?
+        else {
+            return Ok(());
+        };
+        // check if the specified block is in the active chain
+        let tip = self.state.try_get_tip(&rwtxn)?;
+        let in_active_chain = if let Some(tip) = tip {
+            self.archive.is_descendant(&rwtxn, block_hash, tip)?
+        } else {
+            false
+        };
+        // re-org if necessary
+        if in_active_chain {
+            while self.state.try_get_tip(&rwtxn)? != header.prev_side_hash {
+                net_task::disconnect_tip_(
+                    &mut rwtxn,
+                    &self.archive,
+                    &self.mempool,
+                    &self.state,
+                )?;
+            }
+        }
+        // invalidate within archive
+        let () = self.archive.invalidate_block(&mut rwtxn, block_hash)?;
+        rwtxn.commit().map_err(RwTxnError::from)?;
+        Ok(())
     }
 
     pub fn try_get_height(&self) -> Result<Option<u32>, Error> {
@@ -352,12 +393,15 @@ where
         Ok(self.state.try_get_tip(&rotxn)?)
     }
 
+    /// Regenerate proofs and submit transaction
     pub fn submit_transaction(
         &self,
-        transaction: AuthorizedTransaction,
+        mut transaction: AuthorizedTransaction,
     ) -> Result<(), Error> {
         {
             let mut rwtxn = self.env.write_txn().map_err(EnvError::from)?;
+            self.state
+                .regenerate_proof(&rwtxn, &mut transaction.transaction)?;
 
             // Try to validate the transaction
             match self.state.validate_transaction(&rwtxn, &transaction) {
@@ -517,6 +561,43 @@ where
         Ok(self.archive.get_header(&txn, block_hash)?)
     }
 
+    /// Get the coin movements that the block applied outside its body
+    pub fn get_block_index_events(
+        &self,
+        block_hash: BlockHash,
+    ) -> Result<BlockIndexEvents, Error> {
+        let rotxn = self.env.read_txn().map_err(EnvError::from)?;
+        let height = self.archive.get_height(&rotxn, block_hash)?;
+        // The events are keyed by height, so a block off the current chain
+        // would read another block's events.
+        if self.try_get_block_hash_read(&rotxn, height)? != Some(block_hash) {
+            return Err(Error::NotInCurrentChain { block_hash });
+        }
+        let events = self.state.get_block_index_events(&rotxn, height)?;
+        Ok(events)
+    }
+
+    fn try_get_block_hash_read(
+        &self,
+        rotxn: &RoTxn,
+        height: u32,
+    ) -> Result<Option<BlockHash>, Error> {
+        let Some(tip) = self.state.try_get_tip(rotxn)? else {
+            return Ok(None);
+        };
+        let Some(tip_height) = self.state.try_get_height(rotxn)? else {
+            return Ok(None);
+        };
+        if tip_height >= height {
+            self.archive
+                .ancestors(rotxn, tip)
+                .nth((tip_height - height) as usize)
+                .map_err(Error::from)
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Get the block hash at the specified height in the current chain,
     /// if it exists
     pub fn try_get_block_hash(
@@ -524,20 +605,7 @@ where
         height: u32,
     ) -> Result<Option<BlockHash>, Error> {
         let rotxn = self.env.read_txn().map_err(EnvError::from)?;
-        let Some(tip) = self.state.try_get_tip(&rotxn)? else {
-            return Ok(None);
-        };
-        let Some(tip_height) = self.state.try_get_height(&rotxn)? else {
-            return Ok(None);
-        };
-        if tip_height >= height {
-            self.archive
-                .ancestors(&rotxn, tip)
-                .nth((tip_height - height) as usize)
-                .map_err(Error::from)
-        } else {
-            Ok(None)
-        }
+        self.try_get_block_hash_read(&rotxn, height)
     }
 
     pub fn try_get_body(
@@ -680,7 +748,7 @@ where
 
     pub fn connect_peer(&self, addr: SocketAddr) -> Result<(), Error> {
         self.net
-            .connect_peer(self.env.clone(), addr)
+            .connect_peer(self.env.clone(), addr.into())
             .map_err(Error::from)
     }
 
@@ -693,6 +761,11 @@ where
 
     pub fn get_active_peers(&self) -> Vec<Peer> {
         self.net.get_active_peers()
+    }
+
+    /// Get the progress of the startup sync with the mainchain
+    pub fn mainchain_sync_progress(&self) -> MainchainSyncProgress {
+        self.mainchain_task.sync_progress()
     }
 
     pub async fn request_mainchain_ancestor_infos(
@@ -720,10 +793,6 @@ where
         header: &Header,
         body: &Body,
     ) -> Result<bool, Error> {
-        let Some(cusf_mainchain_wallet) = self.cusf_mainchain_wallet.as_ref()
-        else {
-            return Err(Error::NoCusfMainchainWalletClient);
-        };
         let block_hash = header.hash();
         // Store the header, if ancestors exist
         if let Some(parent) = header.prev_side_hash
@@ -757,16 +826,18 @@ where
         // Check BMM
         {
             let rotxn = self.env.read_txn().map_err(EnvError::from)?;
-            if self.archive.get_bmm_result(
+            match self.archive.get_bmm_result(
                 &rotxn,
                 block_hash,
                 main_block_hash,
-            )? == BmmResult::Failed
-            {
-                tracing::error!(%block_hash,
-                    "Rejecting block {block_hash} due to failing BMM verification",
-                );
-                return Ok(false);
+            )? {
+                BmmResult::Verified => (),
+                BmmResult::Failed => {
+                    tracing::error!(%block_hash,
+                        "Rejecting block {block_hash} due to failing BMM verification",
+                    );
+                    return Ok(false);
+                }
             }
         }
         // Check that ancestor bodies exist, and store body
@@ -809,14 +880,18 @@ where
         };
         let rotxn = self.env.read_txn().map_err(EnvError::from)?;
         let bundle = self.state.get_pending_withdrawal_bundle(&rotxn)?;
-        if let Some((bundle, _)) = bundle {
+        if let Some((bundle, _)) = bundle
+            && let Some(cusf_mainchain_wallet) =
+                self.cusf_mainchain_wallet.as_ref()
+        {
             let m6id = bundle.compute_m6id();
-            let mut cusf_mainchain_wallet_lock =
-                cusf_mainchain_wallet.lock().await;
-            let () = cusf_mainchain_wallet_lock
-                .broadcast_withdrawal_bundle(bundle.tx())
-                .await?;
-            drop(cusf_mainchain_wallet_lock);
+            {
+                let mut cusf_mainchain_wallet_lock =
+                    cusf_mainchain_wallet.lock().await;
+                let () = cusf_mainchain_wallet_lock
+                    .broadcast_withdrawal_bundle(bundle.tx())
+                    .await?;
+            }
             tracing::trace!(%m6id, "Broadcast withdrawal bundle");
         }
         Ok(true)

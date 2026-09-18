@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     ops::Deref,
     path::PathBuf,
@@ -6,7 +7,7 @@ use std::{
 };
 
 use clap::{Arg, Parser, Subcommand};
-use coinshift::types::{Network, THIS_SIDECHAIN};
+use coinshift::types::{Network, THIS_SIDECHAIN, net::SeedAddress};
 
 use crate::util::saturating_pred_level;
 
@@ -110,6 +111,11 @@ pub(super) enum AppSubcommand {
     },
 }
 
+#[inline(always)]
+fn parse_network_magic(s: &str) -> Result<[u8; 4], hex::FromHexError> {
+    <[u8; 4] as hex::FromHex>::from_hex(s)
+}
+
 #[derive(Clone, Debug, Parser)]
 #[command(author, version, about, long_about = None)]
 pub(super) struct Cli {
@@ -121,6 +127,11 @@ pub(super) struct Cli {
 
 #[derive(Clone, Debug, Parser)]
 pub(super) struct RunArgs {
+    /// Peer to dial at startup, as `host:port` or `host`. The host can be a
+    /// host name or an IP address. Use this option one time for each peer.
+    /// The node also dials the seed peers of the network.
+    #[arg(long = "add-peer")]
+    add_peers: Vec<SeedAddress>,
     /// Data directory for storing blockchain and wallet data
     #[command(flatten)]
     datadir: DatadirArg,
@@ -156,9 +167,16 @@ pub(super) struct RunArgs {
     /// Set the network. Setting this may affect other defaults.
     #[arg(default_value_t, long, value_enum)]
     network: Network,
+    /// Manually provide the network magic bytes
+    #[arg(long, value_parser = parse_network_magic)]
+    network_magic: Option<[u8; 4]>,
     /// Socket address to host the RPC server
     #[arg(default_value_t = DEFAULT_RPC_ADDR, long, short)]
     rpc_addr: SocketAddr,
+    /// Host name that the P2P server certificate holds, in addition to
+    /// `localhost`. Use this option one time for each host name.
+    #[arg(long = "server-name")]
+    server_names: Vec<String>,
 
     /// Enable Bitcoin Signet in L1 config before start (predefined: localhost:38332)
     #[arg(long)]
@@ -170,6 +188,7 @@ pub(super) struct RunArgs {
 
 #[derive(Clone, Debug)]
 pub struct Config {
+    pub add_peers: HashSet<SeedAddress>,
     pub datadir: PathBuf,
     pub headless: bool,
     /// If None, logging to file should be disabled.
@@ -180,7 +199,10 @@ pub struct Config {
     pub mnemonic_seed_phrase_path: Option<PathBuf>,
     pub net_addr: SocketAddr,
     pub network: Network,
+    pub network_magic_override:
+        Option<coinshift::net::peer_message::MagicBytes>,
     pub rpc_addr: SocketAddr,
+    pub server_names: HashSet<String>,
 }
 
 impl RunArgs {
@@ -207,6 +229,7 @@ impl RunArgs {
             saturating_pred_level(self.log_level)
         };
         Ok(Config {
+            add_peers: HashSet::from_iter(self.add_peers),
             datadir: self.datadir.0,
             headless: self.headless,
             log_dir,
@@ -216,7 +239,9 @@ impl RunArgs {
             mnemonic_seed_phrase_path: self.mnemonic_seed_phrase_path,
             net_addr: self.net_addr,
             network: self.network,
+            network_magic_override: self.network_magic,
             rpc_addr: self.rpc_addr,
+            server_names: HashSet::from_iter(self.server_names),
         })
     }
 }

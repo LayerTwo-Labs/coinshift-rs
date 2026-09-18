@@ -4,6 +4,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    time::Duration,
 };
 
 use coinshift::{
@@ -51,11 +52,6 @@ pub enum Error {
     NoCusfMainchainWalletClient,
     #[error("Failed to request mainchain ancestor info for {block_hash}")]
     RequestMainchainAncestorInfos { block_hash: bitcoin::BlockHash },
-    #[error("Unable to verify existence of CUSF mainchain service(s) at {url}")]
-    VerifyMainchainServices {
-        url: Box<url::Url>,
-        source: Box<tonic::Status>,
-    },
     #[error("wallet error")]
     Wallet(#[from] wallet::Error),
     #[error("L1 config validation failed: {0}")]
@@ -158,8 +154,16 @@ impl App {
         // Track whether we've successfully recovered addresses.
         // If the chain was empty at startup, we need to recover
         // once blocks start arriving.
-        let mut needs_recovery = wallet.get_addresses()?.is_empty()
-            && wallet.has_seed().unwrap_or(false);
+        let mut needs_recovery = match wallet.get_addresses() {
+            Ok(addresses) => {
+                addresses.is_empty() && wallet.has_seed().unwrap_or(false)
+            }
+            Err(err) => {
+                let err = anyhow::Error::from(err);
+                tracing::warn!("Failed to read wallet addresses: {err:#}");
+                false
+            }
+        };
         while let Some(()) = state_changes.next().await {
             if needs_recovery {
                 match recover_wallet_addresses(&node, &wallet) {
@@ -202,7 +206,6 @@ impl App {
         node: Arc<Node>,
         mainchain_reachable: Arc<AtomicBool>,
     ) -> Result<(), Error> {
-        use futures::FutureExt;
         use std::time::Duration;
         const SYNC_INTERVAL: Duration = Duration::from_secs(10);
 
@@ -217,16 +220,11 @@ impl App {
 
             // Get current L1 chain tip (mainchain must be up for mining and block sync)
             let l1_tip_hash = match node
-                .with_cusf_mainchain(|client| {
-                    client
-                        .get_chain_tip()
-                        .map(|res| {
-                            res.map(|tip| tip.block_hash)
-                                .map_err(Error::CusfMainchain)
-                        })
-                        .boxed()
-                })
+                .with_cusf_mainchain(|client| client.clone())
+                .get_chain_tip()
                 .await
+                .map(|tip| tip.block_hash)
+                .map_err(Error::CusfMainchain)
             {
                 Ok(hash) => {
                     mainchain_reachable.store(true, Ordering::SeqCst);
@@ -650,6 +648,37 @@ impl App {
         Ok(has_wallet_service)
     }
 
+    /// Ask the mainchain node for its services until it answers. The node may
+    /// start before the mainchain node. Returns true when the mainchain node
+    /// also serves a wallet.
+    async fn wait_for_proto_support(
+        transport: tonic::transport::channel::Channel,
+        url: &url::Url,
+    ) -> bool {
+        // One check must not hang, so each attempt keeps its own deadline.
+        const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
+        const RETRY_DELAY: Duration = Duration::from_secs(5);
+
+        loop {
+            match tokio::time::timeout(
+                ATTEMPT_TIMEOUT,
+                Self::check_proto_support(transport.clone()),
+            )
+            .await
+            {
+                Ok(Ok(has_wallet_service)) => return has_wallet_service,
+                Ok(Err(status)) => tracing::warn!(
+                    %url, %status, "Waiting for CUSF mainchain service(s)"
+                ),
+                Err(_elapsed) => tracing::warn!(
+                    %url,
+                    "Waiting for CUSF mainchain service(s): the check timed out"
+                ),
+            }
+            tokio::time::sleep(RETRY_DELAY).await;
+        }
+    }
+
     pub fn new(config: &Config) -> Result<Self, Error> {
         // Node launches some tokio tasks for p2p networking, that is why we need a tokio runtime
         // here.
@@ -688,31 +717,18 @@ impl App {
         .unwrap()
         .concurrency_limit(256)
         .connect_lazy();
-        // Add a timeout to the connection check so the GUI can start even if mainchain isn't synced
-        const CONNECTION_TIMEOUT: std::time::Duration =
-            std::time::Duration::from_secs(5);
-        let (cusf_mainchain, cusf_mainchain_wallet) = if runtime
-            .block_on(tokio::time::timeout(
-                CONNECTION_TIMEOUT,
-                Self::check_proto_support(transport.clone()),
-            ))
-            .map_err(|_| Error::VerifyMainchainServices {
-                url: Box::new(config.mainchain_grpc_url.clone()),
-                source: Box::new(tonic::Status::deadline_exceeded(
-                    "Connection check timed out after 5 seconds",
-                )),
-            })?
-            .map_err(|err| Error::VerifyMainchainServices {
-                url: Box::new(config.mainchain_grpc_url.clone()),
-                source: Box::new(err),
-            })? {
-            (
-                mainchain::ValidatorClient::new(transport.clone()),
-                Some(mainchain::WalletClient::new(transport)),
-            )
-        } else {
-            (mainchain::ValidatorClient::new(transport), None)
-        };
+        let (cusf_mainchain, cusf_mainchain_wallet) =
+            if runtime.block_on(Self::wait_for_proto_support(
+                transport.clone(),
+                &config.mainchain_grpc_url,
+            )) {
+                (
+                    mainchain::ValidatorClient::new(transport.clone()),
+                    Some(mainchain::WalletClient::new(transport)),
+                )
+            } else {
+                (mainchain::ValidatorClient::new(transport), None)
+            };
         let miner = cusf_mainchain_wallet
             .clone()
             .map(|wallet| Miner::new(cusf_mainchain.clone(), wallet))
@@ -722,11 +738,14 @@ impl App {
         tracing::info!("Instantiating node struct");
         let node_start = std::time::Instant::now();
         let node_config = node::NodeConfig {
+            add_peers: config.add_peers.clone(),
             datadir: config.datadir.clone(),
             bind_addr: config.net_addr,
             cusf_mainchain,
             cusf_mainchain_wallet: cusf_mainchain_wallet.clone(),
+            magic_bytes_override: config.network_magic_override,
             network: config.network,
+            server_names: config.server_names.clone(),
             wallet: Some(Arc::new(wallet.clone())),
             l1_rpc_config_path: Some(l1_rpc_config_path),
         };
@@ -972,21 +991,14 @@ impl App {
         &self,
         fee: Option<bitcoin::Amount>,
     ) -> Result<BlockTemplate, Error> {
-        let Some(miner) = self.miner.as_ref() else {
-            return Err(Error::NoCusfMainchainWalletClient);
-        };
         // Mining requires the mainchain (parentchain) to be up so we can fetch blocks.
-        let prev_main_hash = {
-            let mut miner_write = miner.write().await;
-            let prev_main_hash = miner_write
-                .cusf_mainchain
-                .get_chain_tip()
-                .await
-                .map_err(|e| Error::MainchainUnreachable(Box::new(e)))?
-                .block_hash;
-            drop(miner_write);
-            prev_main_hash
-        };
+        let prev_main_hash = self
+            .node
+            .with_cusf_mainchain(|cusf_mainchain| cusf_mainchain.clone())
+            .get_chain_tip()
+            .await
+            .map_err(|e| Error::MainchainUnreachable(Box::new(e)))?
+            .block_hash;
         let tip_hash = self.node.try_get_best_hash()?;
         // If `prev_side_hash` is not the best tip to mine on, then mine an
         // empty block.
@@ -1055,7 +1067,9 @@ impl App {
             let coinbase = match tx_fees {
                 bitcoin::Amount::ZERO => Vec::new(),
                 _ => vec![types::Output {
-                    address: self.wallet.get_new_address()?,
+                    // A template is built on every poll and mostly thrown
+                    // away, so it must not derive an address each time.
+                    address: self.wallet.get_receive_address()?,
                     content: types::OutputContent::Value(tx_fees),
                 }],
             };
@@ -1107,19 +1121,20 @@ impl App {
         } else {
             let coinbase = Vec::new();
             let (merkle_root, roots) = {
-                let mut accumulator = if let Some(tip_hash) = tip_hash {
-                    let rotxn = self
-                        .node
-                        .env()
-                        .read_txn()
-                        .map_err(node::Error::from)?;
-                    self.node
-                        .archive()
-                        .get_accumulator(&rotxn, tip_hash)
-                        .map_err(node::Error::from)?
-                } else {
-                    types::Accumulator::default()
-                };
+                let mut accumulator =
+                    if let Some(prev_side_hash) = prev_side_hash {
+                        let rotxn = self
+                            .node
+                            .env()
+                            .read_txn()
+                            .map_err(node::Error::from)?;
+                        self.node
+                            .archive()
+                            .get_accumulator(&rotxn, prev_side_hash)
+                            .map_err(node::Error::from)?
+                    } else {
+                        types::Accumulator::default()
+                    };
                 let merkle_root =
                     coinshift::types::Body::modify_memforest::<
                         FilledTransaction,
@@ -1266,5 +1281,62 @@ impl App {
 impl Drop for App {
     fn drop(&mut self) {
         self.task.abort()
+    }
+}
+
+#[cfg(test)]
+mod wait_for_proto_support_tests {
+    use std::{net::SocketAddr, time::Duration};
+
+    use coinshift::types::proto::mainchain::generated::validator_service_server;
+    use tokio::time::timeout;
+    use tonic_health::ServingStatus;
+
+    use crate::app::App;
+
+    fn transport(addr: SocketAddr) -> tonic::transport::channel::Channel {
+        tonic::transport::channel::Channel::from_shared(format!(
+            "http://{addr}"
+        ))
+        .unwrap()
+        .connect_lazy()
+    }
+
+    async fn serve_validator_service(addr: SocketAddr) {
+        let (health_reporter, health_service) =
+            tonic_health::server::health_reporter();
+        let () = health_reporter
+            .set_service_status(
+                validator_service_server::SERVICE_NAME,
+                ServingStatus::Serving,
+            )
+            .await;
+        tokio::spawn(
+            tonic::transport::Server::builder()
+                .add_service(health_service)
+                .serve(addr),
+        );
+    }
+
+    /// The node may start before the mainchain node, so it waits for the
+    /// validator service instead of an error.
+    #[tokio::test]
+    async fn wait_for_the_validator_service() -> anyhow::Result<()> {
+        let reserved =
+            reserve_port::ReservedSocketAddr::reserve_random_socket_addr()?;
+        let addr = reserved.socket_addr();
+        let url = format!("http://{addr}").parse()?;
+        let mut has_wallet_service =
+            Box::pin(App::wait_for_proto_support(transport(addr), &url));
+        assert!(
+            timeout(Duration::from_secs(1), &mut has_wallet_service)
+                .await
+                .is_err()
+        );
+        let () = serve_validator_service(addr).await;
+        let has_wallet_service =
+            timeout(Duration::from_secs(30), has_wallet_service).await?;
+        assert!(!has_wallet_service);
+        Ok(())
     }
 }

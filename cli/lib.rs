@@ -8,6 +8,7 @@ use jsonrpsee::{core::client::ClientT, http_client::HttpClientBuilder};
 
 use coinshift::parent_chain_rpc::RpcConfig;
 use coinshift::types::{Address, ParentChainType, SwapId, Txid};
+use coinshift::wallet::TransferDests;
 use coinshift_app_rpc_api::RpcClient;
 use tracing_subscriber::{filter::Targets, layer::SubscriberExt as _};
 
@@ -25,6 +26,10 @@ fn parse_swap_id(s: &str) -> anyhow::Result<SwapId> {
         anyhow::anyhow!("swap_id must be 32 bytes (64 hex chars)")
     })?;
     Ok(SwapId(arr))
+}
+
+fn parse_transfer_dests(s: &str) -> anyhow::Result<TransferDests> {
+    Ok(serde_json::from_str(s)?)
 }
 
 fn parse_parent_chain(s: &str) -> anyhow::Result<ParentChainType> {
@@ -99,6 +104,12 @@ pub enum Command {
     GetBlock {
         block_hash: coinshift::types::BlockHash,
     },
+    /// Get the block hash at the specified height, if it exists
+    GetBlockHash { height: u32 },
+    /// Get everything about a block that its body does not carry
+    GetBlockIndex {
+        block_hash: coinshift::types::BlockHash,
+    },
     /// Assemble a block to blind merge mine, without requesting BMM for it
     GetBlockTemplate,
     /// Get mainchain blocks that commit to a specified block hash
@@ -113,6 +124,11 @@ pub enum Command {
     GetWalletUtxos,
     /// Get the current block count
     GetBlockcount,
+    /// Invalidate a block, potentially re-orging to a valid ancestor of the
+    /// current tip.
+    InvalidateBlock {
+        block_hash: coinshift::types::BlockHash,
+    },
     /// Reserve an open swap for your L2 address, on-chain.
     ///
     /// Do this BEFORE paying on L1: the reservation is what entitles you to the
@@ -140,6 +156,8 @@ pub enum Command {
     },
     /// Get the height of the latest failed withdrawal bundle
     LatestFailedWithdrawalBundleHeight,
+    /// List the transactions the mempool holds
+    ListMempool,
     /// List peers
     ListPeers,
     /// List all UTXOs
@@ -158,6 +176,8 @@ pub enum Command {
         #[arg(value_parser = parse_swap_id)]
         swap_id: SwapId,
     },
+    /// Get the progress of the startup sync with the mainchain
+    MainchainSyncProgress,
     /// Attempt to mine a sidechain block
     Mine {
         #[arg(long)]
@@ -192,6 +212,14 @@ pub enum Command {
         dest: Address,
         #[arg(long)]
         value_sats: u64,
+        #[arg(long)]
+        fee_sats: u64,
+    },
+    /// Transfer funds to each address in a JSON map of address to value in
+    /// sats, such as `{"<address>": 1000}`
+    TransferMany {
+        #[arg(value_parser = parse_transfer_dests)]
+        dests: TransferDests,
         #[arg(long)]
         fee_sats: u64,
     },
@@ -325,6 +353,14 @@ where
             let block = rpc_client.get_block(block_hash).await?;
             serde_json::to_string_pretty(&block)?
         }
+        Command::GetBlockHash { height } => {
+            let block_hash = rpc_client.get_block_hash(height).await?;
+            serde_json::to_string_pretty(&block_hash)?
+        }
+        Command::GetBlockIndex { block_hash } => {
+            let block_index = rpc_client.get_block_index(block_hash).await?;
+            serde_json::to_string_pretty(&block_index)?
+        }
         Command::GetBlockTemplate => {
             let template = rpc_client.get_block_template().await?;
             serde_json::to_string_pretty(&template)?
@@ -378,6 +414,10 @@ where
             let blockcount = rpc_client.getblockcount().await?;
             format!("{blockcount}")
         }
+        Command::InvalidateBlock { block_hash } => {
+            let () = rpc_client.invalidate_block(block_hash).await?;
+            String::default()
+        }
         Command::GetSwapStatus { swap_id } => {
             let status = rpc_client.get_swap_status(swap_id).await?;
             serde_json::to_string_pretty(&status)?
@@ -386,6 +426,10 @@ where
             let height =
                 rpc_client.latest_failed_withdrawal_bundle_height().await?;
             serde_json::to_string_pretty(&height)?
+        }
+        Command::ListMempool => {
+            let txs = rpc_client.list_mempool().await?;
+            serde_json::to_string_pretty(&txs)?
         }
         Command::ListPeers => {
             let peers = rpc_client.list_peers().await?;
@@ -438,6 +482,10 @@ where
                 )
                 .await?;
             "Swap L1 txid updated".to_string()
+        }
+        Command::MainchainSyncProgress => {
+            let progress = rpc_client.mainchain_sync_progress().await?;
+            serde_json::to_string_pretty(&progress)?
         }
         Command::Mine { fee_sats } => {
             let () = rpc_client.mine(fee_sats).await?;
@@ -515,6 +563,10 @@ where
             let txid = rpc_client.transfer(dest, value_sats, fee_sats).await?;
             format!("{txid}")
         }
+        Command::TransferMany { dests, fee_sats } => {
+            let txid = rpc_client.transfer_many(dests, fee_sats).await?;
+            format!("{txid}")
+        }
         Command::Withdraw {
             mainchain_address,
             amount_sats,
@@ -575,5 +627,43 @@ impl Cli {
         let client = builder.build(self.rpc_url)?;
         let result = handle_command(&client, self.command).await?;
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::*;
+
+    #[test]
+    fn parse_transfer_many() {
+        let address = Address([1u8; 20]);
+        let cli = Cli::parse_from([
+            "coinshift_app_cli",
+            "transfer-many",
+            &format!("{{\"{address}\": 1000}}"),
+            "--fee-sats",
+            "500",
+        ]);
+        let Command::TransferMany { dests, fee_sats } = cli.command else {
+            panic!("expected transfer-many");
+        };
+        assert_eq!(dests.0, BTreeMap::from([(address, 1000)]));
+        assert_eq!(fee_sats, 500);
+    }
+
+    // A repeated address must not silently drop one of the two payments.
+    #[test]
+    fn refuse_a_repeated_address() {
+        let address = Address([1u8; 20]);
+        let result = Cli::try_parse_from([
+            "coinshift_app_cli",
+            "transfer-many",
+            &format!("{{\"{address}\": 1000, \"{address}\": 5000}}"),
+            "--fee-sats",
+            "500",
+        ]);
+        assert!(result.is_err());
     }
 }

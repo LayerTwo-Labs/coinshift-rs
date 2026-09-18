@@ -241,6 +241,51 @@ mod tests {
         }
         Ok(())
     }
+
+    // a withdrawal output must be funded for both its payout and its mainchain
+    // fee, since both leave the treasury
+    #[test]
+    fn withdrawal_value_includes_main_fee() {
+        use super::{
+            Content, FilledTransaction, GetValue, Output, Transaction,
+        };
+        use crate::types::Address;
+
+        let value = bitcoin::Amount::from_sat(1000);
+        let main_fee = bitcoin::Amount::from_sat(300);
+        let main_address = "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2"
+            .parse::<bitcoin::Address<bitcoin::address::NetworkUnchecked>>()
+            .unwrap();
+        let withdrawal = Output {
+            address: Address::ALL_ZEROS,
+            content: Content::Withdrawal {
+                value,
+                main_fee,
+                main_address,
+            },
+        };
+        assert_eq!(withdrawal.get_value(), value + main_fee);
+
+        let value_output = |amount| Output {
+            address: Address::ALL_ZEROS,
+            content: Content::Value(amount),
+        };
+        let withdrawal_tx = |funding| FilledTransaction {
+            transaction: Transaction {
+                outputs: vec![withdrawal.clone()],
+                ..Default::default()
+            },
+            spent_utxos: vec![value_output(funding)],
+        };
+
+        // inputs covering only the payout are insufficient
+        assert!(withdrawal_tx(value).get_fee().is_err());
+        // inputs covering payout plus mainchain fee fully fund it
+        assert_eq!(
+            withdrawal_tx(value + main_fee).get_fee().unwrap(),
+            bitcoin::Amount::ZERO
+        );
+    }
 }
 
 /// Reference to a tx input.
@@ -380,7 +425,14 @@ mod content {
         fn get_value(&self) -> bitcoin::Amount {
             match self {
                 Self::Value(value) => *value,
-                Self::Withdrawal { value, .. } => *value,
+                // a withdrawal removes both the payout and the mainchain fee
+                // from the sidechain, since the enforcer pays both out of the
+                // treasury
+                Self::Withdrawal {
+                    value, main_fee, ..
+                } => {
+                    value.checked_add(*main_fee).unwrap_or(bitcoin::Amount::MAX)
+                }
                 Self::SwapPending { value, .. } => *value,
             }
         }
@@ -664,6 +716,11 @@ impl Transaction {
     pub fn canonical_size(&self) -> u64 {
         (borsh::object_length(self).unwrap() / 8) as u64
     }
+
+    /// Canonical encoding. This is the form the txid hashes over.
+    pub fn canonical_encoding(&self) -> Vec<u8> {
+        borsh::to_vec(self).expect("serializing a transaction cannot fail")
+    }
 }
 
 /// Representation of a spent output
@@ -721,6 +778,14 @@ impl FilledTransaction {
         } else {
             Ok(value_in - value_out)
         }
+    }
+
+    pub fn inputs(
+        &self,
+    ) -> impl DoubleEndedIterator<Item = (&OutPoint, &Hash, &Output)> {
+        self.transaction.inputs.iter().zip(&self.spent_utxos).map(
+            |((outpoint, utxo_hash), output)| (outpoint, utxo_hash, output),
+        )
     }
 }
 

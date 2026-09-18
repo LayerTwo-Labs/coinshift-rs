@@ -37,9 +37,13 @@ use crate::{
     state::{self, State},
     types::{
         BmmResult, Body, Header, MerkleRoot, ParentChainType, Tip,
-        proto::{self, mainchain},
+        net::ResolvedSeedAddress,
+        proto::{
+            self,
+            mainchain::{self, Event as MainchainBlockEvent},
+        },
     },
-    util::join_set,
+    util::{ErrorChain, join_set},
 };
 
 #[allow(clippy::duplicated_attributes)]
@@ -69,8 +73,6 @@ pub enum Error {
     ReceiveMainchainTaskResponse,
     #[error("Receive reorg result cancelled (oneshot)")]
     ReceiveReorgResultOneshot(#[source] oneshot::Canceled),
-    #[error("Send mainchain task request failed")]
-    SendMainchainTaskRequest,
     #[error("Send new tip ready failed")]
     SendNewTipReady(#[source] TrySendError<NewTipReadyMessage>),
     #[error("Send reorg result error (oneshot)")]
@@ -133,7 +135,7 @@ fn connect_tip_(
     Ok(())
 }
 
-fn disconnect_tip_(
+pub(in crate::node) fn disconnect_tip_(
     rwtxn: &mut RwTxn<'_>,
     archive: &Archive,
     mempool: &MemPool,
@@ -268,12 +270,17 @@ fn disconnect_tip_(
     Ok(())
 }
 
+// a state error means a peer sent an invalid block; it must not be fatal
+fn is_fatal_reorg_error(err: &Error) -> bool {
+    !matches!(err, Error::State(_))
+}
+
 /// Re-org to the specified tip, if it is better than the current tip.
 /// The new tip block and all ancestor blocks must exist in the node's archive.
 /// A result of `Ok(true)` indicates a successful re-org.
 /// A result of `Ok(false)` indicates that no re-org was attempted.
 fn reorg_to_tip(
-    env: &sneed::Env,
+    env: &sneed::Env<heed::WithoutTls>,
     archive: &Archive,
     mempool: &MemPool,
     state: &State,
@@ -426,7 +433,7 @@ fn reorg_to_tip(
         let rpc_config_getter: Option<
             &dyn Fn(ParentChainType) -> Option<RpcConfig>,
         > = rpc_config_getter.as_ref().map(|b| b.as_ref());
-        let () = connect_tip_(
+        let () = match connect_tip_(
             &mut rwtxn,
             archive,
             mempool,
@@ -436,7 +443,20 @@ fn reorg_to_tip(
             &two_way_peg_data,
             rpc_config_getter,
             wallet,
-        )?;
+        ) {
+            Ok(()) => (),
+            Err(err) => {
+                if !is_fatal_reorg_error(&err) {
+                    // Discard the invalid body, so that the block is reported
+                    // missing again and the real body is re-requested.
+                    drop(rwtxn);
+                    let mut rwtxn = env.write_txn().map_err(EnvError::from)?;
+                    let () = archive.delete_body(&mut rwtxn, header.hash())?;
+                    rwtxn.commit().map_err(RwTxnError::from)?;
+                }
+                return Err(err);
+            }
+        };
         let new_tip_hash = state.try_get_tip(&rwtxn)?.unwrap();
         let bmm_verification =
             archive.get_best_main_verification(&rwtxn, new_tip_hash)?;
@@ -462,7 +482,7 @@ fn reorg_to_tip(
 
 #[derive(Clone)]
 struct NetTaskContext {
-    env: sneed::Env,
+    env: sneed::Env<heed::WithoutTls>,
     archive: Archive,
     mainchain_task: MainchainTaskHandle,
     mempool: MemPool,
@@ -495,7 +515,7 @@ struct NetTask {
     /// the request
     forward_mainchain_task_request_tx:
         UnboundedSender<(mainchain_task::Request, SocketAddr, PeerStateId)>,
-    mainchain_task_response_rx: UnboundedReceiver<mainchain_task::Response>,
+    mainchain_task_event_rx: UnboundedReceiver<mainchain_task::Event>,
     /// Receive a tip that is ready to reorg to, with the address of the peer
     /// connection that caused the request, if it originated from a peer.
     /// If the request originates from this node, then the socket address is
@@ -820,15 +840,27 @@ impl NetTask {
                         return Ok(());
                     }
                 }
-                // check that headers are sequential based on prev_side_hash
-                let mut prev_side_hash = start_hash;
-                for header in &headers {
-                    if header.prev_side_hash != prev_side_hash {
-                        tracing::warn!(%addr, ?req, ?headers,"Invalid response from peer; non-sequential headers");
-                        let () = ctxt.net.remove_active_peer(addr);
-                        return Ok(());
+                // check that headers are sequential based on prev_side_hash,
+                // and no header builds on an invalidated block.
+                {
+                    let rotxn = ctxt.env.read_txn().map_err(EnvError::from)?;
+                    let mut prev_side_hash = start_hash;
+                    for header in &headers {
+                        if header.prev_side_hash != prev_side_hash {
+                            tracing::warn!(%addr, ?req, ?headers,"Invalid response from peer; non-sequential headers");
+                            let () = ctxt.net.remove_active_peer(addr);
+                            return Ok(());
+                        }
+                        if ctxt
+                            .archive
+                            .invalidated_block(&rotxn, &header.hash())?
+                        {
+                            tracing::warn!(%addr, ?req, ?headers,"Invalid response from peer; invalidated block header");
+                            let () = ctxt.net.remove_active_peer(addr);
+                            return Ok(());
+                        }
+                        prev_side_hash = Some(header.hash());
                     }
-                    prev_side_hash = Some(header.hash());
                 }
                 // Store new headers
                 let () = tokio::task::block_in_place(|| {
@@ -896,6 +928,112 @@ impl NetTask {
         }
     }
 
+    fn handle_mainchain_block_event(
+        ctxt: &NetTaskContext,
+        _event: MainchainBlockEvent,
+    ) -> Result<(), Error> {
+        let mut rwtxn = ctxt.env.write_txn().map_err(EnvError::from)?;
+        while let Some(state_tip) = ctxt.state.try_get_tip(&rwtxn)?
+            && !ctxt
+                .archive
+                .side_tips()
+                .sidechain_tips()
+                .contains_key(&rwtxn, &state_tip)
+                .map_err(archive::Error::from)?
+        {
+            let header = ctxt.archive.get_header(&rwtxn, state_tip)?;
+            let body = ctxt.archive.get_body(&rwtxn, state_tip)?;
+            let () = ctxt.state.disconnect_tip(&mut rwtxn, &header, &body)?;
+        }
+        let best_side_tip = ctxt
+            .archive
+            .side_tips()
+            .best_side_tip(&rwtxn)
+            .map_err(archive::Error::from)?;
+        rwtxn.commit().map_err(RwTxnError::from)?;
+        if let Some(best_side_tip) = best_side_tip {
+            let best_side_tip = Tip {
+                block_hash: best_side_tip.block_hash,
+                main_block_hash: best_side_tip.info.main_block_hash,
+            };
+            let _: bool = reorg_to_tip(
+                &ctxt.env,
+                &ctxt.archive,
+                &ctxt.mempool,
+                &ctxt.state,
+                best_side_tip,
+                ctxt.rpc_config_path.as_ref(),
+                ctxt.wallet.as_deref(),
+            )?;
+        }
+        Ok(())
+    }
+
+    fn handle_mainchain_task_response(
+        ctxt: &NetTaskContext,
+        mainchain_task_request_sources: &mut HashMap<
+            mainchain_task::Request,
+            HashSet<(SocketAddr, PeerStateId)>,
+        >,
+        response: mainchain_task::Response,
+    ) -> Result<(), Error> {
+        let request = (&response).into();
+        match response {
+            mainchain_task::Response::AncestorInfos(block_hash, res) => {
+                let Some(sources) =
+                    mainchain_task_request_sources.remove(&request)
+                else {
+                    return Ok(());
+                };
+                let res = res.map_err(Arc::new);
+                for (addr, peer_state_id) in sources {
+                    let message = match res {
+                        Ok(true) => PeerConnectionMessage::MainchainAncestors(
+                            peer_state_id,
+                        ),
+                        Ok(false) => {
+                            PeerConnectionMessage::MainchainAncestorsError(
+                                anyhow::anyhow!(
+                                    "Requested block was not available: {block_hash}"
+                                ),
+                            )
+                        }
+                        Err(ref err) => {
+                            PeerConnectionMessage::MainchainAncestorsError(
+                                anyhow::Error::from(err.clone()),
+                            )
+                        }
+                    };
+                    let _: bool = ctxt.net.push_internal_message(message, addr);
+                }
+                Ok(())
+            }
+        }
+    }
+
+    #[inline]
+    fn handle_mainchain_task_event(
+        ctxt: &NetTaskContext,
+        mainchain_task_request_sources: &mut HashMap<
+            mainchain_task::Request,
+            HashSet<(SocketAddr, PeerStateId)>,
+        >,
+        event: mainchain_task::Event,
+    ) -> Result<(), Error> {
+        match event {
+            mainchain_task::Event::Block(event) => {
+                Self::handle_mainchain_block_event(ctxt, event)
+            }
+            mainchain_task::Event::Response(resp) => {
+                Self::handle_mainchain_task_response(
+                    ctxt,
+                    mainchain_task_request_sources,
+                    resp,
+                )
+            }
+        }
+    }
+
     async fn run(self) -> Result<(), Error> {
         tracing::debug!("starting net task");
         #[derive(Debug)]
@@ -913,7 +1051,7 @@ impl NetTask {
                 SocketAddr,
                 PeerStateId,
             ),
-            MainchainTaskResponse(mainchain_task::Response),
+            MainchainTaskEvent(mainchain_task::Event),
             // Apply new tip from peer or self.
             // An optional oneshot sender can be used receive the result of
             // attempting to reorg to the new tip, on the corresponding oneshot
@@ -921,7 +1059,9 @@ impl NetTask {
             NewTipReady(Tip, Option<SocketAddr>, Option<oneshot::Sender<bool>>),
             PeerInfo(Option<(SocketAddr, Option<PeerConnectionInfo>)>),
             // Signal to reconnect to a peer
-            ReconnectPeer(SocketAddr),
+            ReconnectPeer(ResolvedSeedAddress),
+            // The loop that dials known peers stopped on an error
+            RedialKnownPeers(Box<net::Error>),
         }
         let accept_connections = stream::try_unfold((), |()| {
             let env = self.ctxt.env.clone();
@@ -964,9 +1104,9 @@ impl NetTask {
                     peer_state_id,
                 )
             });
-        let mainchain_task_response_stream = self
-            .mainchain_task_response_rx
-            .map(MailboxItem::MainchainTaskResponse);
+        let mainchain_task_event_stream = self
+            .mainchain_task_event_rx
+            .map(MailboxItem::MainchainTaskEvent);
         let new_tip_ready_stream =
             self.new_tip_ready_rx.map(|(block_hash, addr, resp_tx)| {
                 MailboxItem::NewTipReady(block_hash, addr, resp_tx)
@@ -976,13 +1116,25 @@ impl NetTask {
         let (reconnect_peer_spawner, reconnect_peer_rx) = join_set::new();
         let reconnect_peer_stream = reconnect_peer_rx
             .map(|addr| MailboxItem::ReconnectPeer(addr.unwrap()));
+        let redial_known_peers_stream = {
+            const MIN_DELAY: Duration = Duration::from_secs(60);
+            const MAX_DELAY: Duration = Duration::from_secs(600);
+            let env = self.ctxt.env.clone();
+            let net = self.ctxt.net.clone();
+            stream::once(async move {
+                net.redial_known_peers(env, MIN_DELAY, MAX_DELAY).await
+            })
+            .filter_map(async |res| res.err().map(Box::new))
+            .map(MailboxItem::RedialKnownPeers)
+        };
         let mut mailbox_stream = stream::select_all([
             accept_connections.boxed(),
             forward_request_stream.boxed(),
-            mainchain_task_response_stream.boxed(),
+            mainchain_task_event_stream.boxed(),
             new_tip_ready_stream.boxed(),
             peer_info_stream.boxed(),
             reconnect_peer_stream.boxed(),
+            redial_known_peers_stream.boxed(),
         ]);
         // Attempt to switch to a descendant tip once a body has been
         // stored, if all other ancestor bodies are available.
@@ -1024,50 +1176,27 @@ impl NetTask {
                     peer,
                     peer_state_id,
                 ) => {
+                    if self.ctxt.mainchain_task.request(request).is_err() {
+                        tracing::warn!(
+                            ?request,
+                            %peer,
+                            "the mainchain task took no request"
+                        );
+                        continue;
+                    }
                     mainchain_task_request_sources
                         .entry(request)
                         .or_default()
                         .insert((peer, peer_state_id));
-                    let () = self
-                        .ctxt
-                        .mainchain_task
-                        .request(request)
-                        .map_err(|_| Error::SendMainchainTaskRequest)?;
                 }
-                MailboxItem::MainchainTaskResponse(response) => {
-                    let request = (&response).into();
-                    match response {
-                        mainchain_task::Response::AncestorInfos(
-                            block_hash,
-                            res,
-                        ) => {
-                            let Some(sources) =
-                                mainchain_task_request_sources.remove(&request)
-                            else {
-                                continue;
-                            };
-                            let res = res.map_err(Arc::new);
-                            for (addr, peer_state_id) in sources {
-                                let message = match res {
-                                    Ok(true) => PeerConnectionMessage::MainchainAncestors(
-                                        peer_state_id,
-                                    ),
-                                    Ok(false) => PeerConnectionMessage::MainchainAncestorsError(
-                                        anyhow::anyhow!("Requested block was not available: {block_hash}")
-                                    ),
-                                    Err(ref err) => PeerConnectionMessage::MainchainAncestorsError(
-                                        anyhow::Error::from(err.clone())
-                                    )
-                                };
-                                let _: bool = self
-                                    .ctxt
-                                    .net
-                                    .push_internal_message(message, addr);
-                            }
-                        }
-                    }
+                MailboxItem::MainchainTaskEvent(event) => {
+                    let () = Self::handle_mainchain_task_event(
+                        &self.ctxt,
+                        &mut mainchain_task_request_sources,
+                        event,
+                    )?;
                 }
-                MailboxItem::NewTipReady(new_tip, _addr, resp_tx) => {
+                MailboxItem::NewTipReady(new_tip, addr, resp_tx) => {
                     // Use a guard to ensure we always send a response on the oneshot, even if there's a panic
                     // This prevents "Receive reorg result cancelled" errors
                     struct OneshotGuard {
@@ -1095,6 +1224,36 @@ impl NetTask {
                     let mut guard = OneshotGuard::new(resp_tx);
 
                     let reorg_result = task::block_in_place(|| {
+                        {
+                            let rotxn = self
+                                .ctxt
+                                .env
+                                .read_txn()
+                                .map_err(|err| Error::DbEnv(err.into()))?;
+                            if !self
+                                .ctxt
+                                .archive
+                                .side_tips()
+                                .sidechain_tips()
+                                .contains_key(&rotxn, &new_tip.block_hash)
+                                .map_err(archive::Error::from)?
+                            {
+                                return Ok(false);
+                            }
+                            let side_tips_tip = self
+                                .ctxt
+                                .archive
+                                .side_tips()
+                                .get_mainchain_tip(&rotxn)
+                                .map_err(archive::Error::from)?;
+                            if !self.ctxt.archive.is_main_descendant(
+                                &rotxn,
+                                new_tip.main_block_hash,
+                                side_tips_tip.block_hash(),
+                            )? {
+                                return Ok(false);
+                            }
+                        }
                         reorg_to_tip(
                             &self.ctxt.env,
                             &self.ctxt.archive,
@@ -1107,20 +1266,22 @@ impl NetTask {
                     });
                     let reorg_applied = match reorg_result {
                         Ok(applied) => applied,
+                        Err(err) if is_fatal_reorg_error(&err) => {
+                            return Err(err);
+                        }
+                        // an invalid block must not kill the net task; drop the
+                        // peer and keep running
                         Err(err) => {
-                            // Log the error but don't crash the net task
-                            // This allows the task to continue processing other messages
-                            let err = anyhow::Error::from(err);
-                            tracing::error!(
+                            tracing::warn!(
                                 ?new_tip,
-                                "Failed to reorg to tip: {err:#}"
+                                ?addr,
+                                err = format!("{:#}", ErrorChain::new(&err)),
+                                "rejecting invalid tip from peer"
                             );
-                            // Send false to indicate the reorg didn't happen
-                            if let Some(resp_tx) = guard.resp_tx.take() {
-                                let _ = resp_tx.send(false);
-                                guard.sent = true;
+                            if let Some(addr) = addr {
+                                let () = self.ctxt.net.remove_active_peer(addr);
                             }
-                            continue;
+                            false
                         }
                     };
                     // Send the result
@@ -1147,15 +1308,16 @@ impl NetTask {
                     continue;
                 }
                 MailboxItem::PeerInfo(Some((addr, Some(peer_info)))) => {
+                    const RECONNECT_DELAY: Duration = Duration::from_secs(10);
                     tracing::trace!(%addr, ?peer_info, "mailbox item: received PeerInfo");
                     match peer_info {
-                        PeerConnectionInfo::Error(
-                            PeerConnectionError::Mailbox(
-                                PeerConnectionMailboxError::HeartbeatTimeout,
-                            ),
-                        ) => {
-                            const RECONNECT_DELAY: Duration =
-                                Duration::from_secs(10);
+                        PeerConnectionInfo::Error {
+                            err:
+                                PeerConnectionError::Mailbox(
+                                    PeerConnectionMailboxError::HeartbeatTimeout,
+                                ),
+                            resolved_addr,
+                        } => {
                             // Attempt to reconnect if a valid message was
                             // received successfully
                             let Some(received_msg_successfully) =
@@ -1169,18 +1331,62 @@ impl NetTask {
                                 continue;
                             };
                             let () = self.ctxt.net.remove_active_peer(addr);
-                            if !received_msg_successfully {
+                            let reconnect_addr = if received_msg_successfully {
+                                resolved_addr
+                            } else if let (_, Some(next_addr)) =
+                                resolved_addr.pop_first_ip_addr()
+                            {
+                                next_addr
+                            } else {
                                 continue;
-                            }
+                            };
                             reconnect_peer_spawner.spawn(async move {
                                 tokio::time::sleep(RECONNECT_DELAY).await;
-                                addr
+                                reconnect_addr
                             });
                         }
-                        PeerConnectionInfo::Error(err) => {
+                        PeerConnectionInfo::Error { err, resolved_addr } => {
+                            let bad_magic = err.is_bad_magic();
+                            let retry_connection = err
+                                .is_duplicate_connection()
+                                || err.is_connect_timeout();
                             let err = anyhow::anyhow!(err);
                             tracing::error!(%addr, err = format!("{err:#}"), "Peer connection error");
                             let () = self.ctxt.net.remove_active_peer(addr);
+                            if retry_connection {
+                                reconnect_peer_spawner.spawn(async move {
+                                    tokio::time::sleep(RECONNECT_DELAY).await;
+                                    resolved_addr
+                                });
+                            } else if !bad_magic
+                                && let (_, Some(next_addr)) =
+                                    resolved_addr.pop_first_ip_addr()
+                            {
+                                reconnect_peer_spawner.spawn(async move {
+                                    tokio::time::sleep(RECONNECT_DELAY).await;
+                                    next_addr
+                                });
+                            }
+                            // A peer on another network never becomes useful,
+                            // so it must not survive into the next start.
+                            if bad_magic {
+                                let mut rwtxn = self
+                                    .ctxt
+                                    .env
+                                    .write_txn()
+                                    .map_err(EnvError::from)?;
+                                let forgotten = self
+                                    .ctxt
+                                    .net
+                                    .forget_peer(&mut rwtxn, &addr)?;
+                                rwtxn.commit().map_err(RwTxnError::from)?;
+                                if forgotten {
+                                    tracing::warn!(
+                                        %addr,
+                                        "forgot peer: it runs another network"
+                                    );
+                                }
+                            }
                         }
                         PeerConnectionInfo::NeedMainchainAncestors {
                             main_hash,
@@ -1238,13 +1444,28 @@ impl NetTask {
                                     .ctxt
                                     .state
                                     .validate_transaction(&rwtxn, &new_tx)?;
-                                self.ctxt.mempool.put(&mut rwtxn, &new_tx)?;
-                                rwtxn.commit().map_err(RwTxnError::from)?;
-                                // broadcast
-                                let () = self.ctxt.net.push_tx(
-                                    HashSet::from_iter([addr]),
-                                    new_tx,
-                                );
+                                match self.ctxt.mempool.put(&mut rwtxn, &new_tx)
+                                {
+                                    Ok(()) => {
+                                        rwtxn
+                                            .commit()
+                                            .map_err(RwTxnError::from)?;
+                                        // broadcast
+                                        let () = self.ctxt.net.push_tx(
+                                            HashSet::from_iter([addr]),
+                                            new_tx,
+                                        );
+                                    }
+                                    Err(mempool::Error::UtxoDoubleSpent) => {
+                                        drop(rwtxn);
+                                        tracing::debug!(
+                                            %addr,
+                                            txid = %new_tx.transaction.txid(),
+                                            "Reject peer transaction: mempool input conflict"
+                                        );
+                                    }
+                                    Err(err) => return Err(err.into()),
+                                }
                                 Ok(())
                             })() {
                                 let err = anyhow::Error::from(err);
@@ -1287,11 +1508,13 @@ impl NetTask {
                         }
                     }
                 }
-                MailboxItem::ReconnectPeer(peer_address) => {
+                MailboxItem::ReconnectPeer(resolved_addr) => {
+                    let peer_address =
+                        resolved_addr.as_seed_address().to_owned();
                     match self
                         .ctxt
                         .net
-                        .connect_peer(self.ctxt.env.clone(), peer_address)
+                        .connect_peer(self.ctxt.env.clone(), resolved_addr)
                     {
                         Ok(()) => (),
                         Err(err) => {
@@ -1302,6 +1525,9 @@ impl NetTask {
                             )
                         }
                     }
+                }
+                MailboxItem::RedialKnownPeers(err) => {
+                    return Err(Error::Net(err));
                 }
             }
         }
@@ -1327,10 +1553,10 @@ impl NetTaskHandle {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         runtime: &tokio::runtime::Runtime,
-        env: sneed::Env,
+        env: sneed::Env<heed::WithoutTls>,
         archive: Archive,
         mainchain_task: MainchainTaskHandle,
-        mainchain_task_response_rx: UnboundedReceiver<mainchain_task::Response>,
+        mainchain_task_event_rx: UnboundedReceiver<mainchain_task::Event>,
         mempool: MemPool,
         net: Net,
         peer_info_rx: PeerInfoRx,
@@ -1357,7 +1583,7 @@ impl NetTaskHandle {
             ctxt,
             forward_mainchain_task_request_tx,
             forward_mainchain_task_request_rx,
-            mainchain_task_response_rx,
+            mainchain_task_event_rx,
             new_tip_ready_tx: new_tip_ready_tx.clone(),
             new_tip_ready_rx,
             peer_info_rx,
@@ -1462,5 +1688,299 @@ impl Drop for NetTaskHandle {
             tracing::debug!("dropping net task handle, aborting task");
             task.abort()
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::{
+        node::net_task::{Error, is_fatal_reorg_error},
+        state,
+    };
+
+    // a peer's invalid block (value out > value in) must not be fatal
+    #[test]
+    fn invalid_peer_block_is_not_fatal() {
+        let err = Error::State(state::Error::NotEnoughValueIn);
+        assert!(!is_fatal_reorg_error(&err));
+    }
+
+    // local infrastructure errors stay fatal
+    #[test]
+    fn infrastructure_error_is_fatal() {
+        assert!(is_fatal_reorg_error(&Error::PeerInfoRxClosed));
+    }
+}
+
+#[cfg(test)]
+mod peer_retry_test {
+    use std::{collections::HashMap, net::Ipv4Addr, time::Duration};
+
+    use anyhow::Context;
+    use futures::channel::mpsc;
+
+    use crate::net::PeerConnectionStatus;
+    use crate::{
+        net::{PeerConnectionInfo, make_server_endpoint},
+        node::{
+            Node,
+            net_task::{Error, NetTask, NetTaskContext},
+        },
+        types::{
+            Accumulator, AccumulatorDiff, Network, OutPoint, OutPointKey,
+            Output, OutputContent, PointedOutput, Transaction, TxData, Txid,
+            hash, proto::mainchain::ValidatorClient,
+        },
+        wallet::Wallet,
+    };
+
+    fn temp_node(
+        runtime: &tokio::runtime::Runtime,
+    ) -> anyhow::Result<(temp_dir::TempDir, Node)> {
+        let temp_dir = temp_dir::TempDir::new()?;
+        let channel =
+            tonic::transport::Endpoint::from_static("http://127.0.0.1:1")
+                .connect_lazy();
+        let node = Node::new(
+            crate::node::NodeConfig {
+                add_peers: std::collections::HashSet::new(),
+                datadir: temp_dir.path().to_path_buf(),
+                bind_addr: (Ipv4Addr::LOCALHOST, 0).into(),
+                cusf_mainchain: ValidatorClient::new(channel),
+                cusf_mainchain_wallet: None,
+                magic_bytes_override: None,
+                network: Network::Regtest,
+                server_names: std::collections::HashSet::new(),
+                wallet: None,
+                l1_rpc_config_path: None,
+            },
+            runtime,
+        )?;
+        Ok((temp_dir, node))
+    }
+
+    #[test]
+    fn peer_transaction_conflicts_do_not_stop_net_task() -> anyhow::Result<()> {
+        let runtime = tokio::runtime::Runtime::new()?;
+        runtime.block_on(async {
+            let (temp_dir, node) = temp_node(&runtime)?;
+            node.net_task.task.abort();
+            while !node.net_task.task.is_finished() {
+                tokio::task::yield_now().await;
+            }
+            let wallet = Wallet::new(&temp_dir.path().join("wallet"))?;
+            wallet.set_seed(&[2; 64])?;
+            let address = wallet.get_new_address()?;
+            let mut inputs = Vec::new();
+            let mut utxos = HashMap::new();
+            let mut diff = AccumulatorDiff::default();
+            let mut rwtxn = node.env.write_txn()?;
+            for index in 0..2 {
+                let pointed = PointedOutput {
+                    outpoint: OutPoint::Regular {
+                        txid: Txid([index; 32]),
+                        vout: 0,
+                    },
+                    output: Output {
+                        address,
+                        content: OutputContent::Value(
+                            bitcoin::Amount::from_sat(1_000),
+                        ),
+                    },
+                };
+                node.state.utxos.put(
+                    &mut rwtxn,
+                    &OutPointKey::from(&pointed.outpoint),
+                    &pointed.output,
+                )?;
+                diff.insert(hash(&pointed).into());
+                inputs.push((pointed.outpoint, hash(&pointed)));
+                utxos.insert(pointed.outpoint, pointed.output);
+            }
+            wallet.put_utxos(&utxos)?;
+            let mut accumulator = Accumulator::default();
+            accumulator.apply_diff(diff)?;
+            node.state.utreexo_accumulator.put(
+                &mut rwtxn,
+                &(),
+                &accumulator,
+            )?;
+            let make_tx = |inputs, value| -> anyhow::Result<_> {
+                let mut tx = Transaction {
+                    inputs,
+                    proof: Default::default(),
+                    outputs: vec![Output {
+                        address,
+                        content: OutputContent::Value(
+                            bitcoin::Amount::from_sat(value),
+                        ),
+                    }],
+                    data: TxData::Regular,
+                };
+                node.state.regenerate_proof(&rwtxn, &mut tx)?;
+                let tx = wallet.authorize(tx)?;
+                node.state.validate_transaction(&rwtxn, &tx)?;
+                Ok(tx)
+            };
+            let first_tx = make_tx(vec![inputs[0]], 900)?;
+            let conflict_tx = make_tx(vec![inputs[1], inputs[0]], 1_800)?;
+            let next_tx = make_tx(vec![inputs[1]], 900)?;
+            node.mempool.put(&mut rwtxn, &first_tx)?;
+            rwtxn.commit()?;
+
+            let (
+                forward_mainchain_task_request_tx,
+                forward_mainchain_task_request_rx,
+            ) = mpsc::unbounded();
+            let (_mainchain_task_event_tx, mainchain_task_event_rx) =
+                mpsc::unbounded();
+            let (new_tip_ready_tx, new_tip_ready_rx) = mpsc::unbounded();
+            let (peer_info_tx, peer_info_rx) = mpsc::unbounded();
+            let task = NetTask {
+                ctxt: NetTaskContext {
+                    env: node.env.clone(),
+                    archive: node.archive.clone(),
+                    mainchain_task: node.mainchain_task.clone(),
+                    mempool: node.mempool.clone(),
+                    net: node.net.clone(),
+                    state: node.state.clone(),
+                    wallet: None,
+                    rpc_config_path: None,
+                },
+                forward_mainchain_task_request_tx,
+                forward_mainchain_task_request_rx,
+                mainchain_task_event_rx,
+                new_tip_ready_tx,
+                new_tip_ready_rx,
+                peer_info_rx,
+            };
+            for tx in [&first_tx, &conflict_tx, &next_tx] {
+                peer_info_tx.unbounded_send((
+                    (Ipv4Addr::LOCALHOST, 1).into(),
+                    Some(PeerConnectionInfo::NewTransaction(tx.clone())),
+                ))?;
+            }
+            drop(peer_info_tx);
+            let result =
+                tokio::time::timeout(Duration::from_secs(5), task.run())
+                    .await?;
+            assert!(
+                matches!(result, Err(Error::PeerInfoRxClosed)),
+                "the network task stopped before the mailbox closed: {result:?}"
+            );
+            let rotxn = node.env.read_txn()?;
+            for tx in [&first_tx, &next_tx] {
+                assert!(
+                    node.mempool
+                        .transactions
+                        .try_get(&rotxn, &tx.transaction.txid())?
+                        .is_some()
+                );
+            }
+            assert!(
+                node.mempool
+                    .transactions
+                    .try_get(&rotxn, &conflict_tx.transaction.txid())?
+                    .is_none()
+            );
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn retry_connection_timeout_before_first_message() -> anyhow::Result<()> {
+        let runtime = tokio::runtime::Runtime::new()?;
+        runtime.block_on(async {
+            let (_temp_dir, node) = temp_node(&runtime)?;
+            let silent_peer =
+                tokio::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+            let addr = silent_peer.local_addr()?;
+            node.connect_peer(addr)?;
+            assert_eq!(node.get_active_peers().len(), 1);
+            assert_eq!(
+                node.net.try_with_active_peer_connection(addr, |peer| peer
+                    .received_msg_successfully(),),
+                Some(false)
+            );
+
+            tokio::time::timeout(Duration::from_secs(35), async {
+                while !node.get_active_peers().is_empty() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .context("the QUIC connection did not time out")?;
+            drop(silent_peer);
+            let (remote, _) =
+                make_server_endpoint(addr, std::collections::HashSet::new())?;
+            let retry = tokio::time::timeout(Duration::from_secs(15), async {
+                remote
+                    .accept()
+                    .await
+                    .context("the endpoint closed before the retry")?
+                    .await
+                    .map_err(anyhow::Error::from)
+            })
+            .await
+            .context("the node did not retry the connection timeout")??;
+            assert!(retry.close_reason().is_none());
+            remote.close(0_u32.into(), b"test complete");
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn retry_duplicate_close_before_first_message() -> anyhow::Result<()> {
+        let runtime = tokio::runtime::Runtime::new()?;
+        runtime.block_on(async {
+            let (_temp_dir, node) = temp_node(&runtime)?;
+            let (remote, _) = make_server_endpoint(
+                (Ipv4Addr::LOCALHOST, 0).into(),
+                std::collections::HashSet::new(),
+            )?;
+            let addr = remote.local_addr()?;
+            node.connect_peer(addr)?;
+            let first =
+                tokio::time::timeout(Duration::from_secs(5), remote.accept())
+                    .await?
+                    .context("the first connection did not arrive")?
+                    .await?;
+            assert_eq!(
+                node.net.try_with_active_peer_connection(addr, |peer| peer
+                    .received_msg_successfully(),),
+                Some(false)
+            );
+
+            let mut connection = first;
+            for _ in 0..2 {
+                let closed_at = tokio::time::Instant::now();
+                connection.close(1_u32.into(), b"already connected");
+                let retry = tokio::time::timeout(
+                    Duration::from_secs(15),
+                    remote.accept(),
+                )
+                .await
+                .context("the node did not retry the duplicate close")?
+                .context("the endpoint closed before the retry")?
+                .await?;
+                assert!(closed_at.elapsed() >= Duration::from_secs(10));
+                assert_eq!(retry.remote_address(), connection.remote_address());
+                connection = retry;
+            }
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if node.get_active_peers().iter().any(|peer| {
+                        peer.address == addr
+                            && peer.status == PeerConnectionStatus::Connected
+                    }) {
+                        return;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await?;
+            remote.close(0_u32.into(), b"test complete");
+            Ok(())
+        })
     }
 }

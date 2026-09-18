@@ -8,11 +8,25 @@ on:
     tags:
       - '*'
   workflow_dispatch:
+    inputs:
+      base_branch:
+        description: "Base branch to diff against (only used when cargo_deny_check=auto)"
+        type: string
+        default: main
+      cargo_deny_check:
+        description: "Run or skip the `cargo deny` step"
+        type: choice
+        options:
+          - auto
+          - force-run
+          - force-skip
+        default: auto
 
 name: Check, Lint, Build
 
 env:
   CARGO_TERM_COLOR: always
+  ELECTRS_VERSION: v3.2.0
 
 jobs:
   check-lint:
@@ -29,13 +43,26 @@ jobs:
           toolchain: nightly
           components: rustfmt, clippy
 
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v2.5.1
+      - name: Restore Rust cache
+        id: restore-rust-cache
+        uses: Swatinem/rust-cache@v2.9.1
         with:
-          shared-key: x86_64-unknown-linux-gnu
+          cache-all-crates: "true"
+          prefix-key: "v0-rust-nightly"
+          save-if: "false"
+          shared-key: debug-x86_64-unknown-linux-gnu
+
+      - name: Save Rust cache
+        if: steps.restore-rust-cache.outputs.cache-hit != 'true'
+        uses: Swatinem/rust-cache@v2.9.1
+        with:
+          cache-all-crates: "true"
+          lookup-only: "true"
+          prefix-key: "v0-rust-nightly"
+          shared-key: debug-x86_64-unknown-linux-gnu
 
       - name: Rustfmt
-        run: cargo fmt --all -- --check
+        run: cargo fmt -- --check
       
       - name: Cargo check
         run: cargo check --all-targets --all-features
@@ -43,13 +70,56 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --all-features
       
+      - name: Check changed files
+        id: changed-files
+        if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.cargo_deny_check == 'auto')
+        uses: dorny/paths-filter@v4
+        with:
+          filters: |
+            cargo_lock:
+              - 'Cargo.lock'
+            deny_toml:
+              - 'deny.toml'
+
       - name: Deny
+        if: >-
+          (github.event_name == 'pull_request' && (steps.changed-files.outputs.cargo_lock == 'true' || steps.changed-files.outputs.deny_toml == 'true')) ||
+          (github.event_name == 'workflow_dispatch' && inputs.cargo_deny_check == 'force-run') ||
+          (github.event_name == 'workflow_dispatch' && inputs.cargo_deny_check == 'auto' && (steps.changed-files.outputs.cargo_lock == 'true' || steps.changed-files.outputs.deny_toml == 'true'))
         uses: EmbarkStudios/cargo-deny-action@v2
+
+  cache-electrs:
+    name: Build electrs if not cached
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check cache
+        id: check-cache
+        uses: actions/cache/restore@v6
+        with:
+          lookup-only: true
+          path: ${{ runner.temp }}/electrs/target/release/electrs
+          key: electrs-${{ env.ELECTRS_VERSION }}
+
+      - name: Build electrs
+        if: steps.check-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --branch ${{ env.ELECTRS_VERSION }} --depth 1 https://github.com/mempool/electrs.git ${{ runner.temp }}/electrs
+          pushd ${{ runner.temp }}/electrs
+          cargo build --locked --release
+          popd
+
+      - name: Save cache
+        if: steps.check-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ runner.temp }}/electrs/target/release/electrs
+          key: electrs-${{ env.ELECTRS_VERSION }}
+
 
   integration-test:
     name: Integration test
     runs-on: ubuntu-latest
-    needs: [check-lint]
+    needs: [cache-electrs, check-lint]
     steps:
       - name: Download latest bitcoin-patched
         run: |
@@ -62,37 +132,28 @@ jobs:
           chmod +x bitcoin-patched-bins/bitcoin-cli
           popd
 
-      - name: Checkout electrs
-        run: |
-          pushd ..
-          git clone https://github.com/mempool/electrs.git
-          popd
+      - name: Restore electrs from cache
+        uses: actions/cache/restore@v6
+        with:
+          fail-on-cache-miss: true
+          path: ${{ runner.temp }}/electrs/target/release/electrs
+          key: electrs-${{ env.ELECTRS_VERSION }}
 
       - name: Install latest nightly toolchain
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: nightly
 
-      - name: Rust Cache (electrs)
-        uses: Swatinem/rust-cache@v2
-        with:
-          prefix-key: "v0-rust-electrs"
-          workspaces: ../electrs -> target
-
-      - name: Install electrs
-        run: |
-          pushd ../electrs
-          cargo build --locked --release
-          popd
-
       - uses: actions/checkout@v7
         with:
           submodules: "recursive"
 
       - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@v2.9.1
         with:
-          shared-key: x86_64-unknown-linux-gnu
+          cache-all-crates: "true"
+          prefix-key: "v0-rust-nightly"
+          shared-key: debug-x86_64-unknown-linux-gnu
 
       # The test harness comes from bip300301_enforcer_integration_tests, pinned
       # to a rev in Cargo.toml, and it has to agree with the enforcer binary on
@@ -120,8 +181,9 @@ jobs:
           popd
 
       - name: Rust Cache (enforcer)
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@v2.9.1
         with:
+          cache-bin: false
           prefix-key: "v0-rust-enforcer-${{ steps.enforcer.outputs.rev }}"
           workspaces: ../enforcer-src -> target
 
@@ -140,11 +202,11 @@ jobs:
           export BIP300301_ENFORCER='../enforcer-src/target/release/bip300301_enforcer'
           export BITCOIND='../bitcoin-patched-bins/bitcoind'
           export BITCOIN_CLI='../bitcoin-patched-bins/bitcoin-cli'
-          export ELECTRS='../electrs/target/release/electrs'
+          export ELECTRS='${{ runner.temp }}/electrs/target/release/electrs'
           export COINSHIFT_APP='target/debug/coinshift_app'
           cargo run -p coinshift_integration_tests --example integration_tests
 
-  build-release:
+  test-build-release:
     strategy:
       fail-fast: false
       matrix:
@@ -153,7 +215,9 @@ jobs:
             name: x86_64-unknown-linux-gnu
             binary-suffix: ""
             rustflags: ""
-          - os: macos-latest-large
+          # An Apple Silicon runner cross-compiles this target, and the
+          # larger Intel runner is not available on every account.
+          - os: macos-latest
             name: x86_64-apple-darwin
             binary-suffix: ""
             rustflags: ""
@@ -165,7 +229,7 @@ jobs:
             name: x86_64-pc-windows-gnu
             binary-suffix: .exe
             rustflags: "-C linker=/usr/bin/x86_64-w64-mingw32-gcc"
-    name: Build, Release ((${{ matrix.name }}))
+    name: Test, Build, Release ((${{ matrix.name }}))
     runs-on: ${{ matrix.os }}
     permissions:
       contents: write
@@ -182,13 +246,17 @@ jobs:
           target: ${{ matrix.name }}
 
       - name: Rust Cache
-        uses: Swatinem/rust-cache@v2.5.1
+        uses: Swatinem/rust-cache@v2.9.1
         with:
+          cache-bin: false
           key: ${{ matrix.name }}
 
       - name: Install windows-specific deps
         run: sudo apt install mingw-w64
         if: ${{ matrix.name == 'x86_64-pc-windows-gnu' }}
+
+      - name: Test
+        run: cargo test --tests
 
       - name: Build
         run: cargo build --release --target ${{ matrix.name }}
@@ -201,15 +269,30 @@ jobs:
             jq -er '.packages | map(select(.name == "coinshift_app") | .version) | .[0]')
           COINSHIFT_APP_FILENAME="coinshift-${COINSHIFT_APP_VERSION}-${{ matrix.name }}${{ matrix.binary-suffix }}"
           COINSHIFT_CLI_FILENAME="coinshift-cli-${COINSHIFT_APP_VERSION}-${{ matrix.name }}${{ matrix.binary-suffix }}"
+          COINSHIFT_ZIP_FILENAME="coinshift-${COINSHIFT_APP_VERSION}-${{ matrix.name }}.zip"
           echo "COINSHIFT_APP_VERSION=$COINSHIFT_APP_VERSION" >> "$GITHUB_ENV"
           echo "COINSHIFT_APP_FILENAME=$COINSHIFT_APP_FILENAME" >> "$GITHUB_ENV"
           echo "COINSHIFT_CLI_FILENAME=$COINSHIFT_CLI_FILENAME" >> "$GITHUB_ENV"
+          echo "COINSHIFT_ZIP_FILENAME=$COINSHIFT_ZIP_FILENAME" >> "$GITHUB_ENV"
 
       - name: 'Set filenames for release binaries'
         run: |
           pushd "target/${{ matrix.name }}/release/"
           ln -fs "coinshift_app${{ matrix.binary-suffix }}" "${COINSHIFT_APP_FILENAME}"
           ln -fs "coinshift_app_cli${{ matrix.binary-suffix }}" "${COINSHIFT_CLI_FILENAME}"
+          popd
+
+      - name: 'Pack the release zip'
+        # BitWindow downloads one archive per platform and takes the daemon and
+        # its CLI from it. The names inside are bare, which is what its
+        # extractor looks for.
+        run: |
+          pushd "target/${{ matrix.name }}/release/"
+          cp "coinshift_app${{ matrix.binary-suffix }}" "coinshift${{ matrix.binary-suffix }}"
+          cp "coinshift_app_cli${{ matrix.binary-suffix }}" "coinshift-cli${{ matrix.binary-suffix }}"
+          zip -j "${COINSHIFT_ZIP_FILENAME}" \
+            "coinshift${{ matrix.binary-suffix }}" \
+            "coinshift-cli${{ matrix.binary-suffix }}"
           popd
 
       - name: 'Upload Artifacts (coinshift)'
@@ -241,55 +324,7 @@ jobs:
           files: |
             target/${{ matrix.name }}/release/${{ env.COINSHIFT_APP_FILENAME }}
             target/${{ matrix.name }}/release/${{ env.COINSHIFT_CLI_FILENAME }}
+            target/${{ matrix.name }}/release/${{ env.COINSHIFT_ZIP_FILENAME }}
           fail_on_unmatched_files: true
           prerelease: ${{ steps.parse-git-tag-name-semver.outputs.prerelease != '' }}
 
-  parse-semver:
-    name: Parse version info
-    runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
-    outputs:
-      prerelease: ${{ steps.parse-git-tag-name-semver.outputs.prerelease }}
-    steps:
-      - name: Extract Git tag name
-        id: git-tag-name
-        run: |
-          echo "git_tag_name=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
-
-      - name: Parse Git tag name as semver
-        uses: madhead/semver-utils@v5.0.0
-        id: parse-git-tag-name-semver
-        with:
-          version: ${{ steps.git-tag-name.outputs.git_tag_name }}
-
-  upload-releases-to-releases-drivechain-info:
-    name: Upload releases to releases.drivechain.info
-    runs-on: ubuntu-latest
-    needs: [build-release, parse-semver]
-    if: startsWith(github.ref, 'refs/tags/') && needs.parse-semver.outputs.prerelease == ''
-    steps:
-      - name: Download release assets
-        uses: robinraju/release-downloader@v1.13
-        with:
-          tag: ${{ github.ref_name }}
-
-      - name: Create zip files for releases.drivechain.info
-        run: |
-          shopt -s extglob nullglob
-          version='+([0-9]).+([0-9]).+([0-9])?(-+([a-zA-Z0-9.]))'
-          for target in aarch64-apple-darwin x86_64-apple-darwin x86_64-pc-windows-gnu x86_64-unknown-linux-gnu; do
-            ext=""; [[ $target == *windows* ]] && ext=".exe"
-            mv coinshift-${version}-${target}${ext} coinshift-latest-${target}${ext}
-            mv coinshift-cli-${version}-${target}${ext} coinshift-cli-latest-${target}${ext}
-            zip L2-S255-Coinshift-latest-${target}.zip coinshift-latest-${target}${ext} coinshift-cli-latest-${target}${ext}
-          done
-
-      - name: Upload release assets to releases.drivechain.info
-        uses: appleboy/scp-action@v1
-        with:
-          host: 45.33.96.47
-          username: root
-          password: ${{ secrets.RELEASES_SERVER_PW }}
-          port: 22
-          source: 'L2-S255-Coinshift-latest-*.zip'
-          target: '/var/www/html/'

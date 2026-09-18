@@ -97,12 +97,12 @@ impl PostSetup {
         &self,
         post_setup: &mut EnforcerPostSetup,
     ) -> Result<(), BmmError> {
-        use bip300301_enforcer_integration_tests::mine::mine;
+        use bip300301_enforcer_integration_tests::mine::{MiningPolicy, mine};
         let ((), ()) = future::try_join(
             self.rpc_client.mine(None).map_err(BmmError::from),
             async {
                 sleep(Duration::from_secs(1)).await;
-                mine::<Self>(post_setup, 1, Some(true))
+                mine::<Self>(post_setup, 1, MiningPolicy::VOTE)
                     .await
                     .map_err(BmmError::from)
             },

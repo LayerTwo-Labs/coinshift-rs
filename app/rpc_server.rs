@@ -5,10 +5,10 @@ use coinshift::{
     net::Peer,
     state,
     types::{
-        Address, ParentChainType, PointedOutput, Swap, SwapId, SwapState,
-        SwapTxId, Txid, WithdrawalBundle,
+        Address, MainchainSyncProgress, ParentChainType, PointedOutput, Swap,
+        SwapId, SwapState, SwapTxId, Txid, WithdrawalBundle,
     },
-    wallet::Balance,
+    wallet::{Balance, TransferDests},
 };
 use coinshift_app_rpc_api::{GetBlockTemplateResponse, RpcServer};
 use jsonrpsee::{
@@ -158,6 +158,53 @@ impl RpcServer for RpcServerImpl {
         Ok(Some(block))
     }
 
+    async fn get_block_hash(
+        &self,
+        height: u32,
+    ) -> RpcResult<Option<coinshift::types::BlockHash>> {
+        self.app.node.try_get_block_hash(height).map_err(custom_err)
+    }
+
+    async fn get_block_index(
+        &self,
+        block_hash: coinshift::types::BlockHash,
+    ) -> RpcResult<coinshift::types::BlockIndex> {
+        let body = self.app.node.get_body(block_hash).map_err(custom_err)?;
+        let txs = body
+            .transactions
+            .iter()
+            .map(|tx| coinshift::types::BlockIndexTx {
+                txid: tx.txid(),
+                size: tx.canonical_size(),
+                raw: hex::encode(tx.canonical_encoding()),
+            })
+            .collect();
+        let events = self
+            .app
+            .node
+            .get_block_index_events(block_hash)
+            .map_err(custom_err)?;
+        Ok(coinshift::types::BlockIndex {
+            txs,
+            deposits: events
+                .deposits
+                .into_iter()
+                .map(|(outpoint, output)| coinshift::types::BlockIndexDeposit {
+                    outpoint,
+                    output,
+                })
+                .collect(),
+            bundle_spends: events
+                .bundle_spends
+                .into_iter()
+                .map(|(outpoint, m6id)| coinshift::types::BlockIndexSpend {
+                    outpoint,
+                    m6id,
+                })
+                .collect(),
+        })
+    }
+
     async fn get_block_template(&self) -> RpcResult<GetBlockTemplateResponse> {
         let template = self
             .app
@@ -250,6 +297,25 @@ impl RpcServer for RpcServerImpl {
         Ok(height)
     }
 
+    async fn list_mempool(
+        &self,
+    ) -> RpcResult<Vec<coinshift::types::MempoolTx>> {
+        let txs = self.app.node.get_all_transactions().map_err(custom_err)?;
+        let res = txs
+            .into_iter()
+            .map(|authorized| {
+                let tx = authorized.transaction;
+                coinshift::types::MempoolTx {
+                    txid: tx.txid(),
+                    size: tx.canonical_size(),
+                    raw: hex::encode(tx.canonical_encoding()),
+                    tx,
+                }
+            })
+            .collect();
+        Ok(res)
+    }
+
     async fn list_peers(&self) -> RpcResult<Vec<Peer>> {
         let peers = self.app.node.get_active_peers();
         Ok(peers)
@@ -262,6 +328,12 @@ impl RpcServer for RpcServerImpl {
             .map(|(outpoint, output)| PointedOutput { outpoint, output })
             .collect();
         Ok(res)
+    }
+
+    async fn mainchain_sync_progress(
+        &self,
+    ) -> RpcResult<MainchainSyncProgress> {
+        Ok(self.app.node.mainchain_sync_progress())
     }
 
     async fn mine(&self, fee: Option<u64>) -> RpcResult<()> {
@@ -288,6 +360,16 @@ impl RpcServer for RpcServerImpl {
     async fn openapi_schema(&self) -> RpcResult<utoipa::openapi::OpenApi> {
         let res = <coinshift_app_rpc_api::RpcDoc as utoipa::OpenApi>::openapi();
         Ok(res)
+    }
+
+    async fn invalidate_block(
+        &self,
+        block_hash: coinshift::types::BlockHash,
+    ) -> RpcResult<()> {
+        self.app
+            .node
+            .invalidate_block(block_hash)
+            .map_err(custom_err)
     }
 
     async fn remove_from_mempool(&self, txid: Txid) -> RpcResult<()> {
@@ -330,6 +412,35 @@ impl RpcServer for RpcServerImpl {
                 &accumulator,
                 dest,
                 Amount::from_sat(value_sats),
+                Amount::from_sat(fee_sats),
+                |outpoint| self.app.is_output_locked_to_swap(outpoint),
+            )
+            .map_err(custom_err)?;
+        let txid = tx.txid();
+        self.app.sign_and_send(tx).map_err(custom_err)?;
+        Ok(txid)
+    }
+
+    async fn transfer_many(
+        &self,
+        dests: TransferDests,
+        fee_sats: u64,
+    ) -> RpcResult<Txid> {
+        let dests = dests
+            .0
+            .into_iter()
+            .map(|(address, value_sats)| {
+                (address, Amount::from_sat(value_sats))
+            })
+            .collect();
+        let accumulator =
+            self.app.node.get_tip_accumulator().map_err(custom_err)?;
+        let tx = self
+            .app
+            .wallet
+            .create_transaction_many(
+                &accumulator,
+                &dests,
                 Amount::from_sat(fee_sats),
                 |outpoint| self.app.is_output_locked_to_swap(outpoint),
             )

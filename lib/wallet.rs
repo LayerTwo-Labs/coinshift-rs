@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     path::Path,
 };
 
@@ -11,6 +11,7 @@ use futures::{Stream, StreamExt};
 use heed::types::{Bytes, SerdeBincode, U8};
 use rustreexo::accumulator::node_hash::BitcoinNodeHash;
 use serde::{Deserialize, Serialize};
+use serde_with::{MapPreventDuplicates, serde_as};
 use sneed::{
     DatabaseUnique, Env, EnvError, RoTxn, RwTxnError, UnitKey,
     db::error::Error as DbError,
@@ -46,6 +47,17 @@ pub struct Balance {
     pub available: Amount,
 }
 
+/// Destinations of a transfer. Each address takes a value in sats.
+/// A repeated address is an error.
+#[serde_as]
+#[derive(
+    Clone, Debug, Deserialize, PartialEq, Eq, Serialize, utoipa::ToSchema,
+)]
+#[schema(value_type = BTreeMap<String, u64>)]
+pub struct TransferDests(
+    #[serde_as(as = "MapPreventDuplicates<_, _>")] pub BTreeMap<Address, u64>,
+);
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("address {address} does not exist")]
@@ -78,6 +90,8 @@ pub enum Error {
     NoSeed,
     #[error("not enough funds")]
     NotEnoughFunds,
+    #[error("no transfer destination")]
+    NoTransferDestination,
     #[error("utxo does not exist")]
     NoUtxo,
     #[error("failed to parse mnemonic seed phrase")]
@@ -90,7 +104,7 @@ pub enum Error {
 
 #[derive(Clone)]
 pub struct Wallet {
-    env: sneed::Env,
+    env: sneed::Env<heed::WithoutTls>,
     // Seed is always [u8; 64], but due to serde not implementing serialize
     // for [T; 64], use heed's `Bytes`
     // TODO: Don't store the seed in plaintext.
@@ -113,9 +127,12 @@ impl Wallet {
         std::fs::create_dir_all(path)?;
         let env = {
             use heed::EnvFlags;
-            let mut env_open_options = heed::EnvOpenOptions::new();
+            let mut env_open_options =
+                heed::EnvOpenOptions::new().read_txn_without_tls();
             env_open_options
-                .map_size(10 * 1024 * 1024) // 10MB
+                // The wallet keeps every spent output, so a node that bids
+                // for every mainchain block fills 10MB in weeks.
+                .map_size(1024 * 1024 * 1024) // 1GB
                 .max_dbs(Self::NUM_DBS);
             // Apply LMDB "fast" flags consistent with our benchmark setup:
             // - WRITE_MAP lets us write directly into the memory map instead of
@@ -136,8 +153,7 @@ impl Wallet {
                 | EnvFlags::MAP_ASYNC
                 | EnvFlags::NO_SYNC
                 | EnvFlags::NO_META_SYNC
-                | EnvFlags::NO_READ_AHEAD
-                | EnvFlags::NO_TLS;
+                | EnvFlags::NO_READ_AHEAD;
             unsafe { env_open_options.flags(fast_flags) };
             unsafe { Env::open(&env_open_options, path) }
                 .map_err(EnvError::from)?
@@ -167,7 +183,7 @@ impl Wallet {
                 .map_err(DbError::from)?;
         }
         rwtxn.commit().map_err(RwTxnError::from)?;
-        Ok(Self {
+        let wallet = Self {
             env,
             seed: seed_db,
             address_to_index,
@@ -175,7 +191,51 @@ impl Wallet {
             utxos,
             stxos,
             _version: version,
-        })
+        };
+        wallet.adopt_index_zero()?;
+        Ok(wallet)
+    }
+
+    /// An earlier version generated its first address at index 1, so a wallet
+    /// from it never owned index 0 and never saw coins paid there.
+    fn adopt_index_zero(&self) -> Result<(), Error> {
+        let mut txn = self.env.write_txn().map_err(EnvError::from)?;
+        if self
+            .seed
+            .try_get(&txn, &0)
+            .map_err(DbError::from)?
+            .is_none()
+        {
+            return Ok(());
+        }
+        // A wallet with no address derives index 0 by itself.
+        if self
+            .index_to_address
+            .last(&txn)
+            .map_err(DbError::from)?
+            .is_none()
+        {
+            return Ok(());
+        }
+        let index = 0u32.to_be_bytes();
+        if self
+            .index_to_address
+            .try_get(&txn, &index)
+            .map_err(DbError::from)?
+            .is_some()
+        {
+            return Ok(());
+        }
+        let signing_key = self.get_signing_key(&txn, 0)?;
+        let address = get_address(&signing_key.verifying_key());
+        self.index_to_address
+            .put(&mut txn, &index, &address)
+            .map_err(DbError::from)?;
+        self.address_to_index
+            .put(&mut txn, &address, &index)
+            .map_err(DbError::from)?;
+        txn.commit().map_err(RwTxnError::from)?;
+        Ok(())
     }
 
     /// Overwrite the seed, or set it if it does not already exist.
@@ -262,7 +322,7 @@ impl Wallet {
                 .ok_or(AmountOverflowError)?,
             is_locked,
         )?;
-        let change = total - value - fee;
+        let change = total - value - fee - main_fee;
 
         let inputs: Vec<_> = coins
             .into_iter()
@@ -557,6 +617,36 @@ impl Wallet {
     where
         F: Fn(&OutPoint) -> bool,
     {
+        self.create_transaction_many(
+            accumulator,
+            &BTreeMap::from([(address, value)]),
+            fee,
+            is_locked,
+        )
+    }
+
+    /// Pay each address in `dests`, and pay the change to a new address.
+    /// `is_locked` is a function that returns true if an outpoint is locked to
+    /// a swap
+    pub fn create_transaction_many<F>(
+        &self,
+        accumulator: &Accumulator,
+        dests: &BTreeMap<Address, bitcoin::Amount>,
+        fee: bitcoin::Amount,
+        is_locked: F,
+    ) -> Result<Transaction, Error>
+    where
+        F: Fn(&OutPoint) -> bool,
+    {
+        if dests.is_empty() {
+            return Err(Error::NoTransferDestination);
+        }
+        let value = dests
+            .values()
+            .try_fold(bitcoin::Amount::ZERO, |total, value| {
+                total.checked_add(*value)
+            })
+            .ok_or(AmountOverflowError)?;
         let (total, coins) = self.select_coins_with_filter(
             value.checked_add(fee).ok_or(AmountOverflowError)?,
             is_locked,
@@ -572,16 +662,17 @@ impl Wallet {
         let input_utxo_hashes: Vec<BitcoinNodeHash> =
             inputs.iter().map(|(_, hash)| hash.into()).collect();
         let proof = accumulator.prove(&input_utxo_hashes)?;
-        let outputs = vec![
-            Output {
-                address,
-                content: OutputContent::Value(value),
-            },
-            Output {
-                address: self.get_new_address()?,
-                content: OutputContent::Value(change),
-            },
-        ];
+        let mut outputs: Vec<Output> = dests
+            .iter()
+            .map(|(address, value)| Output {
+                address: *address,
+                content: OutputContent::Value(*value),
+            })
+            .collect();
+        outputs.push(Output {
+            address: self.get_new_address()?,
+            content: OutputContent::Value(change),
+        });
         Ok(Transaction {
             inputs,
             proof,
@@ -888,15 +979,15 @@ impl Wallet {
         })
     }
 
+    /// Derives an address the wallet never used. A change output takes one of
+    /// these, so two transactions never share a change address.
     pub fn get_new_address(&self) -> Result<Address, Error> {
         let mut txn = self.env.write_txn().map_err(EnvError::from)?;
-        let (last_index, _) = self
-            .index_to_address
-            .last(&txn)
-            .map_err(DbError::from)?
-            .unwrap_or(([0; 4], [0; 20].into()));
-        let last_index = BigEndian::read_u32(&last_index);
-        let index = last_index + 1;
+        let index =
+            match self.index_to_address.last(&txn).map_err(DbError::from)? {
+                Some((last_index, _)) => BigEndian::read_u32(&last_index) + 1,
+                None => 0,
+            };
         let signing_key = self.get_signing_key(&txn, index)?;
         let address = get_address(&signing_key.verifying_key());
         let index = index.to_be_bytes();
@@ -910,15 +1001,61 @@ impl Wallet {
         Ok(address)
     }
 
+    pub fn get_last_address(&self) -> Result<Option<Address>, Error> {
+        let txn = self.env.read_txn().map_err(EnvError::from)?;
+        let last = self.index_to_address.last(&txn).map_err(DbError::from)?;
+        Ok(last.map(|(_, address)| address))
+    }
+
+    pub fn get_address_or_new(&self) -> Result<Address, Error> {
+        if let Some(address) = self.get_last_address()? {
+            Ok(address)
+        } else {
+            self.get_new_address()
+        }
+    }
+
+    /// The address to receive at. Derives a new one only once the current one
+    /// receives.
+    pub fn get_receive_address(&self) -> Result<Address, Error> {
+        {
+            let rotxn = self.env.read_txn().map_err(EnvError::from)?;
+            let last =
+                self.index_to_address.last(&rotxn).map_err(DbError::from)?;
+            if let Some((_, address)) = last
+                && !self.address_received(&rotxn, &address)?
+            {
+                return Ok(address);
+            }
+        }
+        self.get_new_address()
+    }
+
+    /// True when any output the wallet holds or held pays this address.
+    fn address_received(
+        &self,
+        rotxn: &RoTxn,
+        address: &Address,
+    ) -> Result<bool, Error> {
+        let mut utxos = self.utxos.iter(rotxn).map_err(DbError::from)?;
+        while let Some((_, output)) = utxos.next().map_err(DbError::from)? {
+            if output.address == *address {
+                return Ok(true);
+            }
+        }
+        let mut stxos = self.stxos.iter(rotxn).map_err(DbError::from)?;
+        while let Some((_, spent)) = stxos.next().map_err(DbError::from)? {
+            if spent.output.address == *address {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     pub fn get_num_addresses(&self) -> Result<u32, Error> {
         let txn = self.env.read_txn().map_err(EnvError::from)?;
-        let (last_index, _) = self
-            .index_to_address
-            .last(&txn)
-            .map_err(DbError::from)?
-            .unwrap_or(([0; 4], [0; 20].into()));
-        let last_index = BigEndian::read_u32(&last_index);
-        Ok(last_index)
+        let num = self.index_to_address.len(&txn).map_err(DbError::from)?;
+        Ok(num as u32)
     }
 
     /// Maximum address index to scan when recovering an address from seed
@@ -1147,6 +1284,89 @@ mod tests {
         (dir, wallet)
     }
 
+    // A wallet that skips index 0 cannot see a deposit paid to it, and a lite
+    // wallet that derives from 0 then disagrees with the node.
+    #[test]
+    fn first_address_uses_index_zero() -> anyhow::Result<()> {
+        let (_dir, wallet) = test_wallet();
+        wallet.set_seed(&[1u8; 64])?;
+        assert_eq!(wallet.get_num_addresses()?, 0);
+
+        for index in 0..3u32 {
+            let address = wallet.get_new_address()?;
+            let txn = wallet.env.read_txn()?;
+            let expected = get_address(
+                &wallet.get_signing_key(&txn, index)?.verifying_key(),
+            );
+            drop(txn);
+            assert_eq!(address, expected);
+            assert_eq!(wallet.get_num_addresses()?, index + 1);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn get_receive_address_waits_for_a_payment() -> anyhow::Result<()> {
+        let (_dir, wallet) = test_wallet();
+        wallet.set_seed(&[1u8; 64])?;
+
+        // An address that never received comes back every time.
+        let first = wallet.get_receive_address()?;
+        for _ in 0..10 {
+            assert_eq!(wallet.get_receive_address()?, first);
+        }
+        assert_eq!(wallet.get_addresses()?.len(), 1);
+
+        // A fresh address is still fresh, so a change output never reuses one.
+        let fresh = wallet.get_new_address()?;
+        assert_ne!(fresh, first);
+        assert_eq!(wallet.get_addresses()?.len(), 2);
+
+        // The receive address moves on once it receives.
+        let output = Output {
+            address: wallet.get_receive_address()?,
+            content: OutputContent::Value(sat(1000)),
+        };
+        wallet.put_utxos(&HashMap::from([(regular_outpoint(0), output)]))?;
+        let second = wallet.get_receive_address()?;
+        assert_ne!(second, first);
+        assert_eq!(wallet.get_receive_address()?, second);
+        Ok(())
+    }
+
+    // An update must show coins paid to index 0, without a seed restore.
+    #[test]
+    fn legacy_wallet_adopts_index_zero() -> anyhow::Result<()> {
+        let dir = temp_dir::TempDir::new()?;
+
+        let index_zero = {
+            let wallet = Wallet::new(dir.path())?;
+            wallet.set_seed(&[1u8; 64])?;
+
+            // The earlier version recorded index 1 first, and never index 0.
+            let mut txn = wallet.env.write_txn()?;
+            let one = 1u32.to_be_bytes();
+            let address =
+                get_address(&wallet.get_signing_key(&txn, 1)?.verifying_key());
+            wallet.index_to_address.put(&mut txn, &one, &address)?;
+            wallet.address_to_index.put(&mut txn, &address, &one)?;
+            let zero =
+                get_address(&wallet.get_signing_key(&txn, 0)?.verifying_key());
+            txn.commit()?;
+            assert!(!wallet.get_addresses()?.contains(&zero));
+            zero
+        };
+
+        let wallet = Wallet::new(dir.path())?;
+        assert!(wallet.get_addresses()?.contains(&index_zero));
+        assert_eq!(wallet.get_num_addresses()?, 2);
+
+        // The migration runs twice without a second address.
+        wallet.adopt_index_zero()?;
+        assert_eq!(wallet.get_num_addresses()?, 2);
+        Ok(())
+    }
+
     /// When the accumulated total exactly reaches the target, coin selection
     /// must stop instead of pulling in one extra (larger) UTXO.
     #[test]
@@ -1208,5 +1428,186 @@ mod tests {
             wallet.select_coins_with_filter(sat(1000), |_| true),
             Err(Error::NotEnoughFunds)
         ));
+    }
+
+    fn funded_wallet(
+        values_sats: &[u64],
+    ) -> anyhow::Result<(temp_dir::TempDir, Wallet, Accumulator)> {
+        use crate::types::AccumulatorDiff;
+
+        let (dir, wallet) = test_wallet();
+        wallet.set_seed(&[2u8; 64])?;
+
+        let mut utxos = HashMap::new();
+        let mut diff = AccumulatorDiff::default();
+        for (index, value_sats) in values_sats.iter().enumerate() {
+            let outpoint = regular_outpoint(index as u32);
+            let output = Output {
+                address: wallet.get_new_address()?,
+                content: OutputContent::Value(sat(*value_sats)),
+            };
+            let pointed = PointedOutput {
+                outpoint,
+                output: output.clone(),
+            };
+            diff.insert(hash(&pointed).into());
+            utxos.insert(outpoint, output);
+        }
+        wallet.put_utxos(&utxos)?;
+        let mut accumulator = Accumulator::default();
+        accumulator.apply_diff(diff)?;
+        Ok((dir, wallet, accumulator))
+    }
+
+    fn value_of(output: &Output) -> u64 {
+        output.get_value().to_sat()
+    }
+
+    #[test]
+    fn create_transaction_many_pays_each_address() -> anyhow::Result<()> {
+        let (_dir, wallet, accumulator) = funded_wallet(&[10_000])?;
+
+        let dests = BTreeMap::from([
+            (Address([1u8; 20]), sat(1000)),
+            (Address([2u8; 20]), sat(2000)),
+            (Address([3u8; 20]), sat(3000)),
+        ]);
+        let tx = wallet.create_transaction_many(
+            &accumulator,
+            &dests,
+            sat(500),
+            |_| false,
+        )?;
+
+        assert_eq!(tx.outputs.len(), 4);
+        for (index, (address, value)) in dests.iter().enumerate() {
+            assert_eq!(tx.outputs[index].address, *address);
+            assert_eq!(value_of(&tx.outputs[index]), value.to_sat());
+        }
+        let change = &tx.outputs[3];
+        assert_eq!(value_of(change), 10_000 - 1000 - 2000 - 3000 - 500);
+        assert!(wallet.get_addresses()?.contains(&change.address));
+        Ok(())
+    }
+
+    #[test]
+    fn create_transaction_keeps_one_payment_and_change() -> anyhow::Result<()> {
+        let (_dir, wallet, accumulator) = funded_wallet(&[10_000])?;
+
+        let dest = Address([4u8; 20]);
+        let tx = wallet.create_transaction(
+            &accumulator,
+            dest,
+            sat(1000),
+            sat(500),
+            |_| false,
+        )?;
+
+        assert_eq!(tx.outputs.len(), 2);
+        assert_eq!(tx.outputs[0].address, dest);
+        assert_eq!(value_of(&tx.outputs[0]), 1000);
+        assert_eq!(value_of(&tx.outputs[1]), 10_000 - 1000 - 500);
+        assert!(wallet.get_addresses()?.contains(&tx.outputs[1].address));
+        Ok(())
+    }
+
+    #[test]
+    fn create_transaction_many_rejects_an_overflow() -> anyhow::Result<()> {
+        let (_dir, wallet, accumulator) = funded_wallet(&[10_000])?;
+
+        let half = sat(bitcoin::Amount::MAX.to_sat() / 2);
+        let dests = BTreeMap::from([
+            (Address([1u8; 20]), half),
+            (Address([2u8; 20]), half + sat(1)),
+        ]);
+        let result = wallet.create_transaction_many(
+            &accumulator,
+            &dests,
+            sat(500),
+            |_| false,
+        );
+        assert!(matches!(result, Err(Error::AmountOverflow(_))));
+        Ok(())
+    }
+
+    #[test]
+    fn create_transaction_many_needs_a_destination() -> anyhow::Result<()> {
+        let (_dir, wallet, accumulator) = funded_wallet(&[10_000])?;
+
+        let result = wallet.create_transaction_many(
+            &accumulator,
+            &BTreeMap::new(),
+            sat(500),
+            |_| false,
+        );
+        assert!(matches!(result, Err(Error::NoTransferDestination)));
+        Ok(())
+    }
+
+    #[test]
+    fn create_transaction_many_totals_the_values() -> anyhow::Result<()> {
+        let (_dir, wallet, accumulator) = funded_wallet(&[1000, 1000])?;
+
+        let dests = BTreeMap::from([
+            (Address([1u8; 20]), sat(900)),
+            (Address([2u8; 20]), sat(900)),
+        ]);
+        // Each coin alone is too small, so the sum decides the selection.
+        let tx = wallet.create_transaction_many(
+            &accumulator,
+            &dests,
+            sat(100),
+            |_| false,
+        )?;
+        assert_eq!(tx.inputs.len(), 2);
+        assert_eq!(value_of(&tx.outputs[2]), 100);
+
+        let result = wallet.create_transaction_many(
+            &accumulator,
+            &dests,
+            sat(1000),
+            |_| false,
+        );
+        assert!(matches!(result, Err(Error::NotEnoughFunds)));
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_address_or_new() -> anyhow::Result<()> {
+        let (_dir, wallet) = test_wallet();
+
+        // Seed must be set before we can generate addresses
+        assert!(!wallet.has_seed()?);
+        let seed = [1u8; 64];
+        wallet.set_seed(&seed)?;
+        assert!(wallet.has_seed()?);
+
+        // Get last address when none have been generated
+        let last = wallet.get_last_address()?;
+        assert!(last.is_none());
+
+        // Get address or new should generate the first address
+        let addr1 = wallet.get_address_or_new()?;
+
+        // Now last address should be addr1
+        let last = wallet.get_last_address()?;
+        assert_eq!(last, Some(addr1));
+
+        // Subsequent get_address_or_new calls should return the same addr1
+        let addr2 = wallet.get_address_or_new()?;
+        assert_eq!(addr1, addr2);
+
+        // Generating a new address explicitly should give a new one
+        let addr3 = wallet.get_new_address()?;
+        assert_ne!(addr1, addr3);
+
+        // Now last address should be addr3
+        let last = wallet.get_last_address()?;
+        assert_eq!(last, Some(addr3));
+
+        // And get_address_or_new should return addr3
+        let addr4 = wallet.get_address_or_new()?;
+        assert_eq!(addr3, addr4);
+        Ok(())
     }
 }

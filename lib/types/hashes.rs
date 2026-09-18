@@ -225,13 +225,52 @@ impl std::fmt::Display for M6id {
     }
 }
 
+impl utoipa::PartialSchema for M6id {
+    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
+        let obj =
+            utoipa::openapi::Object::with_type(utoipa::openapi::Type::String);
+        utoipa::openapi::RefOr::T(utoipa::openapi::Schema::Object(obj))
+    }
+}
+
+impl utoipa::ToSchema for M6id {
+    fn name() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed("M6id")
+    }
+}
+
+/// A block hash that is known to be non-zero. Bitcoin core often uses the
+/// all-zeros block hash to represent `Option::<bitcoin::BlockHash>::None`.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[repr(transparent)]
+#[serde(transparent)]
+pub struct NonZeroBitcoinBlockHash(bitcoin::BlockHash);
+
+impl NonZeroBitcoinBlockHash {
+    pub fn new(block_hash: bitcoin::BlockHash) -> Option<Self> {
+        if block_hash == bitcoin::BlockHash::all_zeros() {
+            None
+        } else {
+            Some(Self(block_hash))
+        }
+    }
+}
+
+impl std::fmt::Display for NonZeroBitcoinBlockHash {
+    #[inline(always)]
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 pub fn hash<T>(data: &T) -> Hash
 where
     T: BorshSerialize + ?Sized,
 {
-    let data_serialized = borsh::to_vec(data)
+    let mut hasher = blake3::Hasher::new();
+    let () = borsh::to_writer(&mut hasher, data)
         .expect("failed to serialize with borsh to compute a hash");
-    blake3::hash(&data_serialized).into()
+    hasher.finalize().into()
 }
 
 /// Optimized hash function that reuses a thread-local scratch buffer
@@ -241,22 +280,16 @@ pub fn hash_with_scratch_buffer<T>(data: &T) -> Hash
 where
     T: BorshSerialize + ?Sized,
 {
-    use smallvec::SmallVec;
-
     thread_local! {
-        // Thread-local scratch buffer that starts with 256 bytes on the stack
-        // and grows as needed. This avoids heap allocations for most hashes.
-        static SCRATCH_BUFFER: std::cell::RefCell<SmallVec<[u8; 256]>> =
-            std::cell::RefCell::new(SmallVec::new());
+        static HASHER: std::cell::RefCell<blake3::Hasher> =
+            std::cell::RefCell::new(blake3::Hasher::new());
     }
 
-    SCRATCH_BUFFER.with(|buffer| {
-        let mut buffer = buffer.borrow_mut();
-        buffer.clear();
-
-        borsh::to_writer(&mut *buffer, data)
+    HASHER.with(|hasher| {
+        let mut hasher = hasher.borrow_mut();
+        hasher.reset();
+        borsh::to_writer(&mut *hasher, data)
             .expect("failed to serialize with borsh to compute a hash");
-
-        blake3::hash(&buffer).into()
+        hasher.finalize().into()
     })
 }

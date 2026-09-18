@@ -13,10 +13,10 @@ use crate::{
     },
     types::{
         AccumulatorDiff, AggregatedWithdrawal, AmountOverflowError, BlockHash,
-        GetValue, InPoint, M6id, OutPoint, OutPointKey, Output, OutputContent,
-        ParentChainType, PointedOutput, PointedOutputRef, SpentOutput, Swap,
-        SwapId, SwapState, SwapTxId, WithdrawalBundle, WithdrawalBundleEvent,
-        WithdrawalBundleStatus, hash,
+        BlockIndexEvents, GetValue, InPoint, M6id, OutPoint, OutPointKey,
+        Output, OutputContent, ParentChainType, PointedOutput,
+        PointedOutputRef, SpentOutput, Swap, SwapId, SwapState, SwapTxId,
+        WithdrawalBundle, WithdrawalBundleEvent, WithdrawalBundleStatus, hash,
         proto::mainchain::{BlockEvent, TwoWayPegData},
     },
     wallet::Wallet,
@@ -27,15 +27,6 @@ fn collect_withdrawal_bundle(
     rotxn: &RoTxn,
     block_height: u32,
 ) -> Result<Option<WithdrawalBundle>, Error> {
-    // Weight of a bundle with 0 outputs.
-    const BUNDLE_0_WEIGHT: u64 = 504;
-    // Weight of a single output.
-    const OUTPUT_WEIGHT: u64 = 128;
-    // Turns out to be 3121.
-    const MAX_BUNDLE_OUTPUTS: usize =
-        ((bitcoin::policy::MAX_STANDARD_TX_WEIGHT as u64 - BUNDLE_0_WEIGHT)
-            / OUTPUT_WEIGHT) as usize;
-
     // Aggregate all outputs by destination.
     // destination -> (value, mainchain fee, spent_utxos)
     let mut address_to_aggregated_withdrawal = HashMap::<
@@ -84,17 +75,37 @@ fn collect_withdrawal_bundle(
     aggregated_withdrawals.sort_by_key(|a| std::cmp::Reverse(a.clone()));
     let mut fee = bitcoin::Amount::ZERO;
     let mut spend_utxos = BTreeMap::<OutPoint, Output>::new();
-    let mut bundle_outputs = Vec::with_capacity(MAX_BUNDLE_OUTPUTS);
+    let mut bundle_outputs = Vec::new();
+    let mut bundle_txouts_size: u32 = 0;
     for aggregated in &aggregated_withdrawals {
-        if bundle_outputs.len() > MAX_BUNDLE_OUTPUTS {
+        let script_pubkey =
+            aggregated.main_address.assume_checked_ref().script_pubkey();
+        let Ok(n_outputs) = u32::try_from(bundle_outputs.len() + 1) else {
+            break;
+        };
+        let Ok(spk_size) = u32::try_from(script_pubkey.len()) else {
+            // This SPK is invalid, but others might be ok
+            continue;
+        };
+        let Some(txout_size) = WithdrawalBundle::txout_size(spk_size) else {
+            // This SPK is invalid, but others might be ok
+            continue;
+        };
+        if let Some(sum_txout_sizes) =
+            bundle_txouts_size.checked_add(txout_size)
+        {
+            bundle_txouts_size = sum_txout_sizes;
+        } else {
+            break;
+        };
+        if WithdrawalBundle::predict_weight(n_outputs, bundle_txouts_size)
+            .is_none()
+        {
             break;
         }
         let bundle_output = bitcoin::TxOut {
             value: aggregated.value,
-            script_pubkey: aggregated
-                .main_address
-                .assume_checked_ref()
-                .script_pubkey(),
+            script_pubkey,
         };
         spend_utxos.extend(aggregated.spend_utxos.clone());
         bundle_outputs.push(bundle_output);
@@ -105,11 +116,13 @@ fn collect_withdrawal_bundle(
     Ok(Some(bundle))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn connect_withdrawal_bundle_submitted(
     state: &State,
     rwtxn: &mut RwTxn,
     block_height: u32,
     accumulator_diff: &mut AccumulatorDiff,
+    index_events: &mut BlockIndexEvents,
     event_block_hash: &bitcoin::BlockHash,
     m6id: M6id,
 ) -> Result<(), Error> {
@@ -172,6 +185,7 @@ fn connect_withdrawal_bundle_submitted(
                 .stxos
                 .put(rwtxn, &key, &spent_output)
                 .map_err(DbError::from)?;
+            index_events.bundle_spends.push((*outpoint, m6id));
         }
         state
             .withdrawal_bundles
@@ -438,11 +452,13 @@ fn connect_withdrawal_bundle_failed(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn connect_withdrawal_bundle_event(
     state: &State,
     rwtxn: &mut RwTxn,
     block_height: u32,
     accumulator_diff: &mut AccumulatorDiff,
+    index_events: &mut BlockIndexEvents,
     event_block_hash: &bitcoin::BlockHash,
     event: &WithdrawalBundleEvent,
 ) -> Result<(), Error> {
@@ -453,6 +469,7 @@ fn connect_withdrawal_bundle_event(
                 rwtxn,
                 block_height,
                 accumulator_diff,
+                index_events,
                 event_block_hash,
                 event.m6id,
             )
@@ -483,6 +500,7 @@ fn connect_event(
     rwtxn: &mut RwTxn,
     block_height: u32,
     accumulator_diff: &mut AccumulatorDiff,
+    index_events: &mut BlockIndexEvents,
     latest_deposit_block_hash: &mut Option<bitcoin::BlockHash>,
     latest_withdrawal_bundle_event_block_hash: &mut Option<bitcoin::BlockHash>,
     event_block_hash: bitcoin::BlockHash,
@@ -514,6 +532,7 @@ fn connect_event(
                 .map_err(DbError::from)?;
             let utxo_hash = hash(&PointedOutputRef { outpoint, output });
             accumulator_diff.insert(utxo_hash.into());
+            index_events.deposits.push((outpoint, output.clone()));
             *latest_deposit_block_hash = Some(event_block_hash);
         }
         BlockEvent::WithdrawalBundle(withdrawal_bundle_event) => {
@@ -522,6 +541,7 @@ fn connect_event(
                 rwtxn,
                 block_height,
                 accumulator_diff,
+                index_events,
                 &event_block_hash,
                 withdrawal_bundle_event,
             )?;
@@ -906,6 +926,7 @@ pub fn connect(
         .map_err(DbError::from)?
         .unwrap_or_default();
     let mut accumulator_diff = AccumulatorDiff::default();
+    let mut index_events = BlockIndexEvents::default();
     let mut latest_deposit_block_hash = None;
     let mut latest_withdrawal_bundle_event_block_hash = None;
     for (event_block_hash, event_block_info) in &two_way_peg_data.block_info {
@@ -915,6 +936,7 @@ pub fn connect(
                 rwtxn,
                 block_height,
                 &mut accumulator_diff,
+                &mut index_events,
                 &mut latest_deposit_block_hash,
                 &mut latest_withdrawal_bundle_event_block_hash,
                 *event_block_hash,
@@ -922,6 +944,14 @@ pub fn connect(
                 wallet,
             )?;
         }
+    }
+    // Record what this block moved outside its body. An address index cannot
+    // see a deposit or a bundle spend any other way.
+    if !index_events.is_empty() {
+        state
+            .block_index_events
+            .put(rwtxn, &block_height, &index_events)
+            .map_err(DbError::from)?;
     }
 
     // Process coinshift transactions after processing deposits/withdrawals
@@ -1186,7 +1216,7 @@ fn disconnect_withdrawal_bundle_failed(
                     .stxos
                     .put(rwtxn, &OutPointKey::from(outpoint), &spent_output)
                     .map_err(DbError::from)?;
-                if state
+                if !state
                     .utxos
                     .delete(rwtxn, &OutPointKey::from(outpoint))
                     .map_err(DbError::from)?
@@ -1289,7 +1319,11 @@ fn disconnect_event(
             }
             let utxo_hash = hash(&PointedOutput { outpoint, output });
             accumulator_diff.remove(utxo_hash.into());
-            *latest_deposit_block_hash = Some(event_block_hash);
+            // Blocks are iterated in reverse here, so the first event block
+            // hash seen is the latest. Keep it to match what `connect` stored.
+            if latest_deposit_block_hash.is_none() {
+                *latest_deposit_block_hash = Some(event_block_hash);
+            }
         }
         BlockEvent::WithdrawalBundle(withdrawal_bundle_event) => {
             let () = disconnect_withdrawal_bundle_event(
@@ -1299,7 +1333,12 @@ fn disconnect_event(
                 accumulator_diff,
                 withdrawal_bundle_event,
             )?;
-            *latest_withdrawal_bundle_event_block_hash = Some(event_block_hash);
+            // Blocks are iterated in reverse here, so the first event block
+            // hash seen is the latest. Keep it to match what `connect` stored.
+            if latest_withdrawal_bundle_event_block_hash.is_none() {
+                *latest_withdrawal_bundle_event_block_hash =
+                    Some(event_block_hash);
+            }
         }
     }
     Ok(())
@@ -1321,6 +1360,10 @@ pub fn disconnect(
     let mut accumulator_diff = AccumulatorDiff::default();
     let mut latest_deposit_block_hash = None;
     let mut latest_withdrawal_bundle_event_block_hash = None;
+    state
+        .block_index_events
+        .delete(rwtxn, &block_height)
+        .map_err(DbError::from)?;
     // Reverse any swap expiries applied by `process_coinshift_transactions`
     // when this block was connected: restore each swap's pre-expiry state and
     // re-lock the outputs that were unlocked. Symmetric with the connect path,
@@ -1382,9 +1425,9 @@ pub fn disconnect(
             latest_withdrawal_bundle_event_block_hash,
             last_withdrawal_bundle_event_block_hash
         );
-        assert_eq!(block_height - 1, last_withdrawal_bundle_event_block_height);
+        assert_eq!(block_height, last_withdrawal_bundle_event_block_height);
         if !state
-            .deposit_blocks
+            .withdrawal_bundle_event_blocks
             .delete(rwtxn, &last_withdrawal_bundle_event_block_seq_idx)
             .map_err(DbError::from)?
         {
@@ -1397,12 +1440,12 @@ pub fn disconnect(
         .map(|(height, _bundle)| height)
         .unwrap_or_default();
     if block_height - last_withdrawal_bundle_failure_height
-        > WITHDRAWAL_BUNDLE_FAILURE_GAP
+        >= WITHDRAWAL_BUNDLE_FAILURE_GAP
         && let Some((_bundle, bundle_height)) = state
             .pending_withdrawal_bundle
             .try_get(rwtxn, &())
             .map_err(DbError::from)?
-        && bundle_height == block_height - 1
+        && bundle_height == block_height
     {
         state
             .pending_withdrawal_bundle
@@ -1420,7 +1463,7 @@ pub fn disconnect(
             .map_err(DbError::from)?
             .ok_or(Error::NoDepositBlock)?;
         assert_eq!(latest_deposit_block_hash, last_deposit_block_hash);
-        assert_eq!(block_height - 1, last_deposit_block_height);
+        assert_eq!(block_height, last_deposit_block_height);
         if !state
             .deposit_blocks
             .delete(rwtxn, &last_deposit_block_seq_idx)
@@ -1606,6 +1649,7 @@ mod withdrawal_bundle_reversal_tests {
             .put(&mut rwtxn, &(), &(bundle, 9))
             .unwrap();
         let mut accumulator_diff = AccumulatorDiff::default();
+        let mut index_events = BlockIndexEvents::default();
 
         // Submitted at height 10, then expired at height 11, which restores the
         // spent UTXO.
@@ -1614,6 +1658,7 @@ mod withdrawal_bundle_reversal_tests {
             &mut rwtxn,
             10,
             &mut accumulator_diff,
+            &mut index_events,
             &event_block_hash,
             &bundle_event(m6id, WithdrawalBundleStatus::Submitted),
         )
@@ -1623,6 +1668,7 @@ mod withdrawal_bundle_reversal_tests {
             &mut rwtxn,
             11,
             &mut accumulator_diff,
+            &mut index_events,
             &event_block_hash,
             &bundle_event(m6id, WithdrawalBundleStatus::Failed),
         )
@@ -1633,6 +1679,7 @@ mod withdrawal_bundle_reversal_tests {
             &mut rwtxn,
             12,
             &mut accumulator_diff,
+            &mut index_events,
             &event_block_hash,
             &bundle_event(m6id, WithdrawalBundleStatus::Submitted),
         )
@@ -1678,5 +1725,446 @@ mod withdrawal_bundle_reversal_tests {
             state.stxos.try_get(&rwtxn, &key).unwrap().is_none(),
             "disconnect must not re-spend the UTXO restored by the expiry"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use sneed::Env;
+
+    use crate::{
+        state::{
+            State, WithdrawalBundleInfo, rollback::RollBack,
+            two_way_peg_data::disconnect_withdrawal_bundle_failed,
+        },
+        types::{
+            AccumulatorDiff, Address, InPoint, OutPoint, OutPointKey, Output,
+            OutputContent, Txid, WithdrawalBundle, WithdrawalBundleStatus,
+        },
+    };
+
+    fn test_state() -> (temp_dir::TempDir, Env, State) {
+        let dir = temp_dir::TempDir::new().unwrap();
+        let mut opts = heed::EnvOpenOptions::new();
+        opts.map_size(16 * 1024 * 1024).max_dbs(State::NUM_DBS);
+        let env = unsafe { Env::open(&opts, dir.path()) }.unwrap();
+        let state = State::new(&env).unwrap();
+        (dir, env, state)
+    }
+
+    // a failed known bundle reinstates its utxos as spendable, so disconnecting
+    // the failure must spend them again
+    #[test]
+    fn disconnect_failed_bundle_spends_reinstated_utxo() {
+        let (_dir, env, state) = test_state();
+        let outpoint = OutPoint::Regular {
+            txid: Txid([1; 32]),
+            vout: 0,
+        };
+        let output = Output {
+            address: Address::ALL_ZEROS,
+            content: OutputContent::Value(bitcoin::Amount::from_sat(1000)),
+        };
+        let key = OutPointKey::from(&outpoint);
+
+        let m6id = {
+            let mut spend_utxos = BTreeMap::new();
+            spend_utxos.insert(outpoint, output.clone());
+            let bundle = WithdrawalBundle::new(
+                1,
+                bitcoin::Amount::ZERO,
+                spend_utxos,
+                Vec::new(),
+            )
+            .unwrap();
+            let m6id = bundle.compute_m6id();
+            let mut bundle_status =
+                RollBack::new(WithdrawalBundleStatus::Submitted, 0);
+            bundle_status
+                .push(WithdrawalBundleStatus::Failed, 1)
+                .unwrap();
+            let mut rwtxn = env.write_txn().unwrap();
+            state
+                .withdrawal_bundles
+                .put(
+                    &mut rwtxn,
+                    &m6id,
+                    &(WithdrawalBundleInfo::Known(bundle), bundle_status),
+                )
+                .unwrap();
+            state
+                .latest_failed_withdrawal_bundle
+                .put(&mut rwtxn, &(), &RollBack::new(m6id, 1))
+                .unwrap();
+            // the failure reinstated the utxo
+            state.utxos.put(&mut rwtxn, &key, &output).unwrap();
+            rwtxn.commit().unwrap();
+            m6id
+        };
+
+        let mut rwtxn = env.write_txn().unwrap();
+        let mut accumulator_diff = AccumulatorDiff::default();
+        disconnect_withdrawal_bundle_failed(
+            &state,
+            &mut rwtxn,
+            1,
+            &mut accumulator_diff,
+            m6id,
+        )
+        .unwrap();
+        assert!(state.utxos.try_get(&rwtxn, &key).unwrap().is_none());
+        let stxo = state.stxos.try_get(&rwtxn, &key).unwrap().unwrap();
+        assert_eq!(stxo.inpoint, InPoint::Withdrawal { m6id });
+        rwtxn.commit().unwrap();
+    }
+
+    // disconnecting a withdrawal bundle event must remove its
+    // withdrawal_bundle_event_blocks record, not a deposit_blocks record that
+    // happens to share the same sequence index
+    #[test]
+    fn disconnect_withdrawal_event_block_uses_correct_db() {
+        use bitcoin::hashes::Hash as _;
+        use hashlink::LinkedHashMap;
+
+        use crate::{
+            state::two_way_peg_data::disconnect,
+            types::{
+                M6id, WithdrawalBundleEvent,
+                proto::mainchain::{BlockEvent, BlockInfo, TwoWayPegData},
+            },
+        };
+
+        let (_dir, env, state) = test_state();
+
+        let block_height = 5u32;
+        let m6id = M6id(bitcoin::Txid::from_byte_array([7; 32]));
+        let event_block_hash = bitcoin::BlockHash::from_byte_array([9; 32]);
+        let deposit_block_hash = bitcoin::BlockHash::from_byte_array([3; 32]);
+
+        let mut rwtxn = env.write_txn().unwrap();
+        state.height.put(&mut rwtxn, &(), &block_height).unwrap();
+        state
+            .withdrawal_bundles
+            .put(
+                &mut rwtxn,
+                &m6id,
+                &(
+                    WithdrawalBundleInfo::Unknown,
+                    RollBack::new(
+                        WithdrawalBundleStatus::Submitted,
+                        block_height,
+                    ),
+                ),
+            )
+            .unwrap();
+        state
+            .withdrawal_bundle_event_blocks
+            .put(&mut rwtxn, &0, &(event_block_hash, block_height))
+            .unwrap();
+        // a deposit record at the same sequence index that must survive
+        state
+            .deposit_blocks
+            .put(&mut rwtxn, &0, &(deposit_block_hash, block_height))
+            .unwrap();
+        rwtxn.commit().unwrap();
+
+        let two_way_peg_data = {
+            let mut block_info = LinkedHashMap::new();
+            block_info.insert(
+                event_block_hash,
+                BlockInfo {
+                    bmm_commitment: None,
+                    events: vec![BlockEvent::WithdrawalBundle(
+                        WithdrawalBundleEvent {
+                            m6id,
+                            status: WithdrawalBundleStatus::Submitted,
+                        },
+                    )],
+                },
+            );
+            TwoWayPegData { block_info }
+        };
+
+        let mut rwtxn = env.write_txn().unwrap();
+        disconnect(&state, &mut rwtxn, &two_way_peg_data).unwrap();
+        assert!(
+            state
+                .withdrawal_bundle_event_blocks
+                .try_get(&rwtxn, &0)
+                .unwrap()
+                .is_none()
+        );
+        assert!(state.deposit_blocks.try_get(&rwtxn, &0).unwrap().is_some());
+        rwtxn.commit().unwrap();
+    }
+
+    fn seeded_public_key(idx: u32) -> bitcoin::CompressedPublicKey {
+        use bitcoin::secp256k1::{Secp256k1, SecretKey};
+
+        let secp = Secp256k1::new();
+        let mut key_bytes = [0_u8; 32];
+        key_bytes[28..].copy_from_slice(&idx.to_be_bytes());
+        let secret_key = SecretKey::from_slice(&key_bytes)
+            .expect("small non-zero integers are valid secret keys");
+        let public_key =
+            bitcoin::secp256k1::PublicKey::from_secret_key(&secp, &secret_key);
+        bitcoin::CompressedPublicKey(public_key)
+    }
+
+    fn regtest_p2wpkh_address(
+        idx: u32,
+    ) -> bitcoin::Address<bitcoin::address::NetworkUnchecked> {
+        let public_key = seeded_public_key(idx);
+        bitcoin::Address::p2wpkh(&public_key, bitcoin::Network::Regtest)
+            .into_unchecked()
+    }
+
+    fn with_state_with_withdrawals<R>(
+        count: u32,
+        main_address: fn(
+            u32,
+        ) -> bitcoin::Address<
+            bitcoin::address::NetworkUnchecked,
+        >,
+        f: impl FnOnce(&State, &mut sneed::RwTxn<'_>) -> R,
+    ) -> anyhow::Result<R> {
+        let (_dir, env, state) = test_state();
+        let mut rwtxn = env.write_txn()?;
+        state.height.put(
+            &mut rwtxn,
+            &(),
+            &crate::state::WITHDRAWAL_BUNDLE_FAILURE_GAP,
+        )?;
+
+        for idx in 1..=count {
+            let mut txid_bytes = [0_u8; 32];
+            txid_bytes[28..].copy_from_slice(&idx.to_be_bytes());
+            let outpoint = OutPoint::Regular {
+                txid: Txid(txid_bytes),
+                vout: 0,
+            };
+            let output = Output {
+                address: {
+                    let mut addr = [0u8; 20];
+                    let idx = idx.to_be_bytes();
+                    addr[..idx.len()].copy_from_slice(&idx);
+                    Address(addr)
+                },
+                content: OutputContent::Withdrawal {
+                    value: bitcoin::Amount::from_sat(1_000),
+                    main_fee: bitcoin::Amount::ZERO,
+                    main_address: main_address(idx),
+                },
+            };
+            state.utxos.put(
+                &mut rwtxn,
+                &OutPointKey::from(&outpoint),
+                &output,
+            )?;
+        }
+        let result = f(&state, &mut rwtxn);
+        drop(rwtxn);
+        Ok(result)
+    }
+
+    #[test]
+    fn collect_withdrawal_bundle_p2wpkh_off_by_one_does_not_exceed_weight()
+    -> anyhow::Result<()> {
+        use crate::state::two_way_peg_data::collect_withdrawal_bundle;
+
+        const CLAIMED_MAX_BUNDLE_OUTPUTS: u32 = 3_222;
+
+        let bundle = with_state_with_withdrawals(
+            CLAIMED_MAX_BUNDLE_OUTPUTS + 1,
+            regtest_p2wpkh_address,
+            |state, rwtxn| collect_withdrawal_bundle(state, rwtxn, 42),
+        )?;
+        let bundle = match bundle {
+            Ok(Some(bundle)) => bundle,
+            Ok(None) => anyhow::bail!("expected a withdrawal bundle"),
+            Err(err) => anyhow::bail!("unexpected collection error: {err:?}"),
+        };
+        let output_count = bundle.tx().output.len();
+        let weight = bundle.tx().weight().to_wu();
+
+        anyhow::ensure!(
+            output_count == (CLAIMED_MAX_BUNDLE_OUTPUTS as usize + 2),
+            "expected {} tx outputs including metadata, got {output_count}",
+            CLAIMED_MAX_BUNDLE_OUTPUTS as usize + 2,
+        );
+        anyhow::ensure!(
+            weight <= bitcoin::policy::MAX_STANDARD_TX_WEIGHT as u64,
+            "unexpected overweight P2WPKH bundle: {weight} wu"
+        );
+        Ok(())
+    }
+
+    // connecting a deposit then disconnecting it on a reorg must round-trip
+    #[test]
+    fn deposit_reorg_round_trips() {
+        use bitcoin::hashes::Hash as _;
+        use hashlink::LinkedHashMap;
+
+        use crate::types::{
+            Body, FilledTransaction, Header,
+            proto::mainchain::{BlockEvent, BlockInfo, Deposit, TwoWayPegData},
+        };
+
+        let (_dir, env, state) = test_state();
+
+        let empty_body = Body {
+            coinbase: Vec::new(),
+            transactions: Vec::new(),
+            authorizations: Vec::new(),
+        };
+        let no_txs: &[FilledTransaction] = &[];
+        let merkle_root = Body::compute_merkle_root(&[], no_txs).unwrap();
+        let main0 = bitcoin::BlockHash::from_byte_array([10; 32]);
+        let main1 = bitcoin::BlockHash::from_byte_array([11; 32]);
+
+        let genesis = Header {
+            merkle_root,
+            prev_side_hash: None,
+            prev_main_hash: main0,
+            roots: Vec::new(),
+        };
+        {
+            let mut rwtxn = env.write_txn().unwrap();
+            state
+                .apply_block(&mut rwtxn, &genesis, &empty_body)
+                .unwrap();
+            state
+                .connect_two_way_peg_data(
+                    &mut rwtxn,
+                    &TwoWayPegData::default(),
+                    None,
+                    None,
+                )
+                .unwrap();
+            rwtxn.commit().unwrap();
+        }
+
+        let block1 = Header {
+            merkle_root,
+            prev_side_hash: Some(genesis.hash()),
+            prev_main_hash: main1,
+            roots: Vec::new(),
+        };
+        let deposit_outpoint = bitcoin::OutPoint {
+            txid: bitcoin::Txid::from_byte_array([2; 32]),
+            vout: 0,
+        };
+        let deposit_key =
+            OutPointKey::from(&OutPoint::Deposit(deposit_outpoint));
+        let deposit_twpd = {
+            let mut block_info = LinkedHashMap::new();
+            block_info.insert(
+                main1,
+                BlockInfo {
+                    bmm_commitment: None,
+                    events: vec![BlockEvent::Deposit(Deposit {
+                        tx_index: 0,
+                        outpoint: deposit_outpoint,
+                        output: Output {
+                            address: Address::ALL_ZEROS,
+                            content: OutputContent::Value(
+                                bitcoin::Amount::from_sat(1000),
+                            ),
+                        },
+                    })],
+                },
+            );
+            TwoWayPegData { block_info }
+        };
+        {
+            let mut rwtxn = env.write_txn().unwrap();
+            state.apply_block(&mut rwtxn, &block1, &empty_body).unwrap();
+            state
+                .connect_two_way_peg_data(&mut rwtxn, &deposit_twpd, None, None)
+                .unwrap();
+            assert!(
+                state.utxos.try_get(&rwtxn, &deposit_key).unwrap().is_some()
+            );
+            assert!(state.deposit_blocks.last(&rwtxn).unwrap().is_some());
+            rwtxn.commit().unwrap();
+        }
+
+        {
+            let mut rwtxn = env.write_txn().unwrap();
+            state
+                .disconnect_two_way_peg_data(&mut rwtxn, &deposit_twpd)
+                .unwrap();
+            assert!(
+                state.utxos.try_get(&rwtxn, &deposit_key).unwrap().is_none()
+            );
+            assert!(state.deposit_blocks.last(&rwtxn).unwrap().is_none());
+            rwtxn.commit().unwrap();
+        }
+    }
+
+    // A single two-way-peg batch can span multiple mainchain blocks. Connecting
+    // deposits from two distinct blocks then disconnecting the batch must
+    // restore the prior state. Before the fix, disconnect recomputed the latest
+    // deposit block hash by reverse iteration (yielding the oldest block) and
+    // panicked on the consistency assert against the newest hash connect stored.
+    #[test]
+    fn disconnect_two_deposit_blocks_restores_state() -> anyhow::Result<()> {
+        use bitcoin::hashes::Hash as _;
+        use hashlink::LinkedHashMap;
+
+        use crate::{
+            state::two_way_peg_data::{connect, disconnect},
+            types::{
+                BlockHash,
+                proto::mainchain::{
+                    BlockEvent, BlockInfo, Deposit, TwoWayPegData,
+                },
+            },
+        };
+
+        fn deposit_block(salt: u8) -> (bitcoin::BlockHash, BlockInfo) {
+            let dep = Deposit {
+                tx_index: 0,
+                outpoint: bitcoin::OutPoint {
+                    txid: bitcoin::Txid::from_byte_array([salt; 32]),
+                    vout: 0,
+                },
+                output: Output {
+                    address: Address([salt; 20]),
+                    content: OutputContent::Value(bitcoin::Amount::from_sat(
+                        1000,
+                    )),
+                },
+            };
+            (
+                bitcoin::BlockHash::from_byte_array([salt; 32]),
+                BlockInfo {
+                    bmm_commitment: None,
+                    events: vec![BlockEvent::Deposit(dep)],
+                },
+            )
+        }
+        let (_dir, env, state) = test_state();
+        let mut rwtxn = env.write_txn()?;
+        state.height.put(&mut rwtxn, &(), &10)?;
+        // coinshift's connect reads the tip for its swap checks
+        state.tip.put(&mut rwtxn, &(), &BlockHash([0; 32]))?;
+
+        let mut block_info = LinkedHashMap::new();
+        let (h1, b1) = deposit_block(1);
+        let (h2, b2) = deposit_block(2);
+        block_info.insert(h1, b1);
+        block_info.insert(h2, b2);
+        let tdp = TwoWayPegData { block_info };
+
+        let () = connect(&state, &mut rwtxn, &tdp, None, None)?;
+        anyhow::ensure!(state.utxos.len(&rwtxn)? == 2);
+        disconnect(&state, &mut rwtxn, &tdp)?;
+
+        anyhow::ensure!(state.utxos.len(&rwtxn)? == 0);
+        anyhow::ensure!(state.deposit_blocks.len(&rwtxn)? == 0);
+        Ok(())
     }
 }

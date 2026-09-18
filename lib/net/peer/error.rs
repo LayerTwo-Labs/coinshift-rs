@@ -81,12 +81,27 @@ pub(in crate::net::peer) mod connection {
         ReadMagic(#[source] quinn::ReadExactError),
         #[error("read to end error")]
         ReadToEnd(#[from] quinn::ReadToEndError),
+        #[error("timed out waiting for response")]
+        Timeout,
+    }
+
+    impl Receive {
+        /// True when the peer sent another network's magic bytes.
+        pub fn is_bad_magic(&self) -> bool {
+            matches!(self, Self::BadMagic(_))
+        }
     }
 
     #[derive(Debug, Error)]
     #[error("Failed to receive request from peer")]
     #[repr(transparent)]
     pub struct ReceiveRequest(#[source] Receive);
+
+    impl ReceiveRequest {
+        pub fn is_bad_magic(&self) -> bool {
+            self.0.is_bad_magic()
+        }
+    }
 
     impl<E> From<E> for ReceiveRequest
     where
@@ -101,6 +116,12 @@ pub(in crate::net::peer) mod connection {
     #[error("Failed to receive response from peer")]
     #[repr(transparent)]
     pub struct ReceiveResponse(#[source] Receive);
+
+    impl ReceiveResponse {
+        pub fn is_bad_magic(&self) -> bool {
+            self.0.is_bad_magic()
+        }
+    }
 
     impl<E> From<E> for ReceiveResponse
     where
@@ -274,6 +295,15 @@ pub mod mailbox {
         #[error(transparent)]
         SendResponse(#[from] super::connection::SendResponse),
     }
+
+    impl Error {
+        pub fn is_bad_magic(&self) -> bool {
+            match self {
+                Self::ReceiveRequest(err) => err.is_bad_magic(),
+                _ => false,
+            }
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -303,4 +333,152 @@ pub enum Error {
     SendResponse(#[from] connection::SendResponse),
     #[error("state error")]
     State(#[from] crate::state::Error),
+}
+
+impl Error {
+    pub fn is_connect_timeout(&self) -> bool {
+        matches!(self, Self::Connection(quinn::ConnectionError::TimedOut))
+    }
+
+    pub fn is_duplicate_connection(&self) -> bool {
+        let mut source = std::error::Error::source(self);
+        while let Some(error) = source {
+            if let Some(quinn::ConnectionError::ApplicationClosed(close)) =
+                error.downcast_ref::<quinn::ConnectionError>()
+            {
+                return close.error_code == 1_u32.into()
+                    && close.reason == b"already connected"[..];
+            }
+            source = error.source();
+        }
+        false
+    }
+
+    /// True when the peer answered with another network's magic bytes. Such a
+    /// peer runs a different chain, so it never becomes useful.
+    pub fn is_bad_magic(&self) -> bool {
+        match self {
+            Self::Mailbox(err) => err.is_bad_magic(),
+            Self::ReceiveResponse(err) => err.is_bad_magic(),
+            _ => false,
+        }
+    }
+}
+
+#[cfg(test)]
+mod bad_magic_tests {
+    use super::{Error, connection, mailbox};
+    use crate::net::peer::message;
+
+    const FOREIGN_MAGIC: message::MagicBytes = [0x85, 0x18, 0x95, 0x01];
+
+    fn other_error() -> connection::Receive {
+        connection::Receive::Bincode(Box::new(bincode::ErrorKind::SizeLimit))
+    }
+
+    // A peer that answers a request with another network's magic must read as
+    // bad magic through every wrapper the error passes.
+    #[test]
+    fn bad_magic_survives_the_request_path() {
+        let inner = connection::Receive::BadMagic(FOREIGN_MAGIC);
+        let err = Error::Mailbox(mailbox::Error::ReceiveRequest(
+            connection::ReceiveRequest::from(inner),
+        ));
+        assert!(err.is_bad_magic());
+    }
+
+    #[test]
+    fn bad_magic_survives_the_response_path() {
+        let inner = connection::Receive::BadMagic(FOREIGN_MAGIC);
+        let err =
+            Error::ReceiveResponse(connection::ReceiveResponse::from(inner));
+        assert!(err.is_bad_magic());
+    }
+
+    // Another read failure says nothing about the peer's network, so the node
+    // keeps it.
+    #[test]
+    fn another_read_failure_is_not_bad_magic() {
+        let err = Error::ReceiveResponse(connection::ReceiveResponse::from(
+            other_error(),
+        ));
+        assert!(!err.is_bad_magic());
+    }
+
+    #[test]
+    fn a_heartbeat_timeout_is_not_bad_magic() {
+        let err = Error::Mailbox(mailbox::Error::HeartbeatTimeout);
+        assert!(!err.is_bad_magic());
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::{Error, connection, mailbox};
+    #[test]
+    fn only_the_handshake_timeout_is_a_connect_timeout() {
+        assert!(
+            Error::Connection(quinn::ConnectionError::TimedOut)
+                .is_connect_timeout()
+        );
+        for error in [
+            Error::Mailbox(mailbox::Error::HeartbeatTimeout),
+            Error::ReceiveResponse(connection::ReceiveResponse::from(
+                connection::Receive::BadMagic([0x85, 0x18, 0x95, 0x01]),
+            )),
+            Error::ReceiveResponse(connection::ReceiveResponse::from(
+                quinn::ConnectionError::TimedOut,
+            )),
+        ] {
+            assert!(!error.is_connect_timeout());
+        }
+    }
+
+    #[test]
+    fn duplicate_close_survives_the_request_path() {
+        let close = quinn::ConnectionError::ApplicationClosed(
+            quinn::ApplicationClose {
+                error_code: 1_u32.into(),
+                reason: b"already connected"[..].into(),
+            },
+        );
+        let err = Error::Mailbox(mailbox::Error::ReceiveRequest(
+            connection::ReceiveRequest::from(close),
+        ));
+        assert!(err.is_duplicate_connection());
+    }
+
+    #[test]
+    fn duplicate_close_survives_the_response_path() {
+        let close = quinn::ConnectionError::ApplicationClosed(
+            quinn::ApplicationClose {
+                error_code: 1_u32.into(),
+                reason: b"already connected"[..].into(),
+            },
+        );
+        let err =
+            Error::ReceiveResponse(connection::ReceiveResponse::from(close));
+        assert!(err.is_duplicate_connection());
+    }
+
+    #[test]
+    fn other_connection_errors_are_not_duplicate_closes() {
+        for error in [
+            quinn::ConnectionError::TimedOut,
+            quinn::ConnectionError::ApplicationClosed(
+                quinn::ApplicationClose {
+                    error_code: 0_u32.into(),
+                    reason: b"already connected"[..].into(),
+                },
+            ),
+            quinn::ConnectionError::ApplicationClosed(
+                quinn::ApplicationClose {
+                    error_code: 1_u32.into(),
+                    reason: b"test complete"[..].into(),
+                },
+            ),
+        ] {
+            assert!(!Error::Connection(error).is_duplicate_connection());
+        }
+    }
 }

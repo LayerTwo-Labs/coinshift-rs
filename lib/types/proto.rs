@@ -458,7 +458,11 @@ pub mod mainchain {
                             break 'address Address::ALL_ZEROS;
                         }
                     };
-                match Address::from_str(address_utf8) {
+                // A deposit carries the prefixed form. A bare address also
+                // parses.
+                match Address::from_deposit_address(address_utf8)
+                    .or_else(|_| Address::from_str(address_utf8))
+                {
                     Ok(address) => address,
                     Err(_) => {
                         tracing::warn!(
@@ -483,7 +487,7 @@ pub mod mainchain {
         }
     }
 
-    #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+    #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
     pub struct BlockHeaderInfo {
         pub block_hash: BlockHash,
         pub prev_block_hash: BlockHash,
@@ -1161,7 +1165,7 @@ pub mod mainchain {
 
         pub async fn subscribe_events(
             &mut self,
-        ) -> Result<BoxStream<'_, Result<Event, super::Error>>, super::Error>
+        ) -> Result<BoxStream<'static, Result<Event, super::Error>>, super::Error>
         {
             let request = generated::SubscribeEventsRequest {
                 sidechain_id: Some(THIS_SIDECHAIN as u32),
