@@ -59,7 +59,13 @@ jobs:
       - name: Build (and maybe push) Docker image
         uses: docker/build-push-action@v7
         with:
-          push: true
+          # A pull request from a fork gets a read-only token, so a push to
+          # the organisation registry is denied. Build it, and push only when
+          # the token can write.
+          push: >-
+            ${{ github.event_name != 'pull_request'
+            || github.event.pull_request.head.repo.full_name
+               == github.repository }}
           tags: ${{ steps.meta.outputs.tags }}
           # Caching Docker builds on CI is an eternally
           # difficult task. From the official docs:
