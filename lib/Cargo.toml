@@ -23,7 +23,7 @@ borsh = { version = "1.6.1", features = ["derive"] }
 byteorder = "1.4.3"
 bytes = "1.4.0"
 clap = { workspace = true, features = ["derive"], optional = true }
-ed25519-dalek = { version = "2.1.1", features = ["batch", "serde"] }
+ed25519-dalek = { version = "3.0.0", features = ["batch", "serde"] }
 ed25519-dalek-bip32 = "0.3.0"
 fallible-iterator = { workspace = true }
 error-fatality = "0.1.2"
