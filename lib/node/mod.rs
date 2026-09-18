@@ -14,6 +14,7 @@ use tonic::transport::Channel;
 
 use crate::{
     archive::{self, Archive},
+    authorization::{BatchVerificationContext, rand_core::CryptoRng},
     mempool::{self, MemPool},
     net::{self, DialSeedsHandle, Net, Peer},
     state::{self, State},
@@ -120,6 +121,7 @@ pub struct NodeConfig<MainchainTransport = Channel> {
 #[derive(Clone)]
 pub struct Node<MainchainTransport = Channel> {
     archive: Archive,
+    batch_verification_ctxt: BatchVerificationContext,
     cusf_mainchain: mainchain::ValidatorClient<MainchainTransport>,
     cusf_mainchain_wallet:
         Option<Arc<Mutex<mainchain::WalletClient<MainchainTransport>>>>,
@@ -140,14 +142,16 @@ impl<MainchainTransport> Node<MainchainTransport>
 where
     MainchainTransport: proto::Transport,
 {
-    pub fn new(
+    pub fn new<R>(
         config: NodeConfig<MainchainTransport>,
+        rng: &mut R,
         runtime: &tokio::runtime::Runtime,
     ) -> Result<Self, Error>
     where
         mainchain::ValidatorClient<MainchainTransport>: Clone,
         MainchainTransport: Send + 'static,
         proto::TransportFuture<MainchainTransport>: Send,
+        R: CryptoRng,
     {
         tracing::info!("Node::new: Starting initialization");
         let env_path = config.datadir.join("data.mdb");
@@ -217,10 +221,12 @@ where
             );
         tracing::info!("Node::new: MainchainTaskHandle created");
         tracing::info!(bind_addr = %config.bind_addr, "Node::new: Creating Net");
+        let batch_verification_ctxt = BatchVerificationContext::new(rng);
         let (net, peer_info_rx, dial_seeds) = Net::new(
             runtime.handle(),
             &env,
             archive.clone(),
+            batch_verification_ctxt,
             config.magic_bytes_override,
             config.network,
             state.clone(),
@@ -296,6 +302,7 @@ where
         );
         Ok(Self {
             archive,
+            batch_verification_ctxt,
             cusf_mainchain: config.cusf_mainchain,
             cusf_mainchain_wallet,
             created_pending_swap_ids: Arc::new(StdMutex::new(HashSet::new())),
@@ -404,7 +411,11 @@ where
                 .regenerate_proof(&rwtxn, &mut transaction.transaction)?;
 
             // Try to validate the transaction
-            match self.state.validate_transaction(&rwtxn, &transaction) {
+            match self.state.validate_transaction(
+                &rwtxn,
+                &self.batch_verification_ctxt,
+                &transaction,
+            ) {
                 Ok(_) => {
                     // Validation succeeded, add to mempool
                     self.mempool.put(&mut rwtxn, &transaction)?;
@@ -440,6 +451,7 @@ where
                             self.state
                                 .validate_transaction(
                                     &retry_rwtxn,
+                                    &self.batch_verification_ctxt,
                                     &transaction,
                                 )
                                 .map_err(|e| Error::State(Box::new(e)))?;
@@ -682,7 +694,11 @@ where
             }
             if self
                 .state
-                .validate_transaction(&rwtxn, &transaction)
+                .validate_transaction(
+                    &rwtxn,
+                    &self.batch_verification_ctxt,
+                    &transaction,
+                )
                 .is_err()
             {
                 self.mempool

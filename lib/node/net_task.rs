@@ -27,6 +27,7 @@ use tokio_stream::StreamNotifyClose;
 use super::mainchain_task::{self, MainchainTaskHandle};
 use crate::{
     archive::{self, Archive},
+    authorization::BatchVerificationContext,
     mempool::{self, MemPool},
     net::{
         self, Net, PeerConnectionError, PeerConnectionInfo,
@@ -91,6 +92,7 @@ impl From<net::Error> for Error {
 fn connect_tip_(
     rwtxn: &mut RwTxn<'_>,
     archive: &Archive,
+    batch_verification_ctxt: &BatchVerificationContext,
     mempool: &MemPool,
     state: &State,
     header: &Header,
@@ -100,7 +102,12 @@ fn connect_tip_(
     wallet: Option<&crate::wallet::Wallet>,
 ) -> Result<(), Error> {
     let block_hash = header.hash();
-    let prevalidated = state.prevalidate_block(rwtxn, header, body)?;
+    let prevalidated = state.prevalidate_block(
+        rwtxn,
+        batch_verification_ctxt,
+        header,
+        body,
+    )?;
     if tracing::enabled!(tracing::Level::DEBUG) {
         let height = state.try_get_height(rwtxn)?;
         let merkle_root = state.connect_prevalidated_block(
@@ -279,9 +286,11 @@ fn is_fatal_reorg_error(err: &Error) -> bool {
 /// The new tip block and all ancestor blocks must exist in the node's archive.
 /// A result of `Ok(true)` indicates a successful re-org.
 /// A result of `Ok(false)` indicates that no re-org was attempted.
+#[allow(clippy::too_many_arguments)]
 fn reorg_to_tip(
     env: &sneed::Env<heed::WithoutTls>,
     archive: &Archive,
+    batch_verification_ctxt: &BatchVerificationContext,
     mempool: &MemPool,
     state: &State,
     new_tip: Tip,
@@ -436,6 +445,7 @@ fn reorg_to_tip(
         let () = match connect_tip_(
             &mut rwtxn,
             archive,
+            batch_verification_ctxt,
             mempool,
             state,
             &header,
@@ -959,6 +969,7 @@ impl NetTask {
             let _: bool = reorg_to_tip(
                 &ctxt.env,
                 &ctxt.archive,
+                &ctxt.net.batch_verification_ctxt,
                 &ctxt.mempool,
                 &ctxt.state,
                 best_side_tip,
@@ -1257,6 +1268,7 @@ impl NetTask {
                         reorg_to_tip(
                             &self.ctxt.env,
                             &self.ctxt.archive,
+                            &self.ctxt.net.batch_verification_ctxt,
                             &self.ctxt.mempool,
                             &self.ctxt.state,
                             new_tip,
@@ -1440,10 +1452,12 @@ impl NetTask {
                                 // path (`Node::submit_transaction`). Without this,
                                 // transactions with invalid signatures / failing
                                 // balance checks are accepted and re-broadcast.
-                                let _: bitcoin::Amount = self
-                                    .ctxt
-                                    .state
-                                    .validate_transaction(&rwtxn, &new_tx)?;
+                                let _: bitcoin::Amount =
+                                    self.ctxt.state.validate_transaction(
+                                        &rwtxn,
+                                        &self.ctxt.net.batch_verification_ctxt,
+                                        &new_tx,
+                                    )?;
                                 match self.ctxt.mempool.put(&mut rwtxn, &new_tx)
                                 {
                                     Ok(()) => {
@@ -1754,6 +1768,7 @@ mod peer_retry_test {
                 wallet: None,
                 l1_rpc_config_path: None,
             },
+            &mut rand::rng(),
             runtime,
         )?;
         Ok((temp_dir, node))
@@ -1818,8 +1833,12 @@ mod peer_retry_test {
                     data: TxData::Regular,
                 };
                 node.state.regenerate_proof(&rwtxn, &mut tx)?;
-                let tx = wallet.authorize(tx)?;
-                node.state.validate_transaction(&rwtxn, &tx)?;
+                let tx = wallet.authorize(rand::rng(), tx)?;
+                node.state.validate_transaction(
+                    &rwtxn,
+                    &node.batch_verification_ctxt,
+                    &tx,
+                )?;
                 Ok(tx)
             };
             let first_tx = make_tx(vec![inputs[0]], 900)?;

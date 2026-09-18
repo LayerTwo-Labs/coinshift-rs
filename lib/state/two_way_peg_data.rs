@@ -1735,6 +1735,7 @@ mod tests {
     use sneed::Env;
 
     use crate::{
+        authorization::BatchVerificationContext,
         state::{
             State, WithdrawalBundleInfo, rollback::RollBack,
             two_way_peg_data::disconnect_withdrawal_bundle_failed,
@@ -2032,8 +2033,15 @@ mod tests {
         };
         {
             let mut rwtxn = env.write_txn().unwrap();
+            let batch_verification_ctxt =
+                BatchVerificationContext::new(&mut rand::rng());
             state
-                .apply_block(&mut rwtxn, &genesis, &empty_body)
+                .apply_block(
+                    &mut rwtxn,
+                    &batch_verification_ctxt,
+                    &genesis,
+                    &empty_body,
+                )
                 .unwrap();
             state
                 .connect_two_way_peg_data(
@@ -2080,7 +2088,16 @@ mod tests {
         };
         {
             let mut rwtxn = env.write_txn().unwrap();
-            state.apply_block(&mut rwtxn, &block1, &empty_body).unwrap();
+            let batch_verification_ctxt =
+                BatchVerificationContext::new(&mut rand::rng());
+            state
+                .apply_block(
+                    &mut rwtxn,
+                    &batch_verification_ctxt,
+                    &block1,
+                    &empty_body,
+                )
+                .unwrap();
             state
                 .connect_two_way_peg_data(&mut rwtxn, &deposit_twpd, None, None)
                 .unwrap();

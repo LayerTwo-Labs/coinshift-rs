@@ -749,7 +749,7 @@ impl App {
             wallet: Some(Arc::new(wallet.clone())),
             l1_rpc_config_path: Some(l1_rpc_config_path),
         };
-        let node = Node::new(node_config, &runtime)?;
+        let node = Node::new(node_config, &mut rand::rng(), &runtime)?;
         let node_elapsed = node_start.elapsed();
         tracing::info!(
             elapsed_secs = node_elapsed.as_secs_f64(),
@@ -910,7 +910,10 @@ impl App {
         let txid = tx.txid();
         tracing::debug!(%txid, "sign_and_send: Starting transaction signing and sending");
 
-        let authorized_transaction = match self.wallet.authorize(tx) {
+        let authorized_transaction = match self
+            .wallet
+            .authorize(rand::rng(), tx)
+        {
             Ok(auth_tx) => {
                 tracing::debug!(%txid, "sign_and_send: Transaction authorized successfully");
                 auth_tx

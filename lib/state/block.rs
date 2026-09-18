@@ -4,19 +4,20 @@ use rustreexo::accumulator::node_hash::BitcoinNodeHash;
 use sneed::{RoTxn, RwTxn, db::error::Error as DbError};
 
 use crate::{
-    authorization::Authorization,
+    authorization::{self, BatchVerificationContext},
     state::{Error, PrevalidatedBlock, State, error, swap},
     types::{
         AccumulatorDiff, AmountOverflowError, Body, FilledTransaction,
         GetAddress as _, GetValue as _, Header, InPoint, MerkleRoot, OutPoint,
         OutPointKey, PointedOutput, SpentOutput, Swap, SwapId, SwapState,
-        SwapTxId, TxData, Verify as _,
+        SwapTxId, TxData,
     },
 };
 
 /// Prevalidate a block: compute and verify all read-only checks and
 /// prepare data needed for fast connection.
 pub fn prevalidate(
+    batch_verification_ctxt: &BatchVerificationContext,
     state: &State,
     rotxn: &RoTxn,
     header: &Header,
@@ -181,7 +182,9 @@ pub fn prevalidate(
             return Err(Error::WrongPubKeyForAddress);
         }
     }
-    if Authorization::verify_body(body).is_err() {
+    if authorization::verify_authorizations(batch_verification_ctxt, body)
+        .is_err()
+    {
         return Err(Error::Authorization);
     }
     // Check root consistency without committing to DB
@@ -492,6 +495,7 @@ pub fn connect_prevalidated(
 }
 
 pub fn validate(
+    batch_verification_ctxt: &BatchVerificationContext,
     state: &State,
     rotxn: &RoTxn,
     header: &Header,
@@ -632,7 +636,9 @@ pub fn validate(
             return Err(Error::WrongPubKeyForAddress);
         }
     }
-    if Authorization::verify_body(body).is_err() {
+    if authorization::verify_authorizations(batch_verification_ctxt, body)
+        .is_err()
+    {
         return Err(Error::Authorization);
     }
     // Check root consistency without committing to DB
@@ -946,7 +952,9 @@ mod test {
         use rustreexo::accumulator::node_hash::BitcoinNodeHash;
 
         use crate::{
-            authorization::{SigningKey, authorize, get_address},
+            authorization::{
+                BatchVerificationContext, SigningKey, authorize, get_address,
+            },
             types::{
                 Accumulator, AccumulatorDiff, Body, Header, OutPoint,
                 OutPointKey, PointedOutput, Transaction, hash,
@@ -955,10 +963,11 @@ mod test {
         let (_dir, env, state) = test_state();
 
         // Attacker key (owns A). Victim key (owns B).
-        let attacker = SigningKey::from_bytes(&[0x11; 32]);
-        let attacker_addr = get_address(&attacker.verifying_key());
-        let victim = SigningKey::from_bytes(&[0x22; 32]);
-        let victim_addr = get_address(&victim.verifying_key());
+        let mut rng = rand::rng();
+        let attacker = SigningKey::new(&mut rng);
+        let attacker_addr = get_address((&attacker).into());
+        let victim = SigningKey::new(&mut rng);
+        let victim_addr = get_address((&victim).into());
 
         // UTXO A (attacker, 10_000) and victim UTXO B (20_000).
         let outpoint_a = OutPoint::Deposit(bitcoin::OutPoint {
@@ -1028,7 +1037,8 @@ mod test {
             ..Default::default()
         };
         // Sign with A's key (the spender of outpoint A authorizes the tx).
-        let authorized = authorize(&[(attacker_addr, &attacker)], tx)?;
+        let authorized =
+            authorize(&mut rng, &[(attacker_addr, &attacker)], tx)?;
 
         let body = Body::new(vec![authorized], Vec::new());
 
@@ -1067,7 +1077,14 @@ mod test {
 
         {
             let rotxn = env.read_txn()?;
-            let result = state.validate_block(&rotxn, &header, &body);
+            let batch_verification_ctxt =
+                BatchVerificationContext::new(&mut rng);
+            let result = state.validate_block(
+                &rotxn,
+                &batch_verification_ctxt,
+                &header,
+                &body,
+            );
             anyhow::ensure!(
                 matches!(result, Err(Error::UtxoHashMismatch { .. })),
                 "BUG: validate_block accepts an input whose outpoint (A) \
