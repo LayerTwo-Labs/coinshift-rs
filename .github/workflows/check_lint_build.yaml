@@ -45,7 +45,7 @@ jobs:
 
       - name: Restore Rust cache
         id: restore-rust-cache
-        uses: Swatinem/rust-cache@v2.9.1
+        uses: Swatinem/rust-cache@v2.9.2
         with:
           cache-all-crates: "true"
           prefix-key: "v0-rust-nightly"
@@ -54,7 +54,7 @@ jobs:
 
       - name: Save Rust cache
         if: steps.restore-rust-cache.outputs.cache-hit != 'true'
-        uses: Swatinem/rust-cache@v2.9.1
+        uses: Swatinem/rust-cache@v2.9.2
         with:
           cache-all-crates: "true"
           lookup-only: "true"
@@ -149,7 +149,7 @@ jobs:
           submodules: "recursive"
 
       - name: Rust Cache
-        uses: Swatinem/rust-cache@v2.9.1
+        uses: Swatinem/rust-cache@v2.9.2
         with:
           cache-all-crates: "true"
           prefix-key: "v0-rust-nightly"
@@ -181,7 +181,7 @@ jobs:
           popd
 
       - name: Rust Cache (enforcer)
-        uses: Swatinem/rust-cache@v2.9.1
+        uses: Swatinem/rust-cache@v2.9.2
         with:
           cache-bin: false
           prefix-key: "v0-rust-enforcer-${{ steps.enforcer.outputs.rev }}"
@@ -246,7 +246,7 @@ jobs:
           target: ${{ matrix.name }}
 
       - name: Rust Cache
-        uses: Swatinem/rust-cache@v2.9.1
+        uses: Swatinem/rust-cache@v2.9.2
         with:
           cache-bin: false
           key: ${{ matrix.name }}
