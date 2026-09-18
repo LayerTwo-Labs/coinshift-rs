@@ -211,7 +211,10 @@ mod p2p_validation_bypass_tests {
     use heed::EnvOpenOptions;
 
     use super::MemPool;
-    use crate::authorization::{Authorization, SigningKey, get_address, sign};
+    use crate::authorization::{
+        Authorization, BatchVerificationContext, SigningKey, VerifyingKey,
+        get_address, sign,
+    };
     use crate::state::State;
     use crate::types::{
         Accumulator, AccumulatorDiff, Address, OutPoint, OutPointKey, Output,
@@ -219,7 +222,8 @@ mod p2p_validation_bypass_tests {
     };
 
     fn signing_key(seed: u8) -> SigningKey {
-        SigningKey::from_bytes(&[seed; 32])
+        let scalar = curve25519_dalek::Scalar::from_bytes_mod_order([seed; 32]);
+        SigningKey::from_scalar(scalar).expect("non-zero scalar")
     }
 
     fn temp_env() -> sneed::Env {
@@ -240,7 +244,7 @@ mod p2p_validation_bypass_tests {
         let mempool = MemPool::new(&env).expect("MemPool::new");
 
         let victim = signing_key(1);
-        let victim_addr: Address = get_address(&victim.verifying_key());
+        let victim_addr: Address = get_address(VerifyingKey::from(&victim));
         let funding_outpoint = OutPoint::Regular {
             txid: Txid([7u8; 32]),
             vout: 0,
@@ -278,7 +282,7 @@ mod p2p_validation_bypass_tests {
         let tx = Transaction {
             inputs: vec![(funding_outpoint, utxo_hash)],
             outputs: vec![Output {
-                address: get_address(&signing_key(2).verifying_key()),
+                address: get_address(VerifyingKey::from(&signing_key(2))),
                 content: OutputContent::Value(Amount::from_sat(90_000)),
             }],
             ..Default::default()
@@ -286,8 +290,8 @@ mod p2p_validation_bypass_tests {
 
         let attacker = signing_key(2);
         let forged = Authorization {
-            verifying_key: victim.verifying_key(),
-            signature: sign(&attacker, &tx).expect("sign"),
+            verifying_key: VerifyingKey::from(&victim),
+            signature: sign(rand::rng(), &attacker, &tx).expect("sign"),
         };
         let mut authd_tx = crate::types::AuthorizedTransaction {
             transaction: tx,
@@ -296,7 +300,13 @@ mod p2p_validation_bypass_tests {
 
         {
             let rotxn = env.read_txn().expect("read txn");
-            let result = state.validate_transaction(&rotxn, &authd_tx);
+            let batch_verification_ctxt =
+                BatchVerificationContext::new(&mut rand::rng());
+            let result = state.validate_transaction(
+                &rotxn,
+                &batch_verification_ctxt,
+                &authd_tx,
+            );
             assert!(
                 result.is_err(),
                 "validator must reject the forged-sig tx: {result:?}"

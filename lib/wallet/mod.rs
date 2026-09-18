@@ -3,9 +3,9 @@ use std::{
     path::Path,
 };
 
+use bip32ish::U31;
 use bitcoin::Amount;
 use byteorder::{BigEndian, ByteOrder};
-use ed25519_dalek_bip32::{ChildIndex, DerivationPath, ExtendedSigningKey};
 use fallible_iterator::FallibleIterator as _;
 use futures::{Stream, StreamExt};
 use heed::types::{Bytes, SerdeBincode, U8};
@@ -18,6 +18,8 @@ use sneed::{
 };
 use tokio_stream::{StreamMap, wrappers::WatchStream};
 
+pub mod bip32;
+
 pub use crate::{
     authorization::{Authorization, get_address},
     types::{
@@ -27,9 +29,10 @@ pub use crate::{
     },
 };
 use crate::{
+    authorization::{SigningKey, rand_core::CryptoRng},
     types::{
         Accumulator, AmountOverflowError, AmountUnderflowError, PointedOutput,
-        UtreexoError, VERSION, Version, hash,
+        THIS_SIDECHAIN, UtreexoError, VERSION, Version, hash,
     },
     util::Watchable,
 };
@@ -58,7 +61,12 @@ pub struct TransferDests(
     #[serde_as(as = "MapPreventDuplicates<_, _>")] pub BTreeMap<Address, u64>,
 );
 
-#[derive(Debug, thiserror::Error)]
+#[allow(clippy::duplicated_attributes)]
+#[derive(Debug, thiserror::Error, transitive::Transitive)]
+#[transitive(
+    from(bip32::HardenedDeriveError, bip32::Error),
+    from(bip32::NonHardenedDeriveError, bip32::Error)
+)]
 pub enum Error {
     #[error("address {address} does not exist")]
     AddressDoesNotExist { address: crate::types::Address },
@@ -69,7 +77,7 @@ pub enum Error {
     #[error("authorization error")]
     Authorization(#[from] crate::authorization::Error),
     #[error("bip32 error")]
-    Bip32(#[from] ed25519_dalek_bip32::Error),
+    Bip32(#[from] bip32::Error),
     #[error(transparent)]
     Db(#[from] DbError),
     #[error("Database env error")]
@@ -227,7 +235,7 @@ impl Wallet {
             return Ok(());
         }
         let signing_key = self.get_signing_key(&txn, 0)?;
-        let address = get_address(&signing_key.verifying_key());
+        let address = get_address((&signing_key).into());
         self.index_to_address
             .put(&mut txn, &index, &address)
             .map_err(DbError::from)?;
@@ -914,10 +922,14 @@ impl Wallet {
         Ok(exists)
     }
 
-    pub fn authorize(
+    pub fn authorize<R>(
         &self,
+        mut rng: R,
         transaction: Transaction,
-    ) -> Result<AuthorizedTransaction, Error> {
+    ) -> Result<AuthorizedTransaction, Error>
+    where
+        R: CryptoRng,
+    {
         let is_swap_claim =
             matches!(transaction.data, TxData::SwapClaim { .. });
         let mut authorizations = Vec::with_capacity(transaction.inputs.len());
@@ -949,11 +961,12 @@ impl Wallet {
                                 self.env.read_txn().map_err(EnvError::from)?;
                             let signing_key = self.get_signing_key(&txn, 0)?;
                             let signature = crate::authorization::sign(
+                                &mut rng,
                                 &signing_key,
                                 &transaction,
                             )?;
                             authorizations.push(Authorization {
-                                verifying_key: signing_key.verifying_key(),
+                                verifying_key: signing_key.into(),
                                 signature,
                             });
                             break;
@@ -964,10 +977,13 @@ impl Wallet {
                 };
                 let txn = self.env.read_txn().map_err(EnvError::from)?;
                 let signing_key = self.get_signing_key(&txn, index)?;
-                let signature =
-                    crate::authorization::sign(&signing_key, &transaction)?;
+                let signature = crate::authorization::sign(
+                    &mut rng,
+                    &signing_key,
+                    &transaction,
+                )?;
                 authorizations.push(Authorization {
-                    verifying_key: signing_key.verifying_key(),
+                    verifying_key: signing_key.into(),
                     signature,
                 });
                 break;
@@ -989,7 +1005,7 @@ impl Wallet {
                 None => 0,
             };
         let signing_key = self.get_signing_key(&txn, index)?;
-        let address = get_address(&signing_key.verifying_key());
+        let address = get_address(signing_key.into());
         let index = index.to_be_bytes();
         self.index_to_address
             .put(&mut txn, &index, &address)
@@ -1062,21 +1078,42 @@ impl Wallet {
     /// (e.g. after restoring wallet from seed with empty address index).
     const MAX_RECOVERY_INDEX: u32 = 100_000;
 
-    /// Derive the receive address for a given index from a seed (same path as
-    /// get_signing_key: m/1'/0'/0'/index).
+    /// Derive the signing key for an index, on the path
+    /// m/43'/1899'/0'/<SIDECHAIN_NUMBER>'/0'/index
+    /// (m / bip43 purpose / eCash Token / purpose (0) / sidechain number /
+    /// account / index)
+    fn derive_signing_key(
+        seed: &[u8],
+        index: u32,
+    ) -> Result<SigningKey, Error> {
+        let mut xpriv = bip32::new_master_xpriv(seed);
+        xpriv = xpriv.derive_hardened(U31::new(43).unwrap())?;
+        xpriv = xpriv.derive_hardened(U31::new(1899).unwrap())?;
+        xpriv = xpriv.derive_hardened(U31::new(0).unwrap())?;
+        xpriv =
+            xpriv.derive_hardened(U31::new(THIS_SIDECHAIN as u32).unwrap())?;
+        xpriv = xpriv.derive_hardened(U31::new(0).unwrap())?;
+        match bip32ish::ChildIndex::from(index) {
+            bip32ish::ChildIndex::Hardened { index } => {
+                xpriv = xpriv.derive_hardened(index)?;
+            }
+            bip32ish::ChildIndex::NonHardened { index } => {
+                xpriv = xpriv.derive_non_hardened(index)?;
+            }
+        }
+        let signing_key = SigningKey::from_scalar(xpriv.secret_scalar)
+            .expect("expected secret scalar to be non-zero");
+        Ok(signing_key)
+    }
+
+    /// Derive the receive address for a given index from a seed, on the same
+    /// path as `derive_signing_key`.
     fn derive_address_for_index(
         seed: &[u8],
         index: u32,
     ) -> Result<Address, Error> {
-        let xpriv = ExtendedSigningKey::from_seed(seed)?;
-        let derivation_path = DerivationPath::new([
-            ChildIndex::Hardened(1),
-            ChildIndex::Hardened(0),
-            ChildIndex::Hardened(0),
-            ChildIndex::Hardened(index),
-        ]);
-        let xsigning_key = xpriv.derive(&derivation_path)?;
-        Ok(get_address(&xsigning_key.signing_key.verifying_key()))
+        let signing_key = Self::derive_signing_key(seed, index)?;
+        Ok(get_address(signing_key.into()))
     }
 
     /// If the address is not in the wallet's address index, try to recover it
@@ -1193,21 +1230,13 @@ impl Wallet {
         &self,
         rotxn: &RoTxn,
         index: u32,
-    ) -> Result<ed25519_dalek::SigningKey, Error> {
+    ) -> Result<SigningKey, Error> {
         let seed = self
             .seed
             .try_get(rotxn, &0)
             .map_err(DbError::from)?
             .ok_or(Error::NoSeed)?;
-        let xpriv = ExtendedSigningKey::from_seed(seed)?;
-        let derivation_path = DerivationPath::new([
-            ChildIndex::Hardened(1),
-            ChildIndex::Hardened(0),
-            ChildIndex::Hardened(0),
-            ChildIndex::Hardened(index),
-        ]);
-        let xsigning_key = xpriv.derive(&derivation_path)?;
-        Ok(xsigning_key.signing_key)
+        Self::derive_signing_key(seed, index)
     }
 }
 
@@ -1295,9 +1324,8 @@ mod tests {
         for index in 0..3u32 {
             let address = wallet.get_new_address()?;
             let txn = wallet.env.read_txn()?;
-            let expected = get_address(
-                &wallet.get_signing_key(&txn, index)?.verifying_key(),
-            );
+            let expected =
+                get_address((&wallet.get_signing_key(&txn, index)?).into());
             drop(txn);
             assert_eq!(address, expected);
             assert_eq!(wallet.get_num_addresses()?, index + 1);
@@ -1347,11 +1375,10 @@ mod tests {
             let mut txn = wallet.env.write_txn()?;
             let one = 1u32.to_be_bytes();
             let address =
-                get_address(&wallet.get_signing_key(&txn, 1)?.verifying_key());
+                get_address((&wallet.get_signing_key(&txn, 1)?).into());
             wallet.index_to_address.put(&mut txn, &one, &address)?;
             wallet.address_to_index.put(&mut txn, &address, &one)?;
-            let zero =
-                get_address(&wallet.get_signing_key(&txn, 0)?.verifying_key());
+            let zero = get_address((&wallet.get_signing_key(&txn, 0)?).into());
             txn.commit()?;
             assert!(!wallet.get_addresses()?.contains(&zero));
             zero
