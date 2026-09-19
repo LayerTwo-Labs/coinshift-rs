@@ -179,15 +179,11 @@ const SIGNET_SEED_NODE_ADDRS: &[SeedAddress<&str>] = {
 };
 
 const BETANET_SEED_NODE_ADDRS: &[SeedAddress<&str>] = {
-    const DRIVECHA_IN: SeedAddress<&str> = SeedAddress {
-        host: url::Host::Domain("seed.beta.ecash.drivecha.in"),
+    const ECASH_EU_COM: SeedAddress<&str> = SeedAddress {
+        host: url::Host::Domain("seed.beta.ecash.eu.com"),
         port: DEFAULT_PORT,
     };
-    const ECASH_NINJA: SeedAddress<&str> = SeedAddress {
-        host: url::Host::Domain("seed.beta.ecash.ninja"),
-        port: DEFAULT_PORT,
-    };
-    &[DRIVECHA_IN, ECASH_NINJA]
+    &[ECASH_EU_COM]
 };
 
 /// Add every seed IP address the network names that the database does not
