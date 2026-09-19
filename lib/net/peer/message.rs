@@ -26,7 +26,8 @@ pub const fn magic_bytes(network: Network) -> MagicBytes {
         match network {
             Network::Regtest => 0b0000_0000,
             Network::Signet => 0b0000_0001,
-            Network::Alphanet => 0b0000_0011,
+            // Network::Alphanet => 0b0000_0011,
+            Network::Betanet => 0b0000_0100,
         }
     }
     let mut res = PREFIX;
@@ -314,7 +315,7 @@ mod network_tests {
     const EXPECTED: [(Network, MagicBytes); 3] = [
         (Network::Regtest, [0x2d, 0x0c, 0xd8, 0x00]),
         (Network::Signet, [0x2d, 0x0c, 0xd8, 0x01]),
-        (Network::Alphanet, [0x2d, 0x0c, 0xd8, 0x03]),
+        (Network::Betanet, [0x2d, 0x0c, 0xd8, 0x04]),
     ];
 
     #[test]
