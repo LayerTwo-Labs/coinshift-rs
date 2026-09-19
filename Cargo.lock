@@ -3501,9 +3501,9 @@ checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
 
 [[package]]
 name = "human-size"
-version = "0.4.3"
+version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9994b79e8c1a39b3166c63ae7823bb2b00831e2a96a31399c50fe69df408eaeb"
+checksum = "67f1f25c36d3e2a9ed0caf095f1183bb94dd176a1c81521943e416f8ef749fda"
 
 [[package]]
 name = "hybrid-array"
