@@ -1426,7 +1426,7 @@ dependencies = [
 
 [[package]]
 name = "coinshift"
-version = "0.14.7"
+version = "0.14.8"
 dependencies = [
  "anyhow",
  "async-lock",
@@ -1490,7 +1490,7 @@ dependencies = [
 
 [[package]]
 name = "coinshift_app"
-version = "0.14.7"
+version = "0.14.8"
 dependencies = [
  "anyhow",
  "bincode",
@@ -1537,7 +1537,7 @@ dependencies = [
 
 [[package]]
 name = "coinshift_app_cli"
-version = "0.14.7"
+version = "0.14.8"
 dependencies = [
  "anyhow",
  "bitcoin",
@@ -1559,7 +1559,7 @@ dependencies = [
 
 [[package]]
 name = "coinshift_app_rpc_api"
-version = "0.14.7"
+version = "0.14.8"
 dependencies = [
  "bitcoin",
  "coinshift",
@@ -1572,7 +1572,7 @@ dependencies = [
 
 [[package]]
 name = "coinshift_integration_tests"
-version = "0.14.7"
+version = "0.14.8"
 dependencies = [
  "anyhow",
  "bincode",
