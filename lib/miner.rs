@@ -37,11 +37,6 @@ impl<MainchainTransport> Miner<MainchainTransport>
 where
     MainchainTransport: proto::Transport,
 {
-    pub async fn generate(&mut self) -> Result<(), Error> {
-        let () = self.cusf_mainchain_wallet.generate_blocks(1).await?;
-        Ok(())
-    }
-
     pub async fn attempt_bmm(
         &mut self,
         amount: u64,

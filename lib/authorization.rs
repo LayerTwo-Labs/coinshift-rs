@@ -209,6 +209,11 @@ pub fn verify_authorized_transaction(
             return Err(Error::TooManyAuthorizations);
         }
     }
+    // A frost batch rejects an empty batch, and a transaction without inputs
+    // has nothing to sign.
+    if transaction.authorizations.is_empty() {
+        return Ok(());
+    }
     let mut batch_verifier = ctxt.verifier();
     let tx_bytes_canonical = borsh::to_vec(&transaction.transaction)?;
     for auth in &transaction.authorizations {
@@ -436,6 +441,18 @@ mod tests {
             verify_authorized_transaction(&ctxt, &replayed).is_err(),
             "a signature must not carry over to another transaction"
         );
+    }
+
+    #[test]
+    fn a_transaction_without_inputs_verifies() {
+        let mut rng = rand::rng();
+        let authorized = AuthorizedTransaction {
+            transaction: Transaction::default(),
+            authorizations: Vec::new(),
+        };
+        let ctxt = BatchVerificationContext::new(&mut rng);
+        verify_authorized_transaction(&ctxt, &authorized)
+            .expect("a transaction without inputs needs no signature");
     }
 
     #[test]

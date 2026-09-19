@@ -1761,7 +1761,7 @@ mod peer_retry_test {
                 datadir: temp_dir.path().to_path_buf(),
                 bind_addr: (Ipv4Addr::LOCALHOST, 0).into(),
                 cusf_mainchain: ValidatorClient::new(channel),
-                cusf_mainchain_wallet: None,
+                cusf_mainchain_block_producer: None,
                 magic_bytes_override: None,
                 network: Network::Regtest,
                 server_names: std::collections::HashSet::new(),
