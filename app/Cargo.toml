@@ -28,6 +28,7 @@ rustreexo = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 shlex = "2.0.1"
 strum = { workspace = true }
+subtle = "2.6.1"
 thiserror = { workspace = true }
 coinshift = { path = "../lib", features = ["clap"] }
 coinshift_app_cli = { path = "../cli" }
@@ -51,6 +52,7 @@ serde_json = { workspace = true }
 
 [dev-dependencies]
 reserve-port = "2.0.1"
+tempfile = "3.27.0"
 tokio = { workspace = true, features = ["io-util", "net"] }
 
 [lints]

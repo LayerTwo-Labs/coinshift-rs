@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::{net::SocketAddr, path::PathBuf};
 
 use bitcoin::Amount;
 use coinshift::{
@@ -23,7 +23,7 @@ use tower_http::{
     trace::{DefaultOnFailure, DefaultOnResponse, TraceLayer},
 };
 
-use crate::app::App;
+use crate::{app::App, rpc_auth};
 
 pub struct RpcServerImpl {
     app: App,
@@ -864,8 +864,11 @@ fn loopback_host_filter(addr: SocketAddr) -> anyhow::Result<HostFilterLayer> {
 pub async fn run_server(
     app: App,
     rpc_addr: SocketAddr,
+    rpc_cookie_path: PathBuf,
 ) -> anyhow::Result<SocketAddr> {
     const REQUEST_ID_HEADER: &str = "x-request-id";
+
+    let rpc_token = rpc_auth::load_or_create_cookie(&rpc_cookie_path)?;
 
     // Ordering here matters! Order here is from official docs on request IDs tracings
     // https://docs.rs/tower-http/latest/tower_http/request_id/index.html#using-trace
@@ -907,8 +910,11 @@ pub async fn run_server(
 
     let http_middleware = tower::ServiceBuilder::new()
         .layer(tracer)
-        .layer(loopback_host_filter(rpc_addr)?);
-    let rpc_middleware = RpcServiceBuilder::new().rpc_logger(1024);
+        .layer(loopback_host_filter(rpc_addr)?)
+        .layer(rpc_auth::BearerAuthLayer::new(&rpc_token));
+    let rpc_middleware = RpcServiceBuilder::new()
+        .rpc_logger(1024)
+        .layer(rpc_auth::RequireAuthLayer::new(&rpc_cookie_path));
 
     let server = Server::builder()
         .set_http_middleware(http_middleware)

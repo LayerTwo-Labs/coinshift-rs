@@ -51,6 +51,10 @@ pub enum BmmError {
 pub enum SetupError {
     #[error("Failed to create Coinshift dir")]
     CreateCoinshiftDir(#[source] std::io::Error),
+    #[error("Invalid RPC cookie token")]
+    InvalidCookieToken(#[from] http::header::InvalidHeaderValue),
+    #[error("Failed to read RPC cookie file")]
+    ReadCookie(#[source] std::io::Error),
     #[error(transparent)]
     ReservePort(#[from] reserve_port::Error),
     #[error(transparent)]
@@ -178,7 +182,31 @@ impl Sidechain for PostSetup {
             });
         tracing::debug!("Started Coinshift");
         sleep(Duration::from_secs(1)).await;
+        let cookie_path = coinshift_app.data_dir.join(".cookie");
+        let rpc_token = {
+            let mut attempt = 0u32;
+            loop {
+                match std::fs::read_to_string(&cookie_path) {
+                    Ok(token) => break token,
+                    Err(err)
+                        if err.kind() == std::io::ErrorKind::NotFound
+                            && attempt < 60 =>
+                    {
+                        attempt += 1;
+                        sleep(Duration::from_millis(500)).await;
+                    }
+                    Err(err) => return Err(Self::SetupError::ReadCookie(err)),
+                }
+            }
+        };
         let rpc_client = jsonrpsee::http_client::HttpClient::builder()
+            .set_headers(http::HeaderMap::from_iter([(
+                http::header::AUTHORIZATION,
+                http::HeaderValue::from_str(&format!(
+                    "Bearer {}",
+                    rpc_token.trim()
+                ))?,
+            )]))
             .build(format!("http://127.0.0.1:{}", reserved_ports.rpc.port()))?;
         tracing::debug!("Generating mnemonic seed phrase");
         // Poll the RPC until it accepts connections. The app needs a moment to

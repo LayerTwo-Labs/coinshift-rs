@@ -11,7 +11,7 @@ anyhow = { workspace = true }
 bitcoin = { workspace = true, features = ["serde"] }
 dirs = "6.0.0"
 hex = "0.4.3"
-clap = { version = "4.5.60", features = ["derive"] }
+clap = { version = "4.5.60", features = ["derive", "env"] }
 http = { workspace = true }
 jsonrpsee = { workspace = true, features = ["http-client"] }
 serde_json = { workspace = true }

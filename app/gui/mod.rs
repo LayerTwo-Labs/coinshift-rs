@@ -9,7 +9,7 @@ use crate::{
     app::{self, App},
     cli::Config,
     line_buffer::LineBuffer,
-    rpc_server,
+    rpc_auth, rpc_server,
     util::PromiseStream,
 };
 
@@ -259,7 +259,11 @@ impl EguiApp {
         cc.egui_ctx.set_fonts(FONT_DEFINITIONS.clone());
         let bottom_panel = BottomPanel::new(app.clone());
         let coins = Coins::new(app.as_ref());
-        let console_logs = ConsoleLogs::new(logs_capture, rpc_addr);
+        let console_logs = ConsoleLogs::new(
+            logs_capture,
+            rpc_addr,
+            rpc_auth::cookie_path(&config.datadir),
+        );
         let l1_config = L1Config::new(&cc.egui_ctx);
         let height = app
             .as_ref()
@@ -327,6 +331,9 @@ impl eframe::App for EguiApp {
                                 Ok(app) => {
                                     let app_for_rpc = app.clone();
                                     let rpc_addr = self.config.rpc_addr;
+                                    let rpc_cookie_path = rpc_auth::cookie_path(
+                                        &self.config.datadir,
+                                    );
                                     app.runtime.spawn(async move {
                                         tracing::info!(
                                             "starting RPC server at `{}`",
@@ -336,6 +343,7 @@ impl eframe::App for EguiApp {
                                             rpc_server::run_server(
                                                 app_for_rpc,
                                                 rpc_addr,
+                                                rpc_cookie_path,
                                             )
                                             .await
                                         {

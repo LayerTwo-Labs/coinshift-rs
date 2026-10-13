@@ -1,6 +1,9 @@
-use std::sync::{
-    Arc,
-    atomic::{self, AtomicBool},
+use std::{
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{self, AtomicBool},
+    },
 };
 
 use clap::Parser;
@@ -30,15 +33,21 @@ pub struct ConsoleLogs {
     line_buffer: LineBuffer,
     command_input: String,
     rpc_addr: url::Url,
+    rpc_cookie_path: PathBuf,
     running_command: Arc<AtomicBool>,
 }
 
 impl ConsoleLogs {
-    pub fn new(line_buffer: LineBuffer, rpc_addr: url::Url) -> Self {
+    pub fn new(
+        line_buffer: LineBuffer,
+        rpc_addr: url::Url,
+        rpc_cookie_path: PathBuf,
+    ) -> Self {
         Self {
             line_buffer,
             command_input: String::new(),
             rpc_addr,
+            rpc_cookie_path,
             running_command: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -69,6 +78,8 @@ impl ConsoleLogs {
         };
         let cli = coinshift_app_cli_lib::Cli {
             rpc_url: self.rpc_addr.clone(),
+            rpc_auth_token: None,
+            rpc_cookie_file: Some(self.rpc_cookie_path.clone()),
             timeout: None,
             command,
             verbose: false,
