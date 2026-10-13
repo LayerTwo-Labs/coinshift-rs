@@ -51,6 +51,7 @@ serde_json = { workspace = true }
 
 [dev-dependencies]
 reserve-port = "2.0.1"
+tokio = { workspace = true, features = ["io-util", "net"] }
 
 [lints]
 workspace = true
