@@ -1,2 +1,3 @@
 [toolchain]
-channel = "nightly"
+# Later nightlies panic in rustc while they check bip300301_enforcer_lib.
+channel = "nightly-2026-09-28"

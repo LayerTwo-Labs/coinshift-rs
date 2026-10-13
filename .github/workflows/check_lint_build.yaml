@@ -37,10 +37,10 @@ jobs:
         with:
           submodules: recursive
       
-      - name: Install latest nightly toolchain
+      - name: Install pinned nightly toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: nightly
+          toolchain: nightly-2026-09-28
           components: rustfmt, clippy
 
       - name: Restore Rust cache
@@ -139,10 +139,10 @@ jobs:
           path: ${{ runner.temp }}/electrs/target/release/electrs
           key: electrs-${{ env.ELECTRS_VERSION }}
 
-      - name: Install latest nightly toolchain
+      - name: Install pinned nightly toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: nightly
+          toolchain: nightly-2026-09-28
 
       - uses: actions/checkout@v7
         with:
@@ -239,10 +239,10 @@ jobs:
         with:
           submodules: recursive
       
-      - name: Install latest nightly toolchain
+      - name: Install pinned nightly toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: nightly
+          toolchain: nightly-2026-09-28
           target: ${{ matrix.name }}
 
       - name: Rust Cache
