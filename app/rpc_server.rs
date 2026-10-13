@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::{net::SocketAddr, path::PathBuf};
 
 use bitcoin::Amount;
 use coinshift::{
@@ -13,7 +13,7 @@ use coinshift::{
 use coinshift_app_rpc_api::{GetBlockTemplateResponse, RpcServer};
 use jsonrpsee::{
     core::{RpcResult, async_trait, middleware::RpcServiceBuilder},
-    server::Server,
+    server::{Server, middleware::http::HostFilterLayer},
     types::ErrorObject,
 };
 use tower_http::{
@@ -23,7 +23,7 @@ use tower_http::{
     trace::{DefaultOnFailure, DefaultOnResponse, TraceLayer},
 };
 
-use crate::app::App;
+use crate::{app::App, rpc_auth};
 
 pub struct RpcServerImpl {
     app: App,
@@ -848,11 +848,27 @@ impl MakeRequestId for RequestIdMaker {
     }
 }
 
+/// Refuses a request on a loopback address whose `Host` names another
+/// site, so a web page cannot reach the RPC through DNS rebinding.
+fn loopback_host_filter(addr: SocketAddr) -> anyhow::Result<HostFilterLayer> {
+    if !addr.ip().is_loopback() {
+        return Ok(HostFilterLayer::disable());
+    }
+    Ok(HostFilterLayer::new([
+        "localhost:*",
+        "127.0.0.1:*",
+        "[::1]:*",
+    ])?)
+}
+
 pub async fn run_server(
     app: App,
     rpc_addr: SocketAddr,
+    rpc_cookie_path: PathBuf,
 ) -> anyhow::Result<SocketAddr> {
     const REQUEST_ID_HEADER: &str = "x-request-id";
+
+    let rpc_token = rpc_auth::load_or_create_cookie(&rpc_cookie_path)?;
 
     // Ordering here matters! Order here is from official docs on request IDs tracings
     // https://docs.rs/tower-http/latest/tower_http/request_id/index.html#using-trace
@@ -892,8 +908,13 @@ pub async fn run_server(
         )))
         .into_inner();
 
-    let http_middleware = tower::ServiceBuilder::new().layer(tracer);
-    let rpc_middleware = RpcServiceBuilder::new().rpc_logger(1024);
+    let http_middleware = tower::ServiceBuilder::new()
+        .layer(tracer)
+        .layer(loopback_host_filter(rpc_addr)?)
+        .layer(rpc_auth::BearerAuthLayer::new(&rpc_token));
+    let rpc_middleware = RpcServiceBuilder::new()
+        .rpc_logger(1024)
+        .layer(rpc_auth::RequireAuthLayer::new(&rpc_cookie_path));
 
     let server = Server::builder()
         .set_http_middleware(http_middleware)
@@ -910,4 +931,63 @@ pub async fn run_server(
     tokio::spawn(handle.stopped());
 
     Ok(addr)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::SocketAddr;
+
+    use jsonrpsee::{RpcModule, server::Server};
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    use super::loopback_host_filter;
+
+    async fn post_status_line(
+        addr: SocketAddr,
+        host: &str,
+    ) -> anyhow::Result<String> {
+        let body = r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
+        let request = format!(
+            "POST / HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let mut stream = tokio::net::TcpStream::connect(addr).await?;
+        stream.write_all(request.as_bytes()).await?;
+        let mut response = String::new();
+        stream.read_to_string(&mut response).await?;
+        Ok(response.lines().next().unwrap_or_default().to_owned())
+    }
+
+    /// A page that rebinds its domain to 127.0.0.1 sends its own name in
+    /// `Host`.
+    #[tokio::test]
+    async fn loopback_rpc_refuses_a_foreign_host() -> anyhow::Result<()> {
+        let addr = SocketAddr::from(([127, 0, 0, 1], 0));
+        let server = Server::builder()
+            .set_http_middleware(
+                tower::ServiceBuilder::new().layer(loopback_host_filter(addr)?),
+            )
+            .build(addr)
+            .await?;
+        let addr = server.local_addr()?;
+        let mut module = RpcModule::new(());
+        module.register_method("ping", |_, _, _| "pong")?;
+        let handle = server.start(module);
+
+        let port = addr.port();
+        assert!(
+            post_status_line(addr, &format!("evil.example:{port}"))
+                .await?
+                .starts_with("HTTP/1.1 403")
+        );
+        for host in [format!("127.0.0.1:{port}"), format!("localhost:{port}")] {
+            assert!(
+                post_status_line(addr, &host)
+                    .await?
+                    .starts_with("HTTP/1.1 200")
+            );
+        }
+        handle.stop()?;
+        Ok(())
+    }
 }

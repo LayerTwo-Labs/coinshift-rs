@@ -253,6 +253,14 @@ pub struct Cli {
     #[arg(default_value = "http://localhost:6255", long)]
     pub rpc_url: url::Url,
 
+    /// Bearer token for guarded RPC methods. Overrides `--rpc-cookie-file`.
+    #[arg(long, env = "COINSHIFT_RPC_AUTH_TOKEN")]
+    pub rpc_auth_token: Option<String>,
+
+    /// Node RPC cookie file. Defaults to `<data dir>/coinshift/.cookie`.
+    #[arg(long)]
+    pub rpc_cookie_file: Option<PathBuf>,
+
     #[arg(long, help = "Timeout for RPC requests in seconds (default: 300)")]
     pub timeout: Option<u64>,
 
@@ -602,6 +610,28 @@ fn set_tracing_subscriber(log_level: tracing::Level) -> anyhow::Result<()> {
 }
 
 impl Cli {
+    /// A missing cookie file gives no token, so public methods still work.
+    fn rpc_auth_token(&self) -> anyhow::Result<Option<String>> {
+        if let Some(token) = &self.rpc_auth_token {
+            return Ok(Some(token.clone()));
+        }
+        let cookie_path = match &self.rpc_cookie_file {
+            Some(cookie_path) => cookie_path.clone(),
+            None => match dirs::data_dir() {
+                Some(data_dir) => data_dir.join("coinshift").join(".cookie"),
+                None => return Ok(None),
+            },
+        };
+        match std::fs::read_to_string(&cookie_path) {
+            Ok(content) => Ok(Some(content.trim().to_owned())),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(anyhow::Error::new(err).context(format!(
+                "failed to read RPC cookie file `{}`",
+                cookie_path.display()
+            ))),
+        }
+    }
+
     pub async fn run(self) -> anyhow::Result<String> {
         set_tracing_subscriber(self.log_level)?;
 
@@ -611,6 +641,19 @@ impl Cli {
 
         tracing::info!("request ID: {}", request_id);
 
+        let mut headers = HeaderMap::from_iter([(
+            http::header::HeaderName::from_static("x-request-id"),
+            http::header::HeaderValue::from_str(&request_id)?,
+        )]);
+        if let Some(token) = self.rpc_auth_token()? {
+            headers.insert(
+                http::header::AUTHORIZATION,
+                http::header::HeaderValue::from_str(&format!(
+                    "Bearer {token}"
+                ))?,
+            );
+        }
+
         let builder = HttpClientBuilder::default()
             .request_timeout(Duration::from_secs(
                 self.timeout.unwrap_or(DEFAULT_TIMEOUT),
@@ -619,10 +662,7 @@ impl Cli {
                 jsonrpsee::core::middleware::RpcServiceBuilder::new()
                     .rpc_logger(1024),
             )
-            .set_headers(HeaderMap::from_iter([(
-                http::header::HeaderName::from_static("x-request-id"),
-                http::header::HeaderValue::from_str(&request_id)?,
-            )]));
+            .set_headers(headers);
 
         let client = builder.build(self.rpc_url)?;
         let result = handle_command(&client, self.command).await?;
