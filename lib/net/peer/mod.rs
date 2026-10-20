@@ -406,6 +406,9 @@ pub struct ConnectionHandle {
     pub(in crate::net) received_msg_successfully: Arc<AtomicBool>,
     /// Representation of [`PeerConnectionStatus`]
     pub(in crate::net) status_repr: Arc<AtomicBool>,
+    /// `true` if this node dialed the peer, `false` if the peer connected
+    /// to this node
+    outbound: bool,
     /// Push messages from connection task / net task / node
     pub internal_message_tx: mpsc::UnboundedSender<InternalMessage>,
 }
@@ -421,6 +424,12 @@ impl ConnectionHandle {
     pub fn received_msg_successfully(&self) -> bool {
         self.received_msg_successfully
             .load(atomic::Ordering::SeqCst)
+    }
+
+    /// `true` if this node dialed the peer, `false` if the peer connected
+    /// to this node
+    pub fn is_outbound(&self) -> bool {
+        self.outbound
     }
 }
 
@@ -474,6 +483,7 @@ pub fn handle(
         task,
         received_msg_successfully,
         status_repr: Arc::new(AtomicBool::new(status.as_repr())),
+        outbound: false,
         internal_message_tx,
     };
     (connection_handle, info_rx)
@@ -527,6 +537,7 @@ pub fn connect(
         task,
         received_msg_successfully,
         status_repr,
+        outbound: true,
         internal_message_tx,
     };
     (connection_handle, info_rx)

@@ -6,7 +6,7 @@ use std::{
     net::SocketAddr,
     path::PathBuf,
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use fallible_iterator::{FallibleIterator, IteratorExt};
@@ -19,6 +19,7 @@ use futures::{
     stream,
 };
 use nonempty::NonEmpty;
+use rand::{RngExt as _, SeedableRng, rngs::ChaCha20Rng};
 use sneed::{DbError, EnvError, RwTxn, RwTxnError, db};
 use thiserror::Error;
 use tokio::task::{self, JoinHandle};
@@ -86,6 +87,61 @@ impl From<net::Error> for Error {
     fn from(err: net::Error) -> Self {
         Self::Net(Box::new(err))
     }
+}
+
+/// Reconnect delays for one peer address, so that a connection that keeps
+/// failing is retried less and less often instead of every 10s forever.
+#[derive(Debug, Default)]
+struct ReconnectBackoff {
+    /// Reconnects in a row that did not stay up for [`Self::STABLE`]
+    failures: u32,
+    /// When the last reconnect was scheduled to happen
+    last_dial: Option<Instant>,
+}
+
+impl ReconnectBackoff {
+    const BASE: Duration = Duration::from_secs(10);
+    const MAX: Duration = Duration::from_secs(10 * 60);
+    /// A connection that stayed up at least this long resets the backoff
+    const STABLE: Duration = Duration::from_secs(5 * 60);
+
+    /// Delay before the next reconnect: [`Self::BASE`], doubled for each
+    /// failure in a row, capped at [`Self::MAX`], plus up to 25% jitter so
+    /// that two peers do not keep retrying in step.
+    fn next_delay<R>(&mut self, now: Instant, mut rng: R) -> Duration
+    where
+        R: rand::CryptoRng,
+    {
+        if self.last_dial.is_none_or(|last_dial| {
+            now.saturating_duration_since(last_dial) >= Self::STABLE
+        }) {
+            self.failures = 0;
+        }
+        let factor = 1u32.checked_shl(self.failures).unwrap_or(u32::MAX);
+        let delay = Self::BASE.saturating_mul(factor).min(Self::MAX);
+        let jitter = rng.random_range(0f64..=0.25);
+        let delay = delay.mul_f64(1.0 + jitter);
+        self.failures = self.failures.saturating_add(1);
+        self.last_dial = Some(now + delay);
+        delay
+    }
+
+    /// [`Self::BASE`] plus up to 25% jitter, for a dial that failed before
+    /// the connection was usable (a timeout, or "already connected" from two
+    /// nodes dialing each other at once): retried promptly as before, but no
+    /// longer in step with the other node.
+    fn jittered<R>(mut rng: R) -> Duration
+    where
+        R: rand::CryptoRng,
+    {
+        Self::BASE.mul_f64(1.0 + rng.random_range(0f64..=0.25))
+    }
+}
+
+/// Backoff key: the address as dialed (host + port), so the IP addresses a
+/// domain resolves to share one backoff.
+fn backoff_key(addr: &ResolvedSeedAddress) -> (String, u16) {
+    (addr.host().to_string(), addr.port())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -541,6 +597,7 @@ struct NetTask {
     /// to reorg to the new tip, on the corresponding oneshot receiver.
     new_tip_ready_tx: UnboundedSender<NewTipReadyMessage>,
     peer_info_rx: PeerInfoRx,
+    rng: ChaCha20Rng,
 }
 
 impl NetTask {
@@ -1045,7 +1102,7 @@ impl NetTask {
         }
     }
 
-    async fn run(self) -> Result<(), Error> {
+    async fn run(mut self) -> Result<(), Error> {
         tracing::debug!("starting net task");
         #[derive(Debug)]
         enum MailboxItem {
@@ -1160,6 +1217,9 @@ impl NetTask {
             mainchain_task::Request,
             HashSet<(SocketAddr, PeerStateId)>,
         >::new();
+        // Backoff state for peers that this node dialed
+        let mut reconnect_backoff =
+            HashMap::<(String, u16), ReconnectBackoff>::new();
         while let Some(mailbox_item) = mailbox_stream.next().await {
             tracing::trace!(?mailbox_item, "received new mailbox item");
             match mailbox_item {
@@ -1320,7 +1380,6 @@ impl NetTask {
                     continue;
                 }
                 MailboxItem::PeerInfo(Some((addr, Some(peer_info)))) => {
-                    const RECONNECT_DELAY: Duration = Duration::from_secs(10);
                     tracing::trace!(%addr, ?peer_info, "mailbox item: received PeerInfo");
                     match peer_info {
                         PeerConnectionInfo::Error {
@@ -1330,19 +1389,34 @@ impl NetTask {
                                 ),
                             resolved_addr,
                         } => {
-                            // Attempt to reconnect if a valid message was
-                            // received successfully
-                            let Some(received_msg_successfully) =
+                            let Some((received_msg_successfully, outbound)) =
                                 self.ctxt.net.try_with_active_peer_connection(
                                     addr,
                                     |conn_handle| {
-                                        conn_handle.received_msg_successfully()
+                                        (
+                                            conn_handle
+                                                .received_msg_successfully(),
+                                            conn_handle.is_outbound(),
+                                        )
                                     },
                                 )
                             else {
                                 continue;
                             };
                             let () = self.ctxt.net.remove_active_peer(addr);
+                            // Leave reconnecting to the side that dialed.
+                            // The address of an inbound peer is its source
+                            // address; dialing it back collides with the
+                            // peer's own reconnect.
+                            if !outbound {
+                                tracing::debug!(
+                                    %addr,
+                                    "inbound peer timed out, not reconnecting"
+                                );
+                                continue;
+                            }
+                            // Attempt to reconnect if a valid message was
+                            // received successfully
                             let reconnect_addr = if received_msg_successfully {
                                 resolved_addr
                             } else if let (_, Some(next_addr)) =
@@ -1352,8 +1426,27 @@ impl NetTask {
                             } else {
                                 continue;
                             };
+                            // Forget peers whose last reconnect is long
+                            // past, so the map stays bounded by the peers
+                            // that are failing now
+                            let now = Instant::now();
+                            reconnect_backoff.retain(|_, backoff| {
+                                backoff.last_dial.is_some_and(|last_dial| {
+                                    now.saturating_duration_since(last_dial)
+                                        < ReconnectBackoff::STABLE
+                                })
+                            });
+                            let delay = reconnect_backoff
+                                .entry(backoff_key(&reconnect_addr))
+                                .or_default()
+                                .next_delay(now, &mut self.rng);
+                            tracing::info!(
+                                %addr,
+                                ?delay,
+                                "reconnecting to peer after backoff"
+                            );
                             reconnect_peer_spawner.spawn(async move {
-                                tokio::time::sleep(RECONNECT_DELAY).await;
+                                tokio::time::sleep(delay).await;
                                 reconnect_addr
                             });
                         }
@@ -1364,19 +1457,46 @@ impl NetTask {
                                 || err.is_connect_timeout();
                             let err = anyhow::anyhow!(err);
                             tracing::error!(%addr, err = format!("{err:#}"), "Peer connection error");
+                            // A connection that is no longer registered gives
+                            // no answer: treat it like an inbound one and
+                            // leave the reconnect to the other side.
+                            let outbound = self
+                                .ctxt
+                                .net
+                                .try_with_active_peer_connection(
+                                    addr,
+                                    |conn_handle| conn_handle.is_outbound(),
+                                )
+                                .unwrap_or(false);
                             let () = self.ctxt.net.remove_active_peer(addr);
-                            if retry_connection {
-                                reconnect_peer_spawner.spawn(async move {
-                                    tokio::time::sleep(RECONNECT_DELAY).await;
-                                    resolved_addr
-                                });
+                            // Leave reconnecting to the side that dialed (see
+                            // the heartbeat timeout above). A dial that failed
+                            // before it was usable keeps the prompt retry, with
+                            // jitter so that two nodes dialing each other at
+                            // once ("already connected") stop retrying in step.
+                            let reconnect_addr = if !outbound {
+                                None
+                            } else if retry_connection {
+                                Some(resolved_addr)
                             } else if !bad_magic
                                 && let (_, Some(next_addr)) =
                                     resolved_addr.pop_first_ip_addr()
                             {
+                                Some(next_addr)
+                            } else {
+                                None
+                            };
+                            if let Some(reconnect_addr) = reconnect_addr {
+                                let delay =
+                                    ReconnectBackoff::jittered(&mut self.rng);
+                                tracing::info!(
+                                    %addr,
+                                    ?delay,
+                                    "retrying peer dial after delay"
+                                );
                                 reconnect_peer_spawner.spawn(async move {
-                                    tokio::time::sleep(RECONNECT_DELAY).await;
-                                    next_addr
+                                    tokio::time::sleep(delay).await;
+                                    reconnect_addr
                                 });
                             }
                             // A peer on another network never becomes useful,
@@ -1565,7 +1685,7 @@ pub(super) struct NetTaskHandle {
 
 impl NetTaskHandle {
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub fn new<R>(
         runtime: &tokio::runtime::Runtime,
         env: sneed::Env<heed::WithoutTls>,
         archive: Archive,
@@ -1574,10 +1694,14 @@ impl NetTaskHandle {
         mempool: MemPool,
         net: Net,
         peer_info_rx: PeerInfoRx,
+        mut rng: R,
         state: State,
         wallet: Option<Arc<crate::wallet::Wallet>>,
         rpc_config_path: Option<PathBuf>,
-    ) -> Self {
+    ) -> Self
+    where
+        R: rand::CryptoRng,
+    {
         let ctxt = NetTaskContext {
             env,
             archive,
@@ -1601,6 +1725,7 @@ impl NetTaskHandle {
             new_tip_ready_tx: new_tip_ready_tx.clone(),
             new_tip_ready_rx,
             peer_info_rx,
+            rng: ChaCha20Rng::from_rng(&mut rng),
         };
         let task = runtime.spawn(async {
             if let Err(err) = task.run().await {
@@ -1723,6 +1848,60 @@ mod test {
     #[test]
     fn infrastructure_error_is_fatal() {
         assert!(is_fatal_reorg_error(&Error::PeerInfoRxClosed));
+    }
+}
+
+#[cfg(test)]
+mod reconnect_backoff_test {
+    use std::time::{Duration, Instant};
+
+    use rand::{SeedableRng, rngs::ChaCha20Rng};
+
+    use super::ReconnectBackoff;
+
+    // the delay doubles per failure in a row, stays within +25% jitter and is
+    // capped; a connection that stayed up for STABLE starts over at BASE
+    #[test]
+    fn delay_doubles_caps_and_resets() {
+        let mut rng = ChaCha20Rng::seed_from_u64(7);
+        let mut backoff = ReconnectBackoff::default();
+        let mut now = Instant::now();
+        let mut base = ReconnectBackoff::BASE;
+        for _ in 0..10 {
+            let delay = backoff.next_delay(now, &mut rng);
+            let want = base.min(ReconnectBackoff::MAX);
+            assert!(
+                delay >= want && delay <= want.mul_f64(1.25),
+                "{delay:?} vs {want:?}"
+            );
+            // the next failure comes right after the reconnect it scheduled
+            now += delay;
+            base = base.saturating_mul(2);
+        }
+        let delay = backoff.next_delay(
+            now + ReconnectBackoff::STABLE + Duration::from_secs(1),
+            &mut rng,
+        );
+        assert!(
+            delay <= ReconnectBackoff::BASE.mul_f64(1.25),
+            "no reset: {delay:?}"
+        );
+    }
+
+    // a failed dial is retried after BASE..=BASE+25%, never in a fixed step
+    #[test]
+    fn jittered_stays_within_a_quarter() {
+        let mut rng = ChaCha20Rng::seed_from_u64(7);
+        let delays: Vec<_> = (0..20)
+            .map(|_| ReconnectBackoff::jittered(&mut rng))
+            .collect();
+        for d in &delays {
+            assert!(
+                *d >= ReconnectBackoff::BASE
+                    && *d <= ReconnectBackoff::BASE.mul_f64(1.25)
+            );
+        }
+        assert!(delays.windows(2).any(|w| w[0] != w[1]), "no jitter");
     }
 }
 
@@ -1872,6 +2051,7 @@ mod peer_retry_test {
                 new_tip_ready_tx,
                 new_tip_ready_rx,
                 peer_info_rx,
+                rng: <rand::rngs::ChaCha20Rng as rand::SeedableRng>::seed_from_u64(0),
             };
             for tx in [&first_tx, &conflict_tx, &next_tx] {
                 peer_info_tx.unbounded_send((

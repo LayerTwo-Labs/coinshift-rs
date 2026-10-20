@@ -246,6 +246,7 @@ where
             mempool.clone(),
             net.clone(),
             peer_info_rx,
+            &mut *rng,
             state.clone(),
             wallet_clone,
             config.l1_rpc_config_path,
