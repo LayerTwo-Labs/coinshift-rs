@@ -311,7 +311,7 @@ jobs:
           echo "git_tag_name=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
 
       - name: Parse Git tag name as semver
-        uses: madhead/semver-utils@v5.0.0
+        uses: madhead/semver-utils@v5.1.1
         if: startsWith(github.ref, 'refs/tags/')
         id: parse-git-tag-name-semver
         with:
