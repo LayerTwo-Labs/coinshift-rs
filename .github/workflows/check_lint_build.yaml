@@ -102,6 +102,10 @@ jobs:
 
       - name: Build electrs
         if: steps.check-cache.outputs.cache-hit != 'true'
+        # The RocksDB 8.1 headers electrs builds use uint64_t without
+        # including <cstdint>, which newer GCC no longer pulls in for them.
+        env:
+          CXXFLAGS: -include cstdint
         run: |
           git clone --branch ${{ env.ELECTRS_VERSION }} --depth 1 https://github.com/mempool/electrs.git ${{ runner.temp }}/electrs
           pushd ${{ runner.temp }}/electrs
@@ -249,7 +253,7 @@ jobs:
         uses: Swatinem/rust-cache@v2.9.1
         with:
           cache-bin: false
-          key: ${{ matrix.name }}
+          key: ${{ matrix.name }}-${{ matrix.os }}
 
       - name: Install windows-specific deps
         run: sudo apt install mingw-w64
